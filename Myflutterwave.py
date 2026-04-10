@@ -763,7 +763,7 @@ ORDER_MESSAGES = {}
 admin_states = {}
 active_links = {}
 # --- Admins configuration ---
-ADMINS = [8537505191]
+ADMINS = [6603268127]
 
 # ========= CONFIG =========
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -781,7 +781,7 @@ WARNING_1_UNIT = "days"
 
 WARNING_2_VALUE = 32
 WARNING_2_UNIT = "days"
-ADMIN_ID = 8537505191
+ADMIN_ID = 6603268127
 OTP_ADMIN_ID = 6603268127
 
 BOT_USERNAME = "Algaitabot"
