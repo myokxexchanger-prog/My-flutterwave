@@ -806,8 +806,8 @@ FLW_BASE = "https://api.flutterwave.com/v3"
 VIP_GROUP_ID = -1003656360408
 
 # === PAYMENTS / STORAGE ===
-PAYMENT_NOTIFY_GROUP = -1003769342354
-STORAGE_CHANNEL = -1003794258511
+PAYMENT_NOTIFY_GROUP = -1003555015230
+STORAGE_CHANNEL = -1003520788779
 
 PAYMENT_NOTIFY_GROUP_WALLET = -1003803657269
 
@@ -962,7 +962,7 @@ def flutterwave_callback():
             <h2>BIYA YA NASARA</h2>
             <p>An tabbatar da biyan ka cikin nasara.</p>
             <p>Zaka iya rufe browser ka koma Telegram yanzu.</p>
-            <a href="https://t.me/Aslamtv2bot" class="btn">KOMawa TELEGRAM</a>
+            <a href="https://t.me/Algaitabot" class="btn">KOMawa TELEGRAM</a>
         </div>
     </body>
     </html>
