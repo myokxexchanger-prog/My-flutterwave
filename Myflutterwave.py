@@ -1,4 +1,6 @@
-### bot.py  (PostgreSQL SAFE – FULL FIX, nothing removed)
+
+
+## bot.py  (PostgreSQL SAFE – FULL FIX, nothing removed)
 
 import telebot
 from telebot import types
