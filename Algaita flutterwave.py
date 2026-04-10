@@ -782,8 +782,8 @@ WARNING_2_UNIT = "days"
 ADMIN_ID = 8537505191
 OTP_ADMIN_ID = 6603268127
 
-BOT_USERNAME = "Danchirinbot"
-CHANNEL = "@Danchirinps"
+BOT_USERNAME = "Algaitabot"
+CHANNEL = "@Algaitamoviestore"
 
 COUNTDOWN_SECONDS = 70
 VIP_LINK = "https://t.me/+k4O-dsySLZBlOTM0"  # saka permanent group link naka
