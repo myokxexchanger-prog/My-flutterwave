@@ -788,7 +788,7 @@ BOT_USERNAME = "Algaitabot"
 CHANNEL = "@Algaitamoviestore"
 
 COUNTDOWN_SECONDS = 70
-VIP_LINK = "https://t.me/+k4O-dsySLZBlOTM0"  # saka permanent group link naka
+VIP_LINK = "https://t.me/+sRDID76KGO1lMTc8"  # saka permanent group link naka
 # ========= DATABASE CONFIG =========
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
