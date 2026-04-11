@@ -853,7 +853,7 @@ def create_flutterwave_payment(user_id, order_id, amount, title):
         "redirect_url": FLW_REDIRECT_URL,
         "payment_options": "card,ussd,banktransfer",
         "customer": {
-            "email": f"user{user_id}@telegram.com",
+            "email": f"user{user_id}@engrservice.com",
             "name": f"User {user_id}"
         },
         "customizations": {
@@ -2678,7 +2678,117 @@ Tap below to continue👇.
     conn.close()
 
 
+import uuid
+from psycopg2.extras import RealDictCursor
 
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ng"))
+def wallet_amount_handler(c):
+
+    bot.answer_callback_query(c.id)
+
+    uid = c.from_user.id
+    name = c.from_user.first_name or "User"
+
+    try:
+        amount = int(c.data.replace("ng",""))
+    except:
+        return
+
+    conn = get_wallet_conn()
+    if not conn:
+        return
+
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+
+    # ===== CHECK PENDING WALLET ORDER =====
+    cur.execute(
+        """
+        SELECT id, amount
+        FROM wallet_deposits
+        WHERE user_id=%s
+        AND status='pending'
+        LIMIT 1
+        """,
+        (uid,)
+    )
+
+    row = cur.fetchone()
+
+    # ===== REUSE ORDER =====
+    if row:
+
+        order_id = row["id"]
+
+        if int(row["amount"]) != amount:
+
+            cur.execute(
+                """
+                UPDATE wallet_deposits
+                SET amount=%s
+                WHERE id=%s
+                """,
+                (amount, order_id)
+            )
+
+            conn.commit()
+
+    # ===== CREATE NEW ORDER =====
+    else:
+
+        order_id = str(uuid.uuid4())
+
+        cur.execute(
+            """
+            INSERT INTO wallet_deposits
+            (id, user_id, amount, type, status)
+            VALUES (%s,%s,%s,'wallet','pending')
+            """,
+            (order_id, uid, amount)
+        )
+
+        conn.commit()
+
+    cur.close()
+    conn.close()
+
+    # ===== CREATE FLUTTERWAVE LINK =====
+    pay_url = create_flutterwave_payment(
+        uid,
+        order_id,
+        amount,
+        "Wallet Top-up"
+    )
+
+    if not pay_url:
+        return
+
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton(f"💳 Top-up ₦{amount}", url=pay_url))
+    kb.add(InlineKeyboardButton("❌ Cancel", callback_data="wallet_back"))
+
+    bot.edit_message_text(
+        f"""💰 *Wallet Deposit*
+
+👤 Name: {name}
+
+💳 Amount: ₦{amount}
+
+🆔 Order ID:
+`{order_id}`
+
+Danna button da ke kasa domin biyan kudin.
+""",
+        chat_id=c.message.chat.id,
+        message_id=c.message.message_id,
+        parse_mode="Markdown",
+        reply_markup=kb
+    )
+
+    # ===== STORE MESSAGE FOR WEBHOOK DELETE =====
+    ORDER_MESSAGES[order_id] = (
+        c.message.chat.id,
+        c.message.message_id
+    )
 
 import threading  
 import time  
@@ -3466,117 +3576,7 @@ Zabi adadin da zaka deposit zuwa wallet din ka👇👇
         reply_markup=kb
     )
 
-import uuid
-from psycopg2.extras import RealDictCursor
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("ng"))
-def wallet_amount_handler(c):
-
-    bot.answer_callback_query(c.id)
-
-    uid = c.from_user.id
-    name = c.from_user.first_name or "User"
-
-    try:
-        amount = int(c.data.replace("ng",""))
-    except:
-        return
-
-    conn = get_wallet_conn()
-    if not conn:
-        return
-
-    cur = conn.cursor(cursor_factory=RealDictCursor)
-
-    # ===== CHECK PENDING WALLET ORDER =====
-    cur.execute(
-        """
-        SELECT id, amount
-        FROM wallet_deposits
-        WHERE user_id=%s
-        AND status='pending'
-        LIMIT 1
-        """,
-        (uid,)
-    )
-
-    row = cur.fetchone()
-
-    # ===== REUSE ORDER =====
-    if row:
-
-        order_id = row["id"]
-
-        if int(row["amount"]) != amount:
-
-            cur.execute(
-                """
-                UPDATE wallet_deposits
-                SET amount=%s
-                WHERE id=%s
-                """,
-                (amount, order_id)
-            )
-
-            conn.commit()
-
-    # ===== CREATE NEW ORDER =====
-    else:
-
-        order_id = str(uuid.uuid4())
-
-        cur.execute(
-            """
-            INSERT INTO wallet_deposits
-            (id, user_id, amount, type, status)
-            VALUES (%s,%s,%s,'wallet','pending')
-            """,
-            (order_id, uid, amount)
-        )
-
-        conn.commit()
-
-    cur.close()
-    conn.close()
-
-    # ===== CREATE PAYSTACK LINK =====
-    pay_url = create_paystack_payment(
-        uid,
-        order_id,
-        amount,
-        "Wallet Top-up"
-    )
-
-    if not pay_url:
-        return
-
-    kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton(f"💳 Top-up ₦{amount}", url=pay_url))
-    kb.add(InlineKeyboardButton("❌ Cancel", callback_data="wallet_back"))
-
-    bot.edit_message_text(
-        f"""💰 *Wallet Deposit*
-
-👤 Name: {name}
-
-💳 Amount: ₦{amount}
-
-🆔 Order ID:
-`{order_id}`
-
-Danna button da ke kasa domin biyan kudin.
-""",
-        chat_id=c.message.chat.id,
-        message_id=c.message.message_id,
-        parse_mode="Markdown",
-        reply_markup=kb
-    )
-
-    # ===== STORE MESSAGE FOR WEBHOOK DELETE =====
-    ORDER_MESSAGES[order_id] = (
-        c.message.chat.id,
-        c.message.message_id
-    )
 
 
 
