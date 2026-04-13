@@ -907,7 +907,7 @@ def flutterwave_callback():
     <head>
         <title>Payment Successful</title>
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <meta http-equiv="refresh" content="5;url=https://t.me/Aslamtv2bot">
+        <meta http-equiv="refresh" content="5;url=https://t.me/Algaitabot">
         <style>
             body {
                 margin: 0;
