@@ -782,6 +782,10 @@ WARNING_2_UNIT = "days"
 ADMIN_ID = 8537505191
 OTP_ADMIN_ID = 6603268127
 
+WARNING_1_VALUE = 5  # Kwanakin da za a tura gargadi na farko
+WARNING_2_VALUE = 2  # Kwanakin da za a tura gargadi na karshe
+
+
 BOT_USERNAME = "Algaitabot"
 CHANNEL = "@Algaitamoviestore"
 
