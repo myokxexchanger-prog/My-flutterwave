@@ -2221,19 +2221,15 @@ Za mu ci gaba da baka kyauta a duk lokacin da muka raba 🎬🔥
 from telebot.apihelper import ApiTelegramException
 import time
 
-EID_MESSAGE = """🌙✨ Barka da Sallah!
-
-Allah ya karɓi ibadunmu 🤲
-
-Mun gode da goyon bayan ku ❤️
-
-🎉 Ga wani albishir! A wannan Sallah ba za mu barku haka ba — dole sai mun faranta ran wasu daga cikin ku saboda yadda kuka dage da siyan fina-finai a gurinmu 🎬
-
-🎁 Kyaututtuka na kuɗi za su shiga kai tsaye wallet ɗinku 💰 Yawan siyayyarka zai ƙayyade girman kyautarka 😉
-
-— Algaita Movie Store  
-CEO: Nazifi Ibrahim  
-🤖 @CEOalgaitabot
+EID_MESSAGE = """🌙✨ *BARKA DA BABBAR SALLAH* ✨🌙
+ 
+Assalamu Alaikum dear customer 🤍
+ 
+A wannan lokaci na Babbar Sallah, muna mika godiya ta musamman gareku bisa goyon baya da yarda da kuka nuna mana ta hanyar siyan fina-finai a bot ɗinmu ba tare da fargaba ba. Allah Ya saka muku da alkhairi 🤲
+ 
+Muna yi muku fatan Sallah mai albarka, lafiya, farin ciki da tsawon rayuwa domin ganin shekarun da ke tafe. Allah Ya gafarta mana baki ɗaya, Ya karɓi ibadunmu, Ya kuma sa mu ci albarkacin wannan rana mai albarka, Ameen 🤲
+ 
+Mun gode da kasancewa tare da mu 💖 *Eid Mubarak!* 🐐🎉
 """
 
 
@@ -2277,7 +2273,7 @@ def send_eid_broadcast(msg):
 
         while True:
             try:
-                bot.send_message(user_id, EID_MESSAGE)
+                bot.send_message(user_id, EID_MESSAGE, parse_mode="Markdown")
                 return True
 
             except ApiTelegramException as e:
@@ -2326,6 +2322,7 @@ def send_eid_broadcast(msg):
 👥 Total: {len(users)}
 """
     )
+
 
 
 # ================= ADMIN SAVE SYSTEM =================
