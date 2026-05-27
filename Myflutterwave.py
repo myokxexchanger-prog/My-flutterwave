@@ -2225,7 +2225,7 @@ EID_MESSAGE = """🌙✨ *BARKA DA BABBAR SALLAH* ✨🌙
  
 Assalamu Alaikum dear customer 🤍
  
-A wannan lokaci na Babbar Sallah, muna mika godiya ta musamman gareku bisa goyon baya da yarda da kuka nuna mana ta hanyar siyan fina-finai a bot ɗinmu ba tare da fargaba ba. Allah Ya saka muku da alkhairi 🤲
+A wannan lokaci na Babbar Sallah, muna mika godiya ta musamman gareku bisa goyon baya da yarda da kuka nuna mana ta hanyar siyan fina-finai a bot ɗinmu. Allah Ya saka muku da alkhairi 🤲
  
 Muna yi muku fatan Sallah mai albarka, lafiya, farin ciki da tsawon rayuwa domin ganin shekarun da ke tafe. Allah Ya gafarta mana baki ɗaya, Ya karɓi ibadunmu, Ya kuma sa mu ci albarkacin wannan rana mai albarka, Ameen 🤲
  
