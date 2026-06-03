@@ -4554,11 +4554,11 @@ def groupitem_deeplink_handler(msg):
 
     sent = bot.send_message(
         uid,
-        f"""💳 ⚡ FLUTTERWAVE SIMPLE PAYMENT
+        f"""💳⚡FLUTTERWAVE SIMPLE PAYMENT
 ━━━━━━━━━━━━━━━━━━
 Barka {full_telegram_name}
 You want buy this movie
-⬇⬇⬇⬇⬇⬇⬇⬇⬇⬇⬇⬇⬇⬇⬇⬇⬇⬇⬇⬇⬇
+
 🎬 MOVIE NAME: {", ".join(unique_titles)}
 📦 FILMS: {item_count}
 💰 PRICE: ₦{total}
