@@ -4335,7 +4335,247 @@ Status: SUCCESS"""
     except:
         pass
 
-    # ===== RELEASE LOCK =====
+    
+
+# ========= BUYD (ITEM ONLY | DEEP LINK → DM) =========
+from psycopg2.extras import RealDictCursor
+import uuid
+import time
+import re
+
+@bot.message_handler(func=lambda m: m.text and m.text.startswith("/start groupitem_"))
+def groupitem_deeplink_handler(msg):
+    uid = msg.from_user.id
+    user_name = msg.from_user.first_name or "Customer"
+
+    # ========= PARSE ITEM IDS + GROUP KEYS =========
+    try:
+        raw = msg.text.split("groupitem_", 1)[1]
+        tokens = [x.strip() for x in re.split(r"[_,\s]+", raw) if x.strip()]
+    except Exception:
+        return
+
+    if not tokens:
+        return
+
+    # ✅ SAFE CONNECTION (Wannan yana nan daram)
+    conn = get_conn()
+    if not conn:
+        return
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+
+    item_ids = []
+
+    try:
+        for token in tokens:
+            # ==== IF ID ====
+            if token.isdigit():
+                item_ids.append(int(token))
+
+            # ==== IF GROUP KEY ====
+            else:
+                cur.execute(
+                    "SELECT id FROM items WHERE group_key=%s",
+                    (token,)
+                )
+                rows = cur.fetchall()
+                item_ids.extend([r["id"] for r in rows])
+
+    except Exception:
+        cur.close()
+        conn.close()
+        return
+
+    if not item_ids:
+        cur.close()
+        conn.close()
+        return
+
+    # ========= FETCH ITEMS =========
+    try:
+        placeholders = ",".join(["%s"] * len(item_ids))
+        cur.execute(
+            f"""
+            SELECT id, title, price, file_id, group_key
+            FROM items
+            WHERE id IN ({placeholders})
+            """,
+            tuple(item_ids)
+        )
+        items = cur.fetchall()
+    except Exception:
+        cur.close()
+        conn.close()
+        return
+
+    if not items:
+        cur.close()
+        conn.close()
+        return
+
+    # ========= FILE_ID REQUIRED =========
+    items = [i for i in items if i.get("file_id")]
+    if not items:
+        cur.close()
+        conn.close()
+        return
+
+    item_ids_clean = [i["id"] for i in items]
+
+    # ========= OWNERSHIP CHECK (Tsararren Tsaro) =========
+    try:
+        cur.execute(
+            f"""
+            SELECT 1 FROM user_movies
+            WHERE user_id=%s
+              AND item_id IN ({",".join(["%s"] * len(item_ids_clean))})
+            LIMIT 1
+            """,
+            (uid, *item_ids_clean)
+        )
+        owned = cur.fetchone()
+    except Exception:
+        cur.close()
+        conn.close()
+        return
+
+    if owned:
+        kb = InlineKeyboardMarkup()
+        kb.add(InlineKeyboardButton("📽 PAID MOVIES", callback_data="my_movies"))
+        bot.send_message(
+            uid,
+            "✅ You have already purchased this movie.\n\n"
+            "Please check your *Paid Movies* to download it again.",
+            parse_mode="Markdown",
+            reply_markup=kb
+        )
+        cur.close()
+        conn.close()
+        return
+
+    # ========= GROUP_KEY PRICING =========
+    groups = {}
+    for i in items:
+        key = i["group_key"] or f"single_{i['id']}"
+        if key not in groups:
+            groups[key] = int(i["price"] or 0)
+
+    total = sum(groups.values())
+    item_count = len(items)
+
+    if total <= 0:
+        cur.close()
+        conn.close()
+        return
+
+    # ========= REUSE / CREATE ORDER (Maimaita ko Kera Order) =========
+    try:
+        cur.execute(
+            f"""
+            SELECT o.id
+            FROM orders o
+            JOIN order_items oi ON oi.order_id = o.id
+            WHERE o.user_id=%s
+              AND o.paid=0
+              AND oi.item_id IN ({",".join(["%s"] * len(item_ids_clean))})
+            GROUP BY o.id
+            HAVING COUNT(DISTINCT oi.item_id)=%s
+            LIMIT 1
+            """,
+            (uid, *item_ids_clean, len(item_ids_clean))
+        )
+        row = cur.fetchone()
+    except Exception:
+        cur.close()
+        conn.close()
+        return
+
+    if row:
+        order_id = row["id"]
+    else:
+        order_id = str(uuid.uuid4())
+        try:
+            cur.execute(
+                "INSERT INTO orders (id, user_id, amount, paid, type) VALUES (%s,%s,%s,0,'film')",
+                (order_id, uid, total)
+            )
+            for i in items:
+                cur.execute(
+                    """
+                    INSERT INTO order_items (order_id, item_id, file_id, price)
+                    VALUES (%s,%s,%s,%s)
+                    """,
+                    (order_id, i["id"], i["file_id"], int(i["price"] or 0))
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            cur.close()
+            conn.close()
+            return
+
+    # ========= FLUTTERWAVE GATEWAY =========
+    display_title = f"{item_count} film(s)"
+    pay_url = create_flutterwave_payment(uid, order_id, total, display_title)
+
+    if not pay_url:
+        bot.send_message(uid, "❌ Sorry, payment gateway is down. Try again later.")
+        cur.close()
+        conn.close()
+        return
+
+    # ========= FIXED TITLE DISPLAY =========
+    unique_titles = [
+        i["title"]
+        for _, i in {
+            (i["group_key"] or f"single_{i['id']}"): i
+            for i in items
+        }.items()
+    ]
+
+    # ========= GET FULL TELEGRAM NAME =========
+    t_first = msg.from_user.first_name or ""
+    t_last = msg.from_user.last_name or ""
+    full_telegram_name = f"{t_first} {t_last}".strip() or "Customer"
+
+    # ========= FINAL UI (SABON FORMAT DA KA ZABA) =========
+    kb = InlineKeyboardMarkup()
+
+    # (PAY NOW) 💳 (TOP ROW)
+    kb.add(
+        InlineKeyboardButton("(PAY NOW) 💳", url=pay_url)
+    )
+
+    # SECOND ROW
+    kb.row(
+        InlineKeyboardButton("💰 Pay with Wallet", callback_data=f"walletpay:{order_id}"),
+        InlineKeyboardButton("❌ Soke Order", callback_data=f"cancel:{order_id}")
+    )
+
+    sent = bot.send_message(
+        uid,
+        f"""💳 ⚡ FLUTTERWAVE SIMPLE PAYMENT
+━━━━━━━━━━━━━━━━━━
+Barka {full_telegram_name}
+You want buy this movie
+⬇⬇⬇⬇⬇⬇⬇⬇⬇⬇⬇⬇⬇⬇⬇⬇⬇⬇⬇⬇⬇
+🎬 MOVIE NAME: {", ".join(unique_titles)}
+📦 FILMS: {item_count}
+💰 PRICE: ₦{total}
+━━━━━━━━━━━━━━━━━━
+ Danna Pay now da ke ƙasa don biya nan take.
+Click pay now👇""",
+        reply_markup=kb
+    )
+
+    # ===== STORE MESSAGE FOR AUTO DELETE AFTER PAYMENT =====
+    ORDER_MESSAGES[order_id] = (sent.chat.id, sent.message_id)
+
+    cur.close()
+    conn.close()
+
+
+# ===== RELEASE LOCK =====
     TRANSFER_LOCK.discard(uid)    
 #=========================================================
 @bot.message_handler(
