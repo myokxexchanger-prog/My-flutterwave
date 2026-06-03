@@ -4549,7 +4549,7 @@ def groupitem_deeplink_handler(msg):
     # SECOND ROW
     kb.row(
         InlineKeyboardButton("💰 Pay with Wallet", callback_data=f"walletpay:{order_id}"),
-        InlineKeyboardButton("❌ Soke Order", callback_data=f"cancel:{order_id}")
+        InlineKeyboardButton("❌ Cancel order", callback_data=f"cancel:{order_id}")
     )
 
     sent = bot.send_message(
@@ -4558,10 +4558,10 @@ def groupitem_deeplink_handler(msg):
 ━━━━━━━━━━━━━━━━━━
 Barka {full_telegram_name}
 You want buy this movie
+🎬{", ".join(unique_titles)}
 
-🎬 MOVIE NAME: {", ".join(unique_titles)}
 📦 FILMS: {item_count}
-💰 PRICE: ₦{total}
+💵PRICE: ₦{total}
 ━━━━━━━━━━━━━━━━━━
  Danna Pay now da ke ƙasa don biya nan take.
 Click pay now👇""",
