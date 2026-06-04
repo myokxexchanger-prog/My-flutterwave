@@ -7126,7 +7126,6 @@ def receive_hausa_titles(m):
     bot.send_message(uid, "📸 Yanzu turo poster + caption (suna da farashi)")
 
 
-
 # ===============================
 # FINALIZE (UPLOAD + DB)
 # ===============================
@@ -7152,11 +7151,27 @@ def series_finalize(m):
     if sess.get("stage") != "meta":
         return
 
-    # ================= PARSE CAPTION =================
+    # ================= PARSE CAPTION (SABON TSARI MAI SAKIN LAYI) =================
     try:
-        title, raw_price = data.strip().rsplit("\n", 1)
+        # Muna raba rubutun layi-layi duka
+        lines = [line.strip() for line in data.strip().split("\n") if line.strip()]
+        
+        if len(lines) < 2:
+            bot.send_message(uid, "❌ Caption bai dace ba. Akallla ana bukatar Suna da Farashi.")
+            return
+            
+        # Layin farko shi ne ainihin sunan fim na DB
+        title = lines[0]
+        
+        # Layin karshe shi ne farashi
+        raw_price = lines[-1]
         has_comma = "," in raw_price
         price = int(raw_price.replace(",", "").strip())
+        
+        # Wannan sashen yana dauko dukkan rubutun tsakiya (idan akwai) don post din Channel kawai
+        # Ba zai taba shiga Database ba!
+        channel_display_title = "\n".join(lines[:-1]) # Yana hada layin farko da na tsakiya duka
+        
     except:
         bot.send_message(uid, "❌ Caption bai dace ba.")
         return
@@ -7174,7 +7189,7 @@ def series_finalize(m):
     try:
         cur.execute(
             "INSERT INTO series (title, price, poster_file_id) VALUES (%s,%s,%s) RETURNING id",
-            (title, price, poster_file_id)
+            (title, price, poster_file_id) # Iya asalin title (layin farko) yake shiga DB
         )
         series_id = cur.fetchone()[0]
     except:
@@ -7251,7 +7266,7 @@ def series_finalize(m):
                 RETURNING id
                 """,
                 (
-                    title,
+                    title, # Iya asalin title (layin farko) yake shiga DB anan ma
                     price,
                     doc.file_id,
                     f["file_name"],
@@ -7301,10 +7316,11 @@ def series_finalize(m):
             )
         )
 
+        # Anan an yi amfani da `channel_display_title` wanda ke dauke da dukkan jerin layukan da ka rubuta
         bot.send_photo(
             CHANNEL,
             poster_file_id,
-            caption=f"🎬 <b>{title}</b>\n💵Price: ₦{display_price}",
+            caption=f"🎬 <b>{channel_display_title}</b>\n💵Price: ₦{display_price}",
             parse_mode="HTML",
             reply_markup=kb
         )
@@ -7321,6 +7337,7 @@ def series_finalize(m):
 
     bot.send_message(uid, "🎉 Series an adana dukka lafiya.")
     del series_sessions[uid]
+
 
 
 @bot.callback_query_handler(func=lambda c: True)
