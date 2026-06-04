@@ -7126,6 +7126,7 @@ def receive_hausa_titles(m):
     bot.send_message(uid, "📸 Yanzu turo poster + caption (suna da farashi)")
 
 
+
 # ===============================
 # FINALIZE (UPLOAD + DB)
 # ===============================
@@ -7151,26 +7152,37 @@ def series_finalize(m):
     if sess.get("stage") != "meta":
         return
 
-    # ================= PARSE CAPTION (SABON TSARI MAI SAKIN LAYI) =================
+    # ================= PARSE CAPTION (SABON GYARA MAI RIQE DA SARARI) =================
     try:
-        # Muna raba rubutun layi-layi duka
-        lines = [line.strip() for line in data.strip().split("\n") if line.strip()]
+        # 1. Muna raba rubutun layi-layi duka ba tare da mun goge layukan da babu komai ba
+        all_lines = data.strip().split("\n")
         
-        if len(lines) < 2:
+        # 2. Muna tace ainihin layukan da ke da rubutu don gano title da price kawai
+        valid_lines = [l.strip() for l in all_lines if l.strip()]
+        
+        if len(valid_lines) < 2:
             bot.send_message(uid, "❌ Caption bai dace ba. Akallla ana bukatar Suna da Farashi.")
             return
             
-        # Layin farko shi ne ainihin sunan fim na DB
-        title = lines[0]
+        # Layin farko na ainihin rubutun shi ne title na DB
+        title = valid_lines[0]
         
-        # Layin karshe shi ne farashi
-        raw_price = lines[-1]
+        # Layin karshe na ainihin rubutun shi ne farashi
+        raw_price = valid_lines[-1]
         has_comma = "," in raw_price
         price = int(raw_price.replace(",", "").strip())
         
-        # Wannan sashen yana dauko dukkan rubutun tsakiya (idan akwai) don post din Channel kawai
-        # Ba zai taba shiga Database ba!
-        channel_display_title = "\n".join(lines[:-1]) # Yana hada layin farko da na tsakiya duka
+        # 3. Anan za mu nemo daidai inda farashin yake a jikin asalin rubutunka na caption
+        # Domin mu yanke shi, sannan mu bar duk sauran rubutun da sararin da ka bayar lafiya lau
+        last_line_raw = all_lines[-1]
+        
+        if last_line_raw.strip() == raw_price:
+            # Idan farashin shi ne layi na karshe da gaske, muna cire shi kawai
+            channel_display_title = "\n".join(all_lines[:-1]).strip()
+        else:
+            # Idan akwai empty lines a karkashin farashi, muna gano inda farashin yake mu yanke
+            idx = data.strip().rfind(raw_price)
+            channel_display_title = data.strip()[:idx].strip()
         
     except:
         bot.send_message(uid, "❌ Caption bai dace ba.")
@@ -7316,7 +7328,7 @@ def series_finalize(m):
             )
         )
 
-        # Anan an yi amfani da `channel_display_title` wanda ke dauke da dukkan jerin layukan da ka rubuta
+        # Anan za a fitar da dukkan tsarin rubutun tare da empty lines (sarari) da ka bari
         bot.send_photo(
             CHANNEL,
             poster_file_id,
