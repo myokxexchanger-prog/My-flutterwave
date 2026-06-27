@@ -9001,26 +9001,52 @@ def sales_report_scheduler():
         time.sleep(20)
 
 
-
-# ▶️ START BACKGROUND REPORT THREAD
 # ================== START SERVER ==================
 if __name__ == "__main__":
 
     if BOT_MODE == "webhook":
         print("🌐 Running in WEBHOOK mode")
 
-        try:
-            bot.remove_webhook()
-            bot.set_webhook(f"{WEBHOOK_URL}/telegram")
-            print("✅ Telegram webhook set successfully")
-        except Exception as e:
-            print("❌ Failed to set webhook:", e)
+        import time
+
+        MAX_RETRIES = 5
+        RETRY_DELAY = 10  # seconds
+
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                print(f"🔄 Setting webhook... (Attempt {attempt}/{MAX_RETRIES})")
+
+                bot.remove_webhook()
+
+                time.sleep(2)
+
+                bot.set_webhook(
+                    url=f"{WEBHOOK_URL}/telegram",
+                    drop_pending_updates=False
+                )
+
+                print("✅ Telegram webhook set successfully")
+                break
+
+            except Exception as e:
+                print(f"❌ Webhook attempt {attempt} failed: {e}")
+
+                if attempt < MAX_RETRIES:
+                    print(f"⏳ Retrying in {RETRY_DELAY} seconds...")
+                    time.sleep(RETRY_DELAY)
+                else:
+                    print("⚠️ Could not set webhook after all retries.")
+                    print("⚠️ Flask will continue running.")
 
         port = int(os.environ.get("PORT", 10000))
         print(f"🚀 Flask server running on port {port}")
-        app.run(host="0.0.0.0", port=port)
+
+        app.run(
+            host="0.0.0.0",
+            port=port,
+            threaded=True
+        )
 
     else:
-        # fallback (local testing only)
         print("🤖 Running in POLLING mode")
         bot.infinity_polling(skip_pending=True)
