@@ -1774,7 +1774,120 @@ def deliver_items(call):
 
     send_feedback_prompt(user_id, order_id)
 
+from telebot import types
 
+# Dictionary don riƙe fayil da state na lokaci kalilan (Memory)
+user_matsala_state = {}
+
+# 1. COMMAND: /matsala
+@bot.message_handler(commands=['matsala'])
+def handle_matsala_command(message):
+    chat_id = message.chat.id
+    # Shiga yanayin jiran fayil
+    user_matsala_state[chat_id] = {'step': 'WAITING_FOR_FILE'}
+    
+    bot.send_message(
+        chat_id,
+        "⚠️ **Akin Gyara Matsala (Customer Support)**\n\n"
+        "Turo fayil ko video ɗin da kake so a turawa abokin ciniki...",
+        parse_mode="Markdown"
+    )
+
+# 2. HANDLER: Karɓar File ko Video
+@bot.message_handler(
+    content_types=['document', 'video'], 
+    func=lambda msg: user_matsala_state.get(msg.chat.id, {}).get('step') == 'WAITING_FOR_FILE'
+)
+def handle_matsala_file(message):
+    chat_id = message.chat.id
+    
+    # Gano nau'in fayil ɗin (Video ko Document)
+    if message.content_type == 'video':
+        file_id = message.video.file_id
+        file_type = 'video'
+    else:
+        file_id = message.document.file_id
+        file_type = 'document'
+        
+    # Adana fayil a memory sannan a sauya tsari zuwa jiran ID da Jawabi
+    user_matsala_state[chat_id] = {
+        'step': 'WAITING_FOR_TEXT',
+        'file_id': file_id,
+        'file_type': file_type
+    }
+    
+    bot.send_message(
+        chat_id,
+        "✅ **An adana fayil ɗin sarai!**\n\n"
+        "Yanzu turo **User ID** na abokin ciniki tare da **Jawabin da kake so a tura masa** a saƙo guda ɗaya.\n\n"
+        "📝 **Misali:**\n"
+        "`8537505191`\n"
+        "`Matsala aka samu kayi hakuri customer video da aka baka yana da matsala amma ga wannan shine mai kyau din`",
+        parse_mode="Markdown"
+    )
+
+# 3. HANDLER: Karɓar ID + Jawabi da tura saƙo zuwa ga Customer
+@bot.message_handler(
+    func=lambda msg: user_matsala_state.get(msg.chat.id, {}).get('step') == 'WAITING_FOR_TEXT'
+)
+def handle_matsala_send(message):
+    chat_id = message.chat.id
+    raw_text = message.text.strip()
+    
+    # Raba saƙon gida biyu (Rabuwar farko tsakanin ID da Rubutu)
+    parts = raw_text.split(maxsplit=1)
+    
+    # Tabbatar da an tura ID da kuma Rubutu
+    if len(parts) < 2:
+        bot.send_message(
+            chat_id,
+            "❌ **Kuskure!** Tsarin saƙon bai cika ba.\n"
+            "Tabbatar ka saka **User ID** a farko, sannan ka bada tazara (space) ka rubuta jawabin kyakkyawa.",
+            parse_mode="Markdown"
+        )
+        return
+        
+    target_user_id = parts[0].strip()
+    custom_message = parts[1].strip()
+    
+    # Tabbatar ID ɗin lambobi ne kawai
+    if not target_user_id.isdigit():
+        bot.send_message(
+            chat_id,
+            "❌ **User ID ❌ na ƙarya ne!** Tabbatar cewa lambobi ne kawai a farko.",
+            parse_mode="Markdown"
+        )
+        return
+        
+    saved_data = user_matsala_state.get(chat_id)
+    
+    try:
+        # A) Turawa abokin ciniki saƙon rubutu
+        bot.send_message(int(target_user_id), custom_message)
+        
+        # B) Turawa abokin ciniki fayil ko video
+        if saved_data['file_type'] == 'video':
+            bot.send_video(int(target_user_id), saved_data['file_id'])
+        else:
+            bot.send_document(int(target_user_id), saved_data['file_id'])
+            
+        # Tabbatarwa Admin
+        bot.send_message(
+            chat_id,
+            f"🚀 **Nasara!** An tura saƙon rubutu da fayil ɗin zuwa ga User ID: `{target_user_id}`.",
+            parse_mode="Markdown"
+        )
+        
+        # Share bayanan memory bayan an gama
+        del user_matsala_state[chat_id]
+
+    except Exception as e:
+        bot.send_message(
+            chat_id,
+            f"❌ **Kuskure gurin tura saƙon:** {str(e)}\n"
+            f"Tabbatar cewa User ID `{target_user_id}` yana amfani da bot ɗin nan kuma bai yi blocking ɗinsa ba.",
+            parse_mode="Markdown"
+        )
 # ========= BUYD (ITEM ONLY | DEEP LINK → DM) =========
 from psycopg2.extras import RealDictCursor
 import uuid
