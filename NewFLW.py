@@ -7370,7 +7370,7 @@ def receive_hausa_titles(m):
 
 
 # ===============================
-# FINALIZE (UPLOAD + DB) WITH PREFIX CASHBACK (C200)
+# FINALIZE (UPLOAD + DB) WITH PREFIX CASHBACK (C200) - PRESERVE SPACES
 # ===============================
 from telebot.apihelper import ApiTelegramException
 import time
@@ -7394,34 +7394,52 @@ def series_finalize(m):
     if not sess or sess.get("stage") != "meta":
         return
 
-    # ================= PARSE CAPTION (SUPPORT FOR 'C200' FORMAT) =================
+    # ================= PARSE CAPTION (SUPPORT FOR 'C200' + PRESERVE SPACES) =================
     try:
-        lines = [line.strip() for line in data.strip().split("\n") if line.strip()]
+        # 1. Muna raba rubutun layi-layi duka ba tare da mun goge layukan da babu komai ba (spaces)
+        all_lines = data.strip().split("\n")
 
-        if len(lines) < 2:
+        # 2. Muna tace ainihin layukan da ke da rubutu kawai don gano values
+        valid_lines = [l.strip() for l in all_lines if l.strip()]
+
+        if len(valid_lines) < 2:
             bot.send_message(uid, "❌ Caption bai dace ba. Akalla ana bukatar Suna da Farashi.")
             return
 
-        title = lines[0]
+        # Layin farko na ainihin rubutun shi ne title na DB
+        title = valid_lines[0]
         cashback_amount = 0
 
-        # Duba idan layin ƙarshe yana fara da 'c' ko 'C' sannan sauran sassan lambobi ne (misali C200 ko c200)
-        last_line = lines[-1]
-        if last_line.lower().startswith('c') and last_line[1:].replace(",", "").isdigit():
-            cashback_amount = int(last_line[1:].replace(",", ""))
-            lines.pop()  # Cire layin cashback ɗin gaba ɗaya daga jeri
+        # Duba idan layin ƙarshe na rubutu yana ɗauke da Cashback (misali C200 ko c200)
+        last_valid = valid_lines[-1]
+        if last_valid.lower().startswith('c') and last_valid[1:].replace(",", "").isdigit():
+            cashback_amount = int(last_valid[1:].replace(",", ""))
+            valid_lines.pop()  # Cire cashback daga jerin valid lines
 
-        if len(lines) < 2:
+            # Cire layin cashback ɗin daga asalin all_lines ɗinmu
+            for i in range(len(all_lines) - 1, -1, -1):
+                if all_lines[i].strip() == last_valid:
+                    all_lines.pop(i)
+                    break
+
+        if len(valid_lines) < 2:
             bot.send_message(uid, "❌ Caption bai dace ba. Muna buƙatar Suna da Farashi.")
             return
 
-        # Yanzu layin ƙarshe da ya rage shi ne Farashi (Price)
-        raw_price = lines[-1]
+        # Yanzu layin ƙarshe na rubutu shi ne Farashi (Price)
+        raw_price = valid_lines[-1]
         has_comma = "," in raw_price
         price = int(raw_price.replace(",", "").strip())
 
-        # channel_display_title zai haɗa daga sunan fim har zuwa kafin farashi (ba tare da Cashback ba)
-        channel_display_title = "\n".join(lines[:-1])
+        # 3. Gano inda farashin yake a asalin all_lines don yanke shi da barin duk sararin da ke sama
+        last_line_raw = all_lines[-1] if all_lines else ""
+
+        if last_line_raw.strip() == raw_price:
+            channel_display_title = "\n".join(all_lines[:-1]).strip()
+        else:
+            joined_text = "\n".join(all_lines)
+            idx = joined_text.rfind(raw_price)
+            channel_display_title = joined_text[:idx].strip()
 
     except Exception as e:
         bot.send_message(uid, f"❌ Caption bai dace ba: {e}")
@@ -7570,7 +7588,7 @@ def series_finalize(m):
             )
         )
 
-        # Turawa zuwa channel ba tare da layin C200 ba
+        # Turawa zuwa channel tare da adana asalin spaces ɗin
         bot.send_photo(
             CHANNEL,
             poster_file_id,
@@ -7591,6 +7609,7 @@ def series_finalize(m):
 
     bot.send_message(uid, f"🎉 Series an adana dukka lafiya.\n💰 Cashback: ₦{cashback_amount}")
     del series_sessions[uid]
+
 
 @bot.callback_query_handler(func=lambda c: True)
 def handle_callback(c):
