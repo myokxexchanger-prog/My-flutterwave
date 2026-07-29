@@ -7369,9 +7369,8 @@ def receive_hausa_titles(m):
     bot.send_message(uid, "📸 Yanzu turo poster + caption (suna da farashi)")
 
 
-
 # ===============================
-# FINALIZE (UPLOAD + DB)
+# FINALIZE (UPLOAD + DB) WITH PREFIX CASHBACK (C200)
 # ===============================
 from telebot.apihelper import ApiTelegramException
 import time
@@ -7392,43 +7391,40 @@ def series_finalize(m):
 
     sess = series_sessions.get(uid)
 
-    if sess.get("stage") != "meta":
+    if not sess or sess.get("stage") != "meta":
         return
 
-    # ================= PARSE CAPTION (SABON GYARA MAI RIQE DA SARARI) =================
+    # ================= PARSE CAPTION (SUPPORT FOR 'C200' FORMAT) =================
     try:
-        # 1. Muna raba rubutun layi-layi duka ba tare da mun goge layukan da babu komai ba
-        all_lines = data.strip().split("\n")
-        
-        # 2. Muna tace ainihin layukan da ke da rubutu don gano title da price kawai
-        valid_lines = [l.strip() for l in all_lines if l.strip()]
-        
-        if len(valid_lines) < 2:
-            bot.send_message(uid, "❌ Caption bai dace ba. Akallla ana bukatar Suna da Farashi.")
+        lines = [line.strip() for line in data.strip().split("\n") if line.strip()]
+
+        if len(lines) < 2:
+            bot.send_message(uid, "❌ Caption bai dace ba. Akalla ana bukatar Suna da Farashi.")
             return
-            
-        # Layin farko na ainihin rubutun shi ne title na DB
-        title = valid_lines[0]
-        
-        # Layin karshe na ainihin rubutun shi ne farashi
-        raw_price = valid_lines[-1]
+
+        title = lines[0]
+        cashback_amount = 0
+
+        # Duba idan layin ƙarshe yana fara da 'c' ko 'C' sannan sauran sassan lambobi ne (misali C200 ko c200)
+        last_line = lines[-1]
+        if last_line.lower().startswith('c') and last_line[1:].replace(",", "").isdigit():
+            cashback_amount = int(last_line[1:].replace(",", ""))
+            lines.pop()  # Cire layin cashback ɗin gaba ɗaya daga jeri
+
+        if len(lines) < 2:
+            bot.send_message(uid, "❌ Caption bai dace ba. Muna buƙatar Suna da Farashi.")
+            return
+
+        # Yanzu layin ƙarshe da ya rage shi ne Farashi (Price)
+        raw_price = lines[-1]
         has_comma = "," in raw_price
         price = int(raw_price.replace(",", "").strip())
-        
-        # 3. Anan za mu nemo daidai inda farashin yake a jikin asalin rubutunka na caption
-        # Domin mu yanke shi, sannan mu bar duk sauran rubutun da sararin da ka bayar lafiya lau
-        last_line_raw = all_lines[-1]
-        
-        if last_line_raw.strip() == raw_price:
-            # Idan farashin shi ne layi na karshe da gaske, muna cire shi kawai
-            channel_display_title = "\n".join(all_lines[:-1]).strip()
-        else:
-            # Idan akwai empty lines a karkashin farashi, muna gano inda farashin yake mu yanke
-            idx = data.strip().rfind(raw_price)
-            channel_display_title = data.strip()[:idx].strip()
-        
-    except:
-        bot.send_message(uid, "❌ Caption bai dace ba.")
+
+        # channel_display_title zai haɗa daga sunan fim har zuwa kafin farashi (ba tare da Cashback ba)
+        channel_display_title = "\n".join(lines[:-1])
+
+    except Exception as e:
+        bot.send_message(uid, f"❌ Caption bai dace ba: {e}")
         return
 
     poster_file_id = m.photo[-1].file_id
@@ -7444,10 +7440,11 @@ def series_finalize(m):
     try:
         cur.execute(
             "INSERT INTO series (title, price, poster_file_id) VALUES (%s,%s,%s) RETURNING id",
-            (title, price, poster_file_id) # Iya asalin title (layin farko) yake shiga DB
+            (title, price, poster_file_id)
         )
         series_id = cur.fetchone()[0]
-    except:
+    except Exception as e:
+        print(f"Series DB Error: {e}")
         return
 
     item_ids = []
@@ -7516,25 +7513,27 @@ def series_finalize(m):
                 """
                 INSERT INTO items
                 (title, price, file_id, file_name, group_key,
-                 created_at, channel_msg_id, channel_username)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                 created_at, channel_msg_id, channel_username, cashback_amount)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 RETURNING id
                 """,
                 (
-                    title, # Iya asalin title (layin farko) yake shiga DB anan ma
+                    title,
                     price,
                     doc.file_id,
                     f["file_name"],
                     group_key,
                     created_at,
                     msg.message_id,
-                    STORAGE_CHANNEL
+                    STORAGE_CHANNEL,
+                    cashback_amount  # Adana cashback na fim ɗin
                 )
             )
             new_id = cur.fetchone()[0]
             item_ids.append(new_id)
 
-        except:
+        except Exception as e:
+            print(f"Item Save Error: {e}")
             continue
 
         # Update progress cleanly
@@ -7571,7 +7570,7 @@ def series_finalize(m):
             )
         )
 
-        # Anan za a fitar da dukkan tsarin rubutun tare da empty lines (sarari) da ka bari
+        # Turawa zuwa channel ba tare da layin C200 ba
         bot.send_photo(
             CHANNEL,
             poster_file_id,
@@ -7580,8 +7579,8 @@ def series_finalize(m):
             reply_markup=kb
         )
 
-    except:
-        pass
+    except Exception as e:
+        print(f"Public Post Error: {e}")
 
     # Final message
     bot.edit_message_text(
@@ -7590,10 +7589,8 @@ def series_finalize(m):
         progress_msg.message_id
     )
 
-    bot.send_message(uid, "🎉 Series an adana dukka lafiya.")
+    bot.send_message(uid, f"🎉 Series an adana dukka lafiya.\n💰 Cashback: ₦{cashback_amount}")
     del series_sessions[uid]
-
-
 
 @bot.callback_query_handler(func=lambda c: True)
 def handle_callback(c):
