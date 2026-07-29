@@ -1124,21 +1124,21 @@ def flutterwave_webhook():
         signature = request.headers.get("verif-hash")
         if not signature: 
             return "Missing signature", 401
-        
+
         if signature != FLW_WEBHOOK_SECRET: 
             return "Invalid signature", 401
 
         # ================= PAYLOAD =================
         payload = request.json or {}
         data = payload.get("data", {})
-        
+
         status = (data.get("status") or "").lower()
         if status not in ("successful", "success"): 
             return "Ignored", 200
 
         raw_reference = data.get("tx_ref")
         currency = data.get("currency")
-        
+
         # Safe amount conversion
         try:
             paid_amount = int(float(data.get("amount", 0)))
@@ -1392,7 +1392,7 @@ Use the button below to open your wallet.
         if order_type == "film":
             cur.execute(
                 """
-                SELECT i.title, i.group_key
+                SELECT i.title, i.group_key, COALESCE(i.cashback_amount, 0)
                 FROM order_items oi
                 JOIN items i ON i.id = oi.item_id
                 WHERE oi.order_id=%s
@@ -1407,10 +1407,15 @@ Use the button below to open your wallet.
                 return "Empty order", 200
 
             groups = {}
-            for title, group_key in rows:
+            total_custom_cashback = 0
+
+            for title, group_key, cb_amount in rows:
                 key = group_key or f"single_{title}"
                 if key not in groups:
                     groups[key] = {"title": title, "count": 0}
+                    # Idan fims na cikin group guda ne, sau daya kawai za a dauki custom cashback din don gudun ninki (doubling)
+                    if cb_amount and cb_amount > 0:
+                        total_custom_cashback += cb_amount
                 groups[key]["count"] += 1
 
             lines = []
@@ -1422,10 +1427,17 @@ Use the button below to open your wallet.
 
             titles_text = ", ".join(lines) if lines else "N/A"
 
-            # ================= CASHBACK REWARD =================
-            cashback = (paid_amount // 200) * CASHBACK
-            if cashback > 200:
-                cashback = 200
+            # ================= CASHBACK REWARD LOGIC =================
+            if total_custom_cashback > 0:
+                # 1. SABON TSARI: IDAN FIM(IN) YANA DA CUSTOM CASHBACK A DATABASE
+                cashback = total_custom_cashback
+                is_custom_cashback = True
+            else:
+                # 2. TSOHON TSARI: IDAN FIM(IN) BASHI DA CUSTOM CASHBACK
+                cashback = (paid_amount // 200) * CASHBACK
+                if cashback > 200:
+                    cashback = 200
+                is_custom_cashback = False
 
             if cashback > 0:
                 wallet_conn = get_wallet_conn()
@@ -1452,21 +1464,46 @@ Use the button below to open your wallet.
                     (user_id, cashback, order_id)
                 )
 
+                # Samun jimillar balance dake cikin wallet din user bayan an kara cashback
+                wallet_cur.execute(
+                    """
+                    SELECT balance FROM wallet_balance WHERE user_id=%s
+                    """,
+                    (user_id,)
+                )
+                user_balance_row = wallet_cur.fetchone()
+                user_wallet_balance = user_balance_row[0] if user_balance_row else 0
+
                 wallet_conn.commit()
                 wallet_cur.close()
                 wallet_conn.close()
 
-                bot.send_message(
-                    user_id,
-                    f"""🎁 Cashback Reward🎉
+                # Tura Saƙon Cashback Dangane da Nau'in Tsari (Custom ko Tsohon Tsari)
+                if is_custom_cashback:
+                    bot.send_message(
+                        user_id,
+                        f"""Congratulations wannan fim ka siya mun ji dadin siyayyarka😍
+Kuma kai tsaye mun baka <b>₦{cashback}</b> CASHBACK zuwa wallet din ka.
+
+Ka duba wallet din ka, zaka iya siyayya dashi a nan gaba.
+
+Wallet Balance: ₦{user_wallet_balance}""",
+                        parse_mode="HTML"
+                    )
+                else:
+                    bot.send_message(
+                        user_id,
+                        f"""🎁 Cashback Reward🎉
 
 Wallet ID: <code>{user_id}</code>
 
 You received ₦{cashback} cashback,  
 
-Ka duba wallet din ka, zaka iya siyayya dashi a nan gaba.""" ,
-                    parse_mode="HTML"
-                )
+Ka duba wallet din ka, zaka iya siyayya dashi a nan gaba.
+
+Wallet Balance: ₦{user_wallet_balance}""",
+                        parse_mode="HTML"
+                    )
 
             conn.commit()
             cur.close()
@@ -1676,8 +1713,8 @@ Na gode da kasancewa tare da mu 🙏""",
 💰 <b>Amount:</b> ₦{paid_amount}
 ⏰ <b>Time:</b> {now}
 """,
-                    parse_mode="HTML"
-                )
+                        parse_mode="HTML"
+                    )
 
             return "OK", 200
 
@@ -1686,7 +1723,6 @@ Na gode da kasancewa tare da mu 🙏""",
     except Exception as e:
         print(f"Webhook Error: {e}")
         return "Internal Error", 500
-
 
 
 
