@@ -58,6 +58,96 @@ wallet_conn.autocommit = True
 wallet_cur = wallet_conn.cursor()
 
 
+#=== Farko
+
+def ensure_items_table():
+    conn = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+
+        # 1️⃣ Create table if not exists
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS items (
+                id SERIAL PRIMARY KEY,
+                title TEXT,
+                price INTEGER,
+                file_id TEXT,
+                file_name TEXT,
+                group_key TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                channel_msg_id INTEGER,
+                channel_username TEXT
+            )
+        """)
+        conn.commit()
+
+        # 2️⃣ Add column directly safely
+        cur.execute("""
+            ALTER TABLE items 
+            ADD COLUMN IF NOT EXISTS cashback_amount INTEGER DEFAULT 0;
+        """)
+        conn.commit()
+
+        cur.close()
+        print("✅ items table structure verified successfully")
+
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        print("❌ ITEMS TABLE MIGRATION ERROR:", e)
+    finally:
+        if conn:
+            conn.close()
+
+# Gudanar da shi gilma lokacin da script ta tashi
+try:
+    ensure_items_table()
+except Exception as e:
+    print("Migration Execution Error:", e)
+
+#=== Karshe
+# =============================
+# ENSURE ITEMS TABLE
+# =============================
+def ensure_items_table():
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+
+        # 1️⃣ Create table if not exists
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS items (
+                id SERIAL PRIMARY KEY,
+                title TEXT,
+                price INTEGER,
+                file_id TEXT,
+                file_name TEXT,
+                group_key TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                channel_msg_id INTEGER,
+                channel_username TEXT
+            )
+        """)
+
+        # 2️⃣ Ensure cashback_amount column exists
+        cur.execute("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_name='items'
+            AND column_name='cashback_amount'
+        """)
+        if not cur.fetchone():
+            cur.execute("ALTER TABLE items ADD COLUMN cashback_amount INTEGER DEFAULT 0")
+
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        print("✅ items table structure verified successfully")
+
+    except Exception as e:
+        print("❌ ITEMS TABLE MIGRATION ERROR:", e)
+
 # AUTO DB FIX: ENSURE invite_link COLUMN
 # ==========================================
 def ensure_vip_invite_column():
@@ -474,9 +564,12 @@ CREATE TABLE IF NOT EXISTS items (
     group_key TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     channel_msg_id INTEGER,
-    channel_username TEXT
+    channel_username TEXT,
+    cashback_amount INTEGER DEFAULT 0
 )
 """)
+
+
 
 # -------- ORDERS --------
 cur.execute("""
