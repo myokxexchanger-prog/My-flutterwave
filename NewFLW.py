@@ -875,8 +875,7 @@ WARNING_2_VALUE = 32
 WARNING_2_UNIT = "days"
 ADMIN_ID = 6603268127
 OTP_ADMIN_ID = 6603268127
-WARNING_GROUP_ID = -1001234567890
-
+WARNING_GROUP_ID = -1004366360478
 # ==========================================
 WARNING_1_VALUE = 4  # Misali: Kwana 5 kafin expire
 WARNING_2_VALUE = 2  # Misali: Kwana 2 kafin expire
