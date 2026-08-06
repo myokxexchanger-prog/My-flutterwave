@@ -875,10 +875,10 @@ WARNING_2_VALUE = 32
 WARNING_2_UNIT = "days"
 ADMIN_ID = 6603268127
 OTP_ADMIN_ID = 6603268127
-
+WARNING_GROUP_ID = -1001234567890
 
 # ==========================================
-WARNING_1_VALUE = 5  # Misali: Kwana 5 kafin expire
+WARNING_1_VALUE = 4  # Misali: Kwana 5 kafin expire
 WARNING_2_VALUE = 2  # Misali: Kwana 2 kafin expire
 
 
@@ -3037,23 +3037,73 @@ Danna button da ke kasa domin biyan kudin.
         c.message.message_id
     )
 
+
 import threading  
 import time  
+from datetime import datetime, timedelta  
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton  
-  
-  
+
+
+
+# ==========================================
+# HELPER: SAMO FULL NAME DAGA TELEGRAM
+# ==========================================
+def get_user_fullname(user_id):
+    """
+    Yana samo cikakken sunan mutum (Full Name) kai tsaye daga Telegram API
+    """
+    try:
+        chat = bot.get_chat(user_id)
+        first_name = chat.first_name or ""
+        last_name = chat.last_name or ""
+        full_name = f"{first_name} {last_name}".strip()
+        return full_name if full_name else "Mutumina"
+    except Exception:
+        return "Mutumina"
+
+
+# ==========================================
+# HELPER: TURA RAHOTO ZUWA WARNING GROUP
+# ==========================================
+def log_to_warning_group(user_id, action_type):
+    """
+    Sana'ar samo sunan mutum da username kai tsaye daga Telegram 
+    sannan a tura rahoto zuwa WARNING_GROUP
+    """
+    try:
+        chat = bot.get_chat(user_id)
+        first_name = chat.first_name or ""
+        last_name = chat.last_name or ""
+        full_name = f"{first_name} {last_name}".strip() or "User"
+        username = f"@{chat.username}" if chat.username else "Babu Username"
+
+        log_text = (
+            f"🔔 <b>VAULT / WARNING LOG</b>\n\n"
+            f"👤 <b>User Full Name:</b> {full_name}\n"
+            f"🏷 <b>Usertag:</b> {username}\n"
+            f"🆔 <b>User ID:</b> <code>{user_id}</code>\n"
+            f"📌 <b>Aiki:</b> {action_type}\n"
+            f"⏰ <b>Lokaci:</b> {datetime.now().strftime('%Y-%m-%d %I:%M %p')} (WAT)"
+        )
+        bot.send_message(WARNING_GROUP_ID, log_text, parse_mode="HTML")
+    except Exception:
+        pass
+
+
+# ==========================================
+# VIP JOIN CALLBACK HANDLER
+# ==========================================
 @bot.callback_query_handler(func=lambda c: c.data.startswith("vipnow:"))  
 def handle_vip_join(c):  
-  
     try:  
         bot.answer_callback_query(c.id)  
-  
+
         user_id = c.from_user.id  
         first_name = c.from_user.first_name or "User"  
-  
+
         sent_chat_id = c.message.chat.id  
         sent_message_id = c.message.message_id  
-  
+
         # ===== JOIN BUTTON =====  
         kb = InlineKeyboardMarkup()  
         kb.add(  
@@ -3062,7 +3112,7 @@ def handle_vip_join(c):
                 url=VIP_LINK  
             )  
         )  
-  
+
         bot.edit_message_text(  
             f"🔐 <b>VIP ACCESS READY</b>\n\n"  
             f"⏳ Link expires in {COUNTDOWN_SECONDS} seconds...\n\n"  
@@ -3072,37 +3122,30 @@ def handle_vip_join(c):
             parse_mode="HTML",  
             reply_markup=kb  
         )  
-  
+
         # ===== COUNTDOWN =====  
         def countdown():  
-  
             for remaining in range(COUNTDOWN_SECONDS - 1, -1, -1):  
-  
                 time.sleep(1)  
-  
+
                 # ===== CHECK DIRECT FROM GROUP =====  
                 try:  
                     member = bot.get_chat_member(VIP_GROUP_ID, user_id)  
-  
+
                     if member.status in ["member", "administrator", "creator"]:  
-  
                         # ================= DB UPDATE ACTIVE =================  
                         try:  
-                            from datetime import datetime, timedelta  
-  
                             conn = get_conn()  
                             cur = conn.cursor()  
-  
-                            # ✅ JOIN DATE = lokacin da ya shiga  
+
                             join_date = datetime.now()  
-  
-                            # ✅ EXPIRE = lissafi daga saman file  
+
                             if VIP_DURATION_UNIT == "minutes":  
                                 expire_at = join_date + timedelta(minutes=VIP_DURATION_VALUE)  
                             else:  
                                 expire_at = join_date + timedelta(days=VIP_DURATION_VALUE)  
-  
-                            # ===== CHECK IF USER EXISTS =====
+
+                            # CHECK IF USER EXISTS
                             cur.execute(
                                 "SELECT 1 FROM vip_members WHERE user_id=%s",
                                 (user_id,)
@@ -3135,11 +3178,9 @@ def handle_vip_join(c):
                             conn.commit()  
                             cur.close()  
                             conn.close()  
-  
-                        except:  
+                        except Exception:  
                             pass  
-                        # =====================================================  
-  
+
                         # EDIT MESSAGE TO USER JOINED  
                         try:  
                             bot.edit_message_text(  
@@ -3147,9 +3188,9 @@ def handle_vip_join(c):
                                 chat_id=sent_chat_id,  
                                 message_id=sent_message_id  
                             )  
-                        except:  
+                        except Exception:  
                             pass  
-  
+
                         # SEND THANK YOU PRIVATE MESSAGE  
                         try:  
                             bot.send_message(  
@@ -3157,13 +3198,13 @@ def handle_vip_join(c):
                                 "🙏 Thank you our valued customer.\n"  
                                 "Fatanmu zakaji dadin wannan group."  
                             )  
-                        except:  
+                        except Exception:  
                             pass  
-  
+
                         return  
-                except:  
+                except Exception:  
                     pass  
-  
+
                 # ===== UPDATE COUNTDOWN =====  
                 try:  
                     bot.edit_message_text(  
@@ -3175,9 +3216,9 @@ def handle_vip_join(c):
                         parse_mode="HTML",  
                         reply_markup=kb  
                     )  
-                except:  
+                except Exception:  
                     pass  
-  
+
             # ===== TIME OUT =====  
             admin_kb = InlineKeyboardMarkup()  
             admin_kb.add(  
@@ -3186,7 +3227,7 @@ def handle_vip_join(c):
                     url=f"https://t.me/{ADMIN_USERNAME}"  
                 )  
             )  
-  
+
             try:  
                 bot.edit_message_text(  
                     "❌ TIME OUT\n\n"  
@@ -3195,9 +3236,9 @@ def handle_vip_join(c):
                     message_id=sent_message_id,  
                     reply_markup=admin_kb  
                 )  
-            except:  
+            except Exception:  
                 pass  
-  
+
             try:  
                 time.sleep(2)  
                 bot.send_message(  
@@ -3205,198 +3246,158 @@ def handle_vip_join(c):
                     "An turama maka link amma link din har yayi expire\n"  
                     "baka shiga ba don haka tintini admin."  
                 )  
-            except:  
+            except Exception:  
                 pass  
-  
+
         threading.Thread(target=countdown).start()  
-  
-    except:  
+
+    except Exception:  
         pass  
-  
-import threading  
-import time  
-from datetime import datetime  
-  
-def vip_expiry_checker():  
-  
-    while True:  
-        try:  
-            conn = get_conn()  
-            cur = conn.cursor()  
-  
-            cur.execute(  
-                """  
-                SELECT user_id  
-                FROM vip_members  
-                WHERE status='active'  
-                AND expire_at IS NOT NULL  
-                AND expire_at <= NOW()  
-                """  
-            )  
-  
-            expired_users = cur.fetchall()  
-  
-            for row in expired_users:  
-                user_id = row[0]  
-  
-                # ===== REMOVE FROM GROUP (NOT PERMANENT BAN) =====  
-                try:  
-                    bot.ban_chat_member(VIP_GROUP_ID, user_id)  
-                    bot.unban_chat_member(VIP_GROUP_ID, user_id)  
-                except:  
-                    pass  
-  
-                # ===== UPDATE STATUS =====  
-                try:  
-                    cur.execute(  
-                        """  
-                        UPDATE vip_members  
-                        SET status='expired'  
-                        WHERE user_id=%s  
-                        """,  
-                        (user_id,)  
-                    )  
-                    conn.commit()  
-  
-                    # ===== WARNING 3 CALL =====  
-                    send_expired_message(user_id)  
-  
-                except:  
-                    pass  
-  
-            cur.close()  
-            conn.close()  
-  
-        except:  
-            pass  
-  
-        time.sleep(43200)  # check every 60 seconds  
-  
-  
-threading.Thread(target=vip_expiry_checker, daemon=True).start()
 
 
 # ==========================================
-# VIP WARNING SYSTEM (SMART VERSION)
+# SAKON HAKURI DA CIRE MUTUM (EXPIRED MESSAGE)
 # ==========================================
+def send_expired_message(user_id):
+    try:
+        full_name = get_user_fullname(user_id)
+        kb = InlineKeyboardMarkup()
+        kb.add(InlineKeyboardButton("💳 SABUNTA YANZU", callback_data="subvip"))
 
-import threading
-import time
-from datetime import datetime, timedelta
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+        msg_text = (
+            f"<b>MALAM {full_name}</b> 😔\n\n"
+            f"Ina mai tayaka bakin ciki na rashin samun damar sabunta rejistarka na <b>ALGAITA VIP GROUP</b> 🎬\n"
+            f"Don haka naga an cire ka a group din ❌\n\n"
+            f"Amma har yanzu kana da damar sake komawa idan kana bukata 🔄\n\n"
+            f"Saka biya ta hanyar taba nan 👇👇👇👇👇👇"
+        )
+        bot.send_message(user_id, msg_text, parse_mode="HTML", reply_markup=kb)
+    except Exception:
+        pass
 
-def vip_warning_system():
+
+# ==========================================
+# EXPIRY & WARNING ENGINE (OPTIMIZED FOR NEON DB)
+# Runs 2 times a day (Every 12 hours)
+# ==========================================
+def vip_cron_engine():
+    """
+    Injin da ke duba Expiry da Warnings sau 2 a rana.
+    """
     while True:
         try:
             conn = get_conn()
             cur = conn.cursor()
             now = datetime.now()
 
-            # Muna dauko user_id, expire_at da flags
+            # -------------------------------------------------------------
+            # 1. DUBI MASU EXPIRE (EXPIRED CHECKER)
+            # -------------------------------------------------------------
+            cur.execute("""
+                SELECT user_id FROM vip_members
+                WHERE status='active' AND expire_at IS NOT NULL AND expire_at <= NOW()
+            """)
+            expired_users = cur.fetchall()
+
+            for row in expired_users:
+                u_id = row[0]
+                try:
+                    bot.ban_chat_member(VIP_GROUP_ID, u_id)
+                    bot.unban_chat_member(VIP_GROUP_ID, u_id)
+                except Exception:
+                    pass
+
+                cur.execute("UPDATE vip_members SET status='expired' WHERE user_id=%s", (u_id,))
+                conn.commit()
+
+                # Tura sakon cirewa ga user
+                send_expired_message(u_id)
+                # Tura rahoto zuwa Warning Group
+                log_to_warning_group(u_id, "❌ An Cire Daga VIP (Subscription Expired)")
+
+            # -------------------------------------------------------------
+            # 2. DUBI MASU BUKATAR WARNING 1 & WARNING 2
+            # -------------------------------------------------------------
             cur.execute("""
                 SELECT user_id, expire_at, warn1_sent, warn2_sent
                 FROM vip_members
-                WHERE status='active'
-                AND expire_at IS NOT NULL
+                WHERE status='active' AND expire_at IS NOT NULL AND expire_at > NOW()
             """)
+            active_users = cur.fetchall()
 
-            users = cur.fetchall()
+            warn1_target_time = now + timedelta(days=WARNING_1_VALUE)
+            warn2_target_time = now + timedelta(days=WARNING_2_VALUE)
 
-            for user_id, expire_at, warn1_sent, warn2_sent in users:
-                
-                remaining = expire_at - now
-                remaining_days = remaining.days
+            for user_id, expire_at, warn1_sent, warn2_sent in active_users:
+                full_name = get_user_fullname(user_id)
 
-                # =================================
-                # WARNING 1 (GARGADI NA FARKO)
-                # =================================
-                # Zai duba idan kwanaki sun yi daidai da WARNING_1_VALUE
-                if remaining_days == WARNING_1_VALUE and not warn1_sent:
+                # Lissafin kwanakin da suka rage a DB
+                diff = expire_at - now
+                remaining_days = max(1, diff.days)
+
+                # ---------------------------------------------------------
+                # SAKO NA FARKHO (WARNING 1)
+                # ---------------------------------------------------------
+                if expire_at <= warn1_target_time and not warn1_sent:
                     try:
                         kb = InlineKeyboardMarkup()
-                        kb.add(InlineKeyboardButton("💳REPAY NOW", callback_data="subvip"))
-
-                        bot.send_message(
-                            user_id,
-                            f"⏳ TUNATARWA ZANYI MAKA\n\n"
-                            f"Subscription ɗinka (ALGAITA VIP) zai kare nan da {WARNING_1_VALUE} kwana.\n\n"
-                            f"Muna matuƙar godiya da kasancewarka tare da mu ❤️\n"
-                            f"Da fatan za ka sabunta kafin lokacin ya ƙare domin cigaba da more VIP group.",
-                            reply_markup=kb
+                        kb.add(InlineKeyboardButton("💳 SABUNTA YANZU", callback_data="subvip"))
+                        
+                        warn1_msg = (
+                            f"<b>BARKA DA WANNAN LOKACI MALAM {full_name}</b> 🌟\n\n"
+                            f"Nasan kana jin dadin samun fina finan india a VIP group din <b>ALGAITA VIP GROUP</b> 🎬🍿\n\n"
+                            f"<b>Kwanakin Group:</b> 30 Days 📅\n\n"
+                            f"Yakamata ka sabunta nan kusa don cigaba da samun fina finai 🎬🤝✅\n"
+                            f"Taba nan don sabuntawa 👇👇👇👇👇👇"
                         )
-
-                        # Update database domin hana double sending
+                        
+                        bot.send_message(user_id, warn1_msg, parse_mode="HTML", reply_markup=kb)
+                        
                         cur.execute("UPDATE vip_members SET warn1_sent=TRUE WHERE user_id=%s", (user_id,))
                         conn.commit()
-                    except:
+
+                        # Tura rahoto zuwa Warning Group
+                        log_to_warning_group(user_id, f"⚠️ Gargadi Na 1 (Saura Kwana {remaining_days})")
+                    except Exception:
                         pass
 
-                # =================================
-                # WARNING 2 (GARGADI NA KARSHE)
-                # =================================
-                # Zai duba idan kwanaki sun yi daidai da WARNING_2_VALUE
-                elif remaining_days == WARNING_2_VALUE and not warn2_sent:
+                # ---------------------------------------------------------
+                # SAKO NA BIYU (WARNING 2)
+                # ---------------------------------------------------------
+                elif expire_at <= warn2_target_time and not warn2_sent:
                     try:
                         kb = InlineKeyboardMarkup()
-                        kb.add(InlineKeyboardButton("💳REPAY NOW", callback_data="subvip"))
-
-                        bot.send_message(
-                            user_id,
-                            f"⚠NAZO NA SANAR DAKAI\n\n"
-                            f"Subscription ɗinka (ALGAITA VIP) zai kare nan da {WARNING_2_VALUE} kwana.\n\n"
-                            f"Idan ba ka sabunta ba kafin lokacin ya cika, za a cire ka daga VIP group.\n"
-                            f"Da fatan za ka sabunta yanzu domin kada a cire ka.",
-                            reply_markup=kb
+                        kb.add(InlineKeyboardButton("💳 SABUNTA YANZU", callback_data="subvip"))
+                        
+                        warn2_msg = (
+                            f"<b>MALAM {full_name}</b> ⚠️\n\n"
+                            f"Har yanzu baka sabunta Register dinka ta VIP din <b>ALGAITA VIP GROUP</b> ba ⏳\n\n"
+                            f"<b>Saura kwana:</b> {remaining_days} 📅\n"
+                            f"Za'a cire ka a group din idan baka sabunta ba ❌\n\n"
+                            f"Taba nan don sabuntawa 👇👇👇👇👇👇"
                         )
-
-                        # Update database
+                        
+                        bot.send_message(user_id, warn2_msg, parse_mode="HTML", reply_markup=kb)
+                        
                         cur.execute("UPDATE vip_members SET warn2_sent=TRUE WHERE user_id=%s", (user_id,))
                         conn.commit()
-                    except:
+
+                        # Tura rahoto zuwa Warning Group
+                        log_to_warning_group(user_id, f"⚠️ Gargadi Na 2 (Saura Kwana {remaining_days})")
+                    except Exception:
                         pass
 
             cur.close()
             conn.close()
 
-        except Exception as e:
-            # print(f"Error: {e}") # Zaka iya barin sa a kashe
+        except Exception:
             pass
 
-        # Yana duba duk bayan awa 12 domin ya kama kwanakin daidai
+        # Gudanarwa sau 2 a rana (43200 Seconds = Sa'o'i 12)
         time.sleep(43200)
 
-# Kunna system din a gefe
-threading.Thread(target=vip_warning_system, daemon=True).start()
-
-
-
-# ==========================================
-# WARNING 3 (AFTER USER REMOVAL MESSAGE)
-# SAKA WANNAN A CIKIN EXPIRY CHECKER
-# BAYAN AN CANZA status='expired'
-# ==========================================
-
-def send_expired_message(user_id):
-    try:
-        kb = InlineKeyboardMarkup()
-        kb.add(
-            InlineKeyboardButton(
-                "💳REPAY NOW",
-                callback_data="subvip"
-            )
-        )
-
-        bot.send_message(
-            user_id,
-            "❌ An Cire Ka Daga VIP\n\n"
-            "An cire ka daga VIP group saboda subscription ɗinka ya ƙare.\n\n"
-            "Idan kana son komawa domin cigaba da more manyan fina-finai sababbi da tsofaffi,\n"
-            "za ka iya sabunta biyanka yanzu.",
-            reply_markup=kb
-        )
-    except:
-        pass
-
+# Kunna tsarin a gefe (Background Thread)
+threading.Thread(target=vip_cron_engine, daemon=True).start()
 
 
 # ==========================================
