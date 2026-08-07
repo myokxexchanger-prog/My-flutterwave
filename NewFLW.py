@@ -1901,6 +1901,165 @@ def deliver_items(call):
 
     send_feedback_prompt(user_id, order_id)
 
+
+# ==========================================
+# 5. FINALIZE UPDATE (SANYA A STORAGE & UPDATE DB) - WITH FULL DEBUGGING
+# ==========================================
+@bot.message_handler(
+    func=lambda m: m.from_user.id in updater_sessions 
+    and updater_sessions[m.from_user.id].get("stage") == "awaiting_new_files"
+    and m.text.strip().lower() == "yes"
+)
+def process_final_film_update(m):
+    uid = m.from_user.id
+    sess = updater_sessions.get(uid)
+
+    if not sess:
+        bot.send_message(ADMIN_ID, f"⚠️ [DEBUG] Session babu shi ga user ID: {uid}")
+        return
+
+    new_files = sess.get("files", [])
+    old_items = sess.get("old_items", [])
+
+    # DEBUG 1: Sanar da ADMIN adadin fayilolin da aka samu
+    bot.send_message(
+        ADMIN_ID, 
+        f"🔍 <b>[DEBUG START]</b>\n"
+        f"👤 User: {uid}\n"
+        f"📁 Sabbin Fayiloli (new_files): {len(new_files)}\n"
+        f"📜 Tsoffin Fayiloli (old_items): {len(old_items)}",
+        parse_mode="HTML"
+    )
+
+    if not new_files:
+        bot.send_message(uid, "❌ Baka turo kowane sabon fayil ba tukunna. Turo fayil sannan ka rubuta Yes.")
+        return
+
+    total_files = len(new_files)
+    progress_msg = bot.send_message(uid, f"⏳ Tura sabbin fina-finai zuwa Storage... (0/{total_files})")
+
+    # ================= 1. HAƊIN DATABASE =================
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        bot.send_message(ADMIN_ID, "✅ [DEBUG] An haɗa da Database lafiya.")
+    except Exception as e:
+        bot.send_message(uid, f"❌ DB Connection error: {e}")
+        bot.send_message(ADMIN_ID, f"❌ [DEBUG ERROR] DB Connection Failed: {e}")
+        return
+
+    # ================= 2. SAFE SEND DOCUMENT FUNCTION =================
+    def local_safe_send_document(chat_id, file_id, caption):
+        while True:
+            try:
+                return bot.send_document(chat_id, file_id, caption=caption)
+            except ApiTelegramException as e:
+                if e.error_code == 429:
+                    retry = int(e.result_json.get("parameters", {}).get("retry_after", 5))
+                    bot.send_message(ADMIN_ID, f"⏸ [DEBUG TELEGRAM] Rate limit 429 hit. Waiting {retry}s...")
+                    time.sleep(retry)
+                    continue
+                else:
+                    bot.send_message(ADMIN_ID, f"❌ [DEBUG TELEGRAM ERROR] send_document failed: {e}")
+                    return None
+            except Exception as e:
+                bot.send_message(ADMIN_ID, f"❌ [DEBUG UNKNOWN ERROR] send_document exception: {e}")
+                return None
+
+    updated_count = 0
+
+    # ================= 3. UPLOAD DA UPDATE LOOP =================
+    for idx, f in enumerate(new_files):
+        bot.send_message(ADMIN_ID, f"🔄 [DEBUG] Ana porsessin din fayil na {idx + 1}/{total_files}: {f.get('file_name')}")
+
+        # A. Tura fayil zuwa STORAGE_CHANNEL
+        msg = local_safe_send_document(
+            STORAGE_CHANNEL,
+            f["dm_file_id"],
+            f["file_name"]
+        )
+
+        if not msg:
+            bot.send_message(ADMIN_ID, f"⚠️ [DEBUG SKIP] Fayil na {idx + 1} kasa turawa zuwa STORAGE_CHANNEL.")
+            continue
+
+        new_doc = msg.document or msg.video
+        if not new_doc:
+            bot.send_message(ADMIN_ID, f"⚠️ [DEBUG SKIP] Fayil na {idx + 1} ba document ko video bane a storage.")
+            continue
+
+        new_file_id = new_doc.file_id
+
+        # B. Gano tsohon item_id
+        if idx < len(old_items):
+            try:
+                target_item = old_items[idx]
+                target_item_id = target_item[0]
+                old_file_id = target_item[2] if len(target_item) > 2 else "UNKNOWN"
+
+                bot.send_message(
+                    ADMIN_ID, 
+                    f"📝 [DEBUG DB UPDATE]\n"
+                    f"Item ID: {target_item_id}\n"
+                    f"Old File ID: {old_file_id}\n"
+                    f"New File ID: {new_file_id}"
+                )
+
+                # UPDATE A TABLE DIN 'items'
+                cur.execute(
+                    "UPDATE items SET file_id = %s, file_name = %s WHERE id = %s",
+                    (new_file_id, f["file_name"], target_item_id)
+                )
+
+                # UPDATE A TABLE DIN 'order_items'
+                cur.execute(
+                    "UPDATE order_items SET file_id = %s WHERE item_id = %s",
+                    (new_file_id, target_item_id)
+                )
+
+                updated_count += 1
+                bot.send_message(ADMIN_ID, f"✅ [DEBUG DB SUCCESS] Item ID {target_item_id} updated.")
+
+            except Exception as e:
+                bot.send_message(ADMIN_ID, f"❌ [DEBUG DB ERROR] Kuskure wajen execute SQL a index {idx}: {e}")
+                continue
+        else:
+            bot.send_message(ADMIN_ID, f"⚠️ [DEBUG MISMATCH] Sabbin fayiloli sun fi tsoffin fayiloli yawa a index {idx}.")
+
+        # Sabunta rahoton loading ga mai amfani
+        try:
+            bot.edit_message_text(
+                f"⏳ Ana sabuntawa a Database... ({updated_count}/{total_files})",
+                uid,
+                progress_msg.message_id
+            )
+        except Exception:
+            pass
+
+        time.sleep(1.1)
+
+    # ================= 4. COMMIT & CLOSE =================
+    try:
+        conn.commit()
+        bot.send_message(ADMIN_ID, f"💾 [DEBUG COMMIT] Transaction committed successfully. Total updated: {updated_count}")
+    except Exception as e:
+        bot.send_message(ADMIN_ID, f"❌ [DEBUG COMMIT ERROR] Kuskure wajen conn.commit(): {e}")
+
+    cur.close()
+    conn.close()
+
+    # Sanarwa ta ƙarshe ga mai amfani
+    bot.edit_message_text(
+        f"✅ An sabunta fim din a tables din mu lafiya! 🎉\n\nDuka fayiloli {updated_count} an sabunta su har a tarihin oda (order_items).",
+        uid,
+        progress_msg.message_id
+    )
+
+    # Goge session
+    del updater_sessions[uid]
+    bot.send_message(ADMIN_ID, "🏁 [DEBUG END] Process complete & session cleared.")
+
+
 from telebot import types
 
 # Dictionary don riƙe fayil da state na lokaci kalilan (Memory)
