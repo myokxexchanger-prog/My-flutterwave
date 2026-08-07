@@ -5108,6 +5108,243 @@ def handle_new_world(call):
     # Turo sabon saƙo zuwa chat
     bot.send_message(call.message.chat.id, text, reply_markup=kb)
 
+
+# Adana session din sabuntawa
+updater_sessions = {}
+
+# ==========================================
+# 1. HANDLER NA DANNA "Film Updater" BUTTON
+# ==========================================
+@bot.callback_query_handler(func=lambda call: call.data == "F_updater")
+def handle_film_updater_click(call):
+    bot.answer_callback_query(call.id)
+    uid = call.from_user.id
+    
+    # Fara session din updater
+    updater_sessions[uid] = {"stage": "awaiting_title", "files": []}
+    
+    text = "🎬 Gayamin sunan fim din da zamu sabunta:"
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id)
+
+
+# ==========================================
+# 2. KARBITAR SUNAN FIM DA BINCIKE A DATABASE
+# ==========================================
+@bot.message_handler(
+    func=lambda m: m.from_user.id in updater_sessions and updater_sessions[m.from_user.id].get("stage") == "awaiting_title"
+)
+def search_film_for_update(m):
+    uid = m.from_user.id
+    search_title = m.text.strip()
+    
+    progress_msg = bot.send_message(uid, "⏳ Loading...")
+    
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        
+        # Binciko fina-finan da suka dace da sunan
+        cur.execute(
+            "SELECT id, title, file_id, file_name FROM items WHERE LOWER(title) = LOWER(%s) ORDER BY id ASC",
+            (search_title,)
+        )
+        found_items = cur.fetchall()
+        cur.close()
+        conn.close()
+        
+        if not found_items:
+            bot.edit_message_text("❌ Abun takaici, ba a sami fim mai wannan sunan a Database ba. Seke gwadawa.", uid, progress_msg.message_id)
+            del updater_sessions[uid]
+            return
+            
+        # Adana sakamakon bincike a session
+        updater_sessions[uid]["old_items"] = found_items
+        updater_sessions[uid]["stage"] = "confirm_film"
+        
+        bot.edit_message_text("✅ Mun samo wannan fim din!", uid, progress_msg.message_id)
+        
+        # Gina Maɓallan Confimation [ Yes ] [ No ] a jere
+        kb = InlineKeyboardMarkup()
+        kb.row(
+            InlineKeyboardButton("Yes ✅", callback_data="update_confirm_yes"),
+            InlineKeyboardButton("No ❌", callback_data="update_confirm_no")
+        )
+        
+        total_found = len(found_items)
+        
+        # IDAN FINA-FINAN SUKA KAI 1 ZUWA 3 (Send Files)
+        if total_found <= 3:
+            for item in found_items:
+                f_id = item[2]
+                f_name = item[3]
+                try:
+                    bot.send_document(uid, f_id, caption=f"📄 {f_name}")
+                except Exception:
+                    pass
+            bot.send_message(uid, "Shin wannan ne fim din da kake son sabuntawa?", reply_markup=kb)
+            
+        # IDAN SERIES NE (YA WUCE GUDA 3)
+        else:
+            text_confirm = f"🎬 An samu series din fim din guda **{total_found}**.\n\nShin shi kake son sabuntawa?"
+            bot.send_message(uid, text_confirm, parse_mode="Markdown", reply_markup=kb)
+
+    except Exception as e:
+        bot.send_message(uid, f"❌ An samu kuskure wajen bincike: {e}")
+        if uid in updater_sessions:
+            del updater_sessions[uid]
+
+
+# ==========================================
+# 3. HANDLER NA MAƁALLAN YES / NO (CONFIRMATION)
+# ==========================================
+@bot.callback_query_handler(func=lambda call: call.data in ["update_confirm_yes", "update_confirm_no"])
+def handle_update_confirmation(call):
+    bot.answer_callback_query(call.id)
+    uid = call.from_user.id
+    
+    if uid not in updater_sessions:
+        bot.send_message(uid, "❌ Session ɗinka ya mutu. Saake farawa daga farko.")
+        return
+
+    if call.data == "update_confirm_no":
+        bot.send_message(uid, "❌ An fasa sabunta fim ɗin.")
+        del updater_sessions[uid]
+        return
+
+    # Idan ya danna YES:
+    updater_sessions[uid]["stage"] = "awaiting_new_files"
+    bot.send_message(
+        uid, 
+        "📥 Madalla! Turo min sabon fim / fayiloli (Video ko Document) da za a sauya dasu.\n\n"
+        "👉 Idan ka gama turo fayilolin duka, kawai ka rubuta **Yes** ka tura."
+    )
+
+
+# ==========================================
+# 4. TARA SABBIN FAYILOLI (VIDEOS / DOCUMENTS)
+# ==========================================
+@bot.message_handler(
+    content_types=["document", "video"],
+    func=lambda m: m.from_user.id in updater_sessions and updater_sessions[m.from_user.id].get("stage") == "awaiting_new_files"
+)
+def collect_new_update_files(m):
+    uid = m.from_user.id
+    doc = m.document or m.video
+    
+    if not doc:
+        return
+
+    file_name = getattr(doc, 'file_name', 'video.mp4') or 'video.mp4'
+    
+    # Ajiye fayil a session
+    updater_sessions[uid]["files"].append({
+        "dm_file_id": doc.file_id,
+        "file_name": file_name
+    })
+    
+    count = len(updater_sessions[uid]["files"])
+    bot.reply_to(m, f"📥 An karɓi fayil na {count}. Idan ka gama sai ka rubuta **Yes**.")
+
+
+# ==========================================
+# 5. FINALIZE UPDATE (SANYA A STORAGE & UPDATE DB)
+# ==========================================
+@bot.message_handler(
+    func=lambda m: m.from_user.id in updater_sessions 
+    and updater_sessions[m.from_user.id].get("stage") == "awaiting_new_files"
+    and m.text.strip().lower() == "yes"
+)
+def process_final_film_update(m):
+    uid = m.from_user.id
+    sess = updater_sessions.get(uid)
+    
+    new_files = sess.get("files", [])
+    old_items = sess.get("old_items", [])
+    
+    if not new_files:
+        bot.send_message(uid, "❌ Baka turo kowane sabon fayil ba tukunna. Turo fayil sannan ka rubuta Yes.")
+        return
+
+    total_files = len(new_files)
+    progress_msg = bot.send_message(uid, f"⏳ Tura sabbin fina-finai zuwa Storage... (0/{total_files})")
+    
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+    except Exception as e:
+        bot.send_message(uid, f"❌ DB Connection error: {e}")
+        return
+
+    updated_count = 0
+
+    for idx, f in enumerate(new_files):
+        # 1. Tura fayil zuwa STORAGE_CHANNEL
+        msg = safe_send_document(
+            STORAGE_CHANNEL,
+            f["dm_file_id"],
+            f["file_name"]
+        )
+        
+        if not msg:
+            continue
+
+        new_doc = msg.document or msg.video
+        if not new_doc:
+            continue
+
+        new_file_id = new_doc.file_id
+
+        # 2. Gano tsohon item_id da tsohon file_id da za a maƙala masa sabon
+        if idx < len(old_items):
+            target_item = old_items[idx]
+            target_item_id = target_item[0]
+            old_file_id = target_item[2]
+
+            # A. UPDATE A TABLE DIN 'items'
+            cur.execute(
+                "UPDATE items SET file_id = %s, file_name = %s WHERE id = %s",
+                (new_file_id, f["file_name"], target_item_id)
+            )
+
+            # B. UPDATE A TABLE DIN 'order_items'
+            cur.execute(
+                "UPDATE order_items SET file_id = %s WHERE item_id = %s",
+                (new_file_id, target_item_id)
+            )
+            
+            updated_count += 1
+
+        # Sabunta rahoton loading
+        try:
+            bot.edit_message_text(
+                f"⏳ Ana sabuntawa a Database... ({updated_count}/{total_files})",
+                uid,
+                progress_msg.message_id
+            )
+        except Exception:
+            pass
+
+        time.sleep(1.1)
+
+    # Aiwatar da sauye-sauyen a DB
+    try:
+        conn.commit()
+    except Exception:
+        pass
+
+    cur.close()
+    conn.close()
+
+    bot.edit_message_text(
+        f"✅ An sabunta fim din a tables din mu lafiya! 🎉\n\nDuka fayiloli {updated_count} an sabunta su har a tarihin oda (order_items).",
+        uid,
+        progress_msg.message_id
+    )
+
+    # Goge session
+    del updater_sessions[uid]
+
+
 # ======================================================
 # LANGUAGE SWITCH (EDIT ONLY)
 # ======================================================
