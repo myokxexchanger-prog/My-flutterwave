@@ -5090,6 +5090,24 @@ def howto_start_handler(m):
         return
 
 
+# ===== NEW WORLD CALLBACK HANDLER =====
+@bot.callback_query_handler(func=lambda call: call.data == "newworld")
+def handle_new_world(call):
+    # Sanar da Telegram cewa an danna button (domin cire tambarin loading)
+    bot.answer_callback_query(call.id)
+
+    # Gina maɓallan (Buttons)
+    kb = InlineKeyboardMarkup()
+    kb.row(
+        InlineKeyboardButton("Film Updater", callback_data="F_updater"),
+        InlineKeyboardButton("Repost 🔃", callback_data="Repost")
+    )
+
+    text = "Nan shine Duniyar Sabunta fina final harda Repost.🤝😊"
+
+    # Turo sabon saƙo zuwa chat
+    bot.send_message(call.message.chat.id, text, reply_markup=kb)
+
 # ======================================================
 # LANGUAGE SWITCH (EDIT ONLY)
 # ======================================================
@@ -5276,7 +5294,7 @@ def mask_name(fullname):
 def tr_user(uid, key, default=""):
     return default
 
-#farko
+# ===== farko =====
 def reply_menu(uid=None):
     kb = InlineKeyboardMarkup()
 
@@ -5331,12 +5349,14 @@ def reply_menu(uid=None):
 
     # ===== ADMIN ONLY BUTTONS =====
     if uid in ADMINS:
-        kb.add(
-            InlineKeyboardButton("🏛SERIES&MOV🌐", callback_data="groupitems")
+        kb.row(
+            InlineKeyboardButton("🏛SERIES&MOV🌐", callback_data="groupitems"),
+            InlineKeyboardButton("NEW WORLD 🌎", callback_data="newworld")
         )
 
     return kb
-# end
+# ===== end =====
+
 
 
 def user_main_menu(uid=None):
