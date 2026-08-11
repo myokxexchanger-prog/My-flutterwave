@@ -5117,7 +5117,7 @@ def handle_new_world(call):
     kb = InlineKeyboardMarkup()
     kb.row(
         InlineKeyboardButton("Film Updater", callback_data="F_updater"),
-        InlineKeyboardButton("Repost 🔃", callback_data="Repost")
+        InlineKeyboardButton("Repost 🔃", callback_data="repost")
     )
 
     text = "Nan shine Duniyar Sabunta fina final harda Repost.🤝😊"
