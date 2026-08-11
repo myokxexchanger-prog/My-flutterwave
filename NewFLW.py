@@ -7559,6 +7559,344 @@ def pay_all_unpaid(call):
             pass
 
 
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+import time
+
+# Dictionary don adana matakan Admin a Repost
+repost_sessions = {}
+
+
+# ================= 1. START REPOST CALLBACK =================
+@bot.callback_query_handler(func=lambda c: c.data == "repost")
+def start_repost_callback(call):
+    uid = call.from_user.id
+    
+    # Sanya admin a matakin neman suna
+    repost_sessions[uid] = {"stage": "awaiting_name"}
+    
+    # Tura sabon saƙo zuwa ga Admin
+    bot.send_message(
+        uid, 
+        "Oga gaya min wanne fim zamuyi Reposting?😊"
+    )
+    bot.answer_callback_query(call.id)
+
+
+# ================= 2. SEARCH MOVIE BY NAME (CASE-INSENSITIVE + SMART PREVIEW) =================
+@bot.message_handler(
+    func=lambda m: m.from_user.id in repost_sessions and repost_sessions[m.from_user.id].get("stage") == "awaiting_name",
+    content_types=["text"]
+)
+def search_repost_movie(m):
+    uid = m.from_user.id
+    # Gyara sararin farko da na karshe a sunan da admin ya rubuta
+    movie_query = m.text.strip()
+
+    conn = get_conn()
+    cur = conn.cursor()
+
+    # Bincike a table din series ba tare da damuwa da babban ko karamin baki ba (ILIKE)
+    cur.execute(
+        """
+        SELECT id, title, price, poster_file_id 
+        FROM series 
+        WHERE title ILIKE %s 
+        ORDER BY id DESC LIMIT 1
+        """,
+        (f"%{movie_query}%",)
+    )
+    series_row = cur.fetchone()
+
+    if not series_row:
+        cur.close()
+        conn.close()
+        bot.send_message(uid, f"❌ Ban samu fim mai sunan '{movie_query}' a Database ba. Dan Allah sake gwada wani sunan.")
+        return
+
+    s_id, title, price, poster_id = series_row
+
+    # Samo duk faya-fayen da ke karkashin wannan fim din daga items table
+    cur.execute(
+        "SELECT file_id, file_name, group_key FROM items WHERE title=%s",
+        (title,)
+    )
+    items_rows = cur.fetchall()
+
+    cur.close()
+    conn.close()
+
+    if not items_rows:
+        bot.send_message(uid, "❌ An samu fim a Series amma ba a sami faya-fayansa a Items table ba.")
+        return
+
+    group_key = items_rows[0][2]
+    total_files = len(items_rows)
+
+    # Adana bayanai a session
+    repost_sessions[uid] = {
+        "stage": "confirm_film",
+        "series_id": s_id,
+        "old_title": title,
+        "old_price": price,
+        "poster_file_id": poster_id,
+        "group_key": group_key
+    }
+
+    # Maɓallan Tabbatarwa
+    kb = InlineKeyboardMarkup()
+    kb.add(
+        InlineKeyboardButton("✅ Yes", callback_data="repost_confirm_yes"),
+        InlineKeyboardButton("❌ No", callback_data="repost_confirm_no")
+    )
+
+    # IDAN FINA-FINAN BASU FI 3 BA (<= 3): Turo kowani video/file zuwa ga admin
+    if total_files <= 3:
+        bot.send_message(uid, f"📦 An samu faya-faye guda ({total_files}) a karkashin <b>{title}</b>:", parse_mode="HTML")
+        
+        for file_id, file_name, _ in items_rows:
+            if file_id:
+                try:
+                    bot.send_video(uid, file_id, caption=f"📄 {file_name}")
+                except Exception:
+                    try:
+                        bot.send_document(uid, file_id, caption=f"📄 {file_name}")
+                    except Exception:
+                        pass
+            time.sleep(0.4)
+
+        caption_text = (
+            f"🎬 <b>{title}</b>\n"
+            f"💵 Price: ₦{price:,}\n"
+            f"📁 Total Files: {total_files}\n\n"
+            f"Wannan ne shine?"
+        )
+
+    # IDAN FINA-FINAN SUKA FI 3 (> 3): Turo poster kawai tare da bayyana adadinsu
+    else:
+        caption_text = (
+            f"An samu wannan fim din:\n\n"
+            f"🎬 <b>{title}</b>\n"
+            f"💵 Price: ₦{price:,}\n"
+            f"📁 <b>An samu fina-finai guda ({total_files}) a karkashinsa.</b>\n\n"
+            f"Wannan ne shine?"
+        )
+
+    # Tura Poster tare da maɓallan Yes/No
+    if poster_id:
+        bot.send_photo(uid, poster_id, caption=caption_text, parse_mode="HTML", reply_markup=kb)
+    else:
+        bot.send_message(uid, caption_text, parse_mode="HTML", reply_markup=kb)
+
+
+# ================= 3. CONFIRMATION CALLBACKS (YES / NO) =================
+@bot.callback_query_handler(func=lambda c: c.data in ["repost_confirm_yes", "repost_confirm_no"])
+def handle_repost_confirmation(call):
+    uid = call.from_user.id
+    sess = repost_sessions.get(uid)
+
+    if not sess or sess.get("stage") != "confirm_film":
+        bot.answer_callback_query(call.id, "Session expired.")
+        return
+
+    if call.data == "repost_confirm_no":
+        del repost_sessions[uid]
+        bot.edit_message_caption("❌ An soke aikin Reposting.", chat_id=uid, message_id=call.message.message_id)
+        return
+
+    # Idan Confirm = YES: Tambayi ko za a sauya suna da farashi
+    sess["stage"] = "choose_update_type"
+    
+    kb = InlineKeyboardMarkup()
+    kb.add(
+        InlineKeyboardButton("✅ Yes (Sauya Suna & Poster)", callback_data="repost_change_yes"),
+        InlineKeyboardButton("❌ No (Sauya Poster Kawai)", callback_data="repost_change_no")
+    )
+
+    bot.send_message(
+        uid,
+        "Za a chanja sabon Poster da Suna/Farashi ne?",
+        reply_markup=kb
+    )
+    bot.answer_callback_query(call.id)
+
+
+# ================= 4. UPDATE CHOICE CALLBACKS =================
+@bot.callback_query_handler(func=lambda c: c.data in ["repost_change_yes", "repost_change_no"])
+def handle_update_choice(call):
+    uid = call.from_user.id
+    sess = repost_sessions.get(uid)
+
+    if not sess or sess.get("stage") != "choose_update_type":
+        bot.answer_callback_query(call.id, "Session expired.")
+        return
+
+    if call.data == "repost_change_yes":
+        sess["stage"] = "awaiting_full_update"
+        bot.send_message(
+            uid,
+            "Aiko min da sabon Hoto tare da Caption (Suna, Farashi, da Cashback idan akwai) kamar sabon fim."
+        )
+    else:
+        sess["stage"] = "awaiting_poster_only"
+        bot.send_message(
+            uid,
+            "Aiko min da Sabon Poster (Hoto kawai) ba tare da ka rubuta Suna ko Farashi ba."
+        )
+
+    bot.answer_callback_query(call.id)
+
+
+# ================= 5. RECEIVE PHOTO & EXECUTE REPOST =================
+@bot.message_handler(
+    content_types=["photo"],
+    func=lambda m: m.from_user.id in repost_sessions and repost_sessions[m.from_user.id].get("stage") in ["awaiting_full_update", "awaiting_poster_only"]
+)
+def execute_repost_finalize(m):
+    uid = m.from_user.id
+    sess = repost_sessions.get(uid)
+    stage = sess.get("stage")
+
+    poster_file_id = m.photo[-1].file_id
+    old_title = sess["old_title"]
+    group_key = sess["group_key"]
+    series_id = sess["series_id"]
+
+    cashback_amount = 0
+
+    if stage == "awaiting_full_update":
+        # Ingantaccen parsing na caption mai tsaface sarari (whitespace handling)
+        raw_caption = m.caption or ""
+        
+        # Raba layuka kuma a goge duk wani sarari na farko ko na karshe
+        all_lines = [line.strip() for line in raw_caption.strip().split("\n")]
+        valid_lines = [l for l in all_lines if l]  # Tace komai bande layuka marasa komai
+
+        if len(valid_lines) < 2:
+            bot.send_message(uid, "❌ Caption bai dace ba. Akalla ana bukatar Suna da Farashi.")
+            return
+
+        new_title = valid_lines[0]
+        
+        # Check Cashback daga layin karshe
+        last_valid = valid_lines[-1]
+        if last_valid.lower().startswith('c') and last_valid[1:].replace(",", "").strip().isdigit():
+            cashback_amount = int(last_valid[1:].replace(",", "").strip())
+            valid_lines.pop()
+            # Cire amfani da layin cashback daga asalin all_lines
+            for i in range(len(all_lines) - 1, -1, -1):
+                if all_lines[i] == last_valid:
+                    all_lines.pop(i)
+                    break
+
+        if len(valid_lines) < 2:
+            bot.send_message(uid, "❌ Caption bai dace ba. Muna buƙatar Suna da Farashi.")
+            return
+
+        # Farashi yana kasancewa a layin karshe
+        raw_price = valid_lines[-1]
+        has_comma = "," in raw_price
+        
+        try:
+            new_price = int(raw_price.replace(",", "").strip())
+        except ValueError:
+            bot.send_message(uid, f"❌ An samu matsala gane farashi daga: '{raw_price}'. Tabbatar lambobi ne kawai.")
+            return
+
+        # Ware Suna/Bayanin fim din da za a nuna a Channel ba tare da farashi ba
+        last_line_raw = all_lines[-1] if all_lines else ""
+        if last_line_raw == raw_price:
+            channel_display_title = "\n".join(all_lines[:-1]).strip()
+        else:
+            joined_text = "\n".join(all_lines)
+            idx = joined_text.rfind(raw_price)
+            channel_display_title = joined_text[:idx].strip() if idx != -1 else joined_text.strip()
+
+    else:
+        # Awaiting poster only: Amfani da tsohon suna da farashi daga DB
+        new_title = old_title
+        new_price = sess["old_price"]
+        channel_display_title = old_title
+        has_comma = True
+
+    # ================= DATABASE UPDATES =================
+    conn = get_conn()
+    cur = conn.cursor()
+
+    try:
+        # 1. Update Series Table
+        cur.execute(
+            "UPDATE series SET title=%s, price=%s, poster_file_id=%s WHERE id=%s",
+            (new_title, new_price, poster_file_id, series_id)
+        )
+
+        # 2. Update Items Table
+        cur.execute(
+            "UPDATE items SET title=%s, price=%s, cashback_amount=%s WHERE group_key=%s",
+            (new_title, new_price, cashback_amount, group_key)
+        )
+
+        # 3. Update User Movies Table (Idan yana dauke da title column)
+        try:
+            cur.execute(
+                "UPDATE user_movies SET title=%s WHERE title=%s",
+                (new_title, old_title)
+            )
+        except Exception:
+            pass # Idan babu title column a user_movies, zai tsallake
+
+        conn.commit()
+
+    except Exception as e:
+        conn.rollback()
+        cur.close()
+        conn.close()
+        bot.send_message(uid, f"❌ An sami matsalar gyara DB: {e}")
+        return
+
+    cur.close()
+    conn.close()
+
+    # ================= PUBLIC POST TO CHANNEL =================
+    try:
+        display_price = f"{new_price:,}" if has_comma else str(new_price)
+
+        kb = InlineKeyboardMarkup()
+        kb.add(
+            InlineKeyboardButton(
+                "🛒 Add to cart",
+                callback_data=f"addcartdm:{group_key}"
+            ),
+            InlineKeyboardButton(
+                "💳 Buy now",
+                url=f"https://t.me/{BOT_USERNAME}?start=groupitem_{group_key}"
+            )
+        )
+
+        bot.send_photo(
+            CHANNEL,
+            poster_file_id,
+            caption=f"🎬 <b>{channel_display_title}</b>\n💵Price: ₦{display_price}",
+            parse_mode="HTML",
+            reply_markup=kb
+        )
+
+        # Sanar da Admin sakamakon aiki
+        bot.send_message(
+            uid,
+            f"🎉 <b>An kammala Aikin Reposting ba wata matsala!</b>\n\n"
+            f"📢 An aika post zuwa Channel.\n"
+            f"🔹 Series DB: YES\n"
+            f"🔹 Items DB: YES\n"
+            f"🔹 User Movies DB: YES",
+            parse_mode="HTML"
+        )
+
+    except Exception as e:
+        bot.send_message(uid, f"⚠️ An gyara DB amma an sami matsalar aika post zuwa Channel: {e}")
+
+    del repost_sessions[uid]
+
+
 import uuid
 from datetime import datetime
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
