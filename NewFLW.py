@@ -4596,7 +4596,6 @@ Status: SUCCESS"""
         pass
 
     
-
 # ========= BUYD (ITEM ONLY | DEEP LINK → DM) =========
 from psycopg2.extras import RealDictCursor
 import uuid
@@ -4798,18 +4797,18 @@ def groupitem_deeplink_handler(msg):
     t_last = msg.from_user.last_name or ""
     full_telegram_name = f"{t_first} {t_last}".strip() or "Customer"
 
-    # ========= FINAL UI (SABON FORMAT DA KA ZABA) =========
+    # ========= FINAL UI (WITH BUTTON COLORS) =========
     kb = InlineKeyboardMarkup()
 
-    # (PAY NOW) 💳 (TOP ROW)
+    # (PAY NOW) 💳 -> BLUE (PRIMARY)
     kb.add(
-        InlineKeyboardButton("(PAY NOW) 💳", url=pay_url)
+        InlineKeyboardButton("(PAY NOW) 💳", url=pay_url, style="primary")
     )
 
-    # SECOND ROW
+    # SECOND ROW -> WALLET (GREEN / SUCCESS) & CANCEL (RED / DANGER)
     kb.row(
-        InlineKeyboardButton("💰 Pay with Wallet", callback_data=f"walletpay:{order_id}"),
-        InlineKeyboardButton("❌ Cancel order", callback_data=f"cancel:{order_id}")
+        InlineKeyboardButton("💰 Pay with Wallet", callback_data=f"walletpay:{order_id}", style="success"),
+        InlineKeyboardButton("❌ Cancel order", callback_data=f"cancel:{order_id}", style="danger")
     )
 
     sent = bot.send_message(
@@ -4833,6 +4832,8 @@ Click pay now👇""",
 
     cur.close()
     conn.close()
+
+
 
 
 # ===== RELEASE LOCK =====
