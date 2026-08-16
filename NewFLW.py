@@ -5130,16 +5130,15 @@ def handle_new_world(call):
 import time
 from datetime import datetime
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
-from telebot.apihelper import ApiTelegramException
 
-# Adana session din sabuntawa
-updater_sessions = {}
+# Dictionary don adana matakan Admin a Repost
+repost_sessions = {}
 
 # ==========================================
-# HELPER: GOGE TSOFFIN SAKONNIN PENDING
+# HELPER: GOGE TSOFFIN SAKONNIN REPOST
 # ==========================================
-def cleanup_updater_sent_messages(uid):
-    sess = updater_sessions.get(uid)
+def cleanup_repost_sent_messages(uid):
+    sess = repost_sessions.get(uid)
     if not sess:
         return
     
@@ -5150,455 +5149,441 @@ def cleanup_updater_sent_messages(uid):
         except Exception:
             pass
     
-    # Sake share list din
+    # Tsaftace list din bayan an goge
     sess["sent_msg_ids"] = []
 
+
 # ==========================================
-# HELPER: NUNA FIM GUDA ƊAYA DAGA SAKAMAKO
+# HELPER: NUNA MATCH NA FIM (PAGINATION SHOW)
 # ==========================================
-def show_updater_match(uid):
-    sess = updater_sessions.get(uid)
+def show_repost_match(uid):
+    sess = repost_sessions.get(uid)
     if not sess or "matches" not in sess:
         return
 
-    # Fara goge tsoffin sakonnin da aka tura a shafin baya
-    cleanup_updater_sent_messages(uid)
+    # 1. Goge duk tsoffin sakonnin shafin baya
+    cleanup_repost_sent_messages(uid)
 
     idx = sess["current_index"]
     matches = sess["matches"]
     current_match = matches[idx]  # Fim/Series na yanzu
 
-    first_item = current_match[0]
-    title = first_item[1]
-    total_files = len(current_match)
+    s_id = current_match.get("series_id")
+    title = current_match.get("title")
+    price = current_match.get("price", 0)
+    poster_id = current_match.get("poster_file_id")
+    group_key = current_match.get("group_key")
+    items_rows = current_match.get("items_rows", [])
 
-    # Gina Maɓallai
+    total_files = len(items_rows)
+
+    # Gina Maɓallai (Yes, Next, No)
     kb = InlineKeyboardMarkup()
     kb.row(
-        InlineKeyboardButton("Yes ✅", callback_data="update_confirm_yes"),
-        InlineKeyboardButton("Next ➡️", callback_data="update_confirm_next")
+        InlineKeyboardButton("✅ Yes", callback_data="repost_confirm_yes"),
+        InlineKeyboardButton("Next ➡️", callback_data="repost_confirm_next")
     )
-    kb.add(InlineKeyboardButton("No ❌", callback_data="update_confirm_no"))
+    kb.add(InlineKeyboardButton("❌ No", callback_data="repost_confirm_no"))
 
-    m1 = bot.send_message(
-        uid,
-        f"🔍 **An samo Fim ({idx + 1}/{len(matches)}):**\n"
-        f"🎬 **Suna:** `{title}`\n"
-        f"📦 **Adadin Fayiloli:** {total_files}\n\n"
-        f"Shin wannan ne fim ɗin da kake son sabuntawa?",
-        parse_mode="Markdown"
-    )
-    sess["sent_msg_ids"].append(m1.message_id)
-
-    # Idan fayilolin basu fi 3 ba, turo samfurinsu
+    # IDAN FINA-FINAN BASU FI 3 BA (<= 3): Turo kowani video/file sample
     if total_files <= 3:
-        for item in current_match:
-            f_id = item[2]
-            f_name = item[3]
-            try:
-                doc_m = bot.send_document(uid, f_id, caption=f"📄 {f_name}")
-                sess["sent_msg_ids"].append(doc_m.message_id)
-            except Exception:
-                pass
+        m_head = bot.send_message(uid, f"📦 An samu faya-faye guda ({total_files}) a karkashin <b>{title}</b> ({idx + 1}/{len(matches)}):", parse_mode="HTML")
+        sess["sent_msg_ids"].append(m_head.message_id)
 
-    m2 = bot.send_message(uid, "Zaɓa ɗaya daga cikin maɓallan ƙasa 👇", reply_markup=kb)
-    sess["sent_msg_ids"].append(m2.message_id)
+        for file_id, file_name, _ in items_rows:
+            if file_id:
+                try:
+                    m_doc = bot.send_document(uid, file_id, caption=f"📄 {file_name}")
+                    sess["sent_msg_ids"].append(m_doc.message_id)
+                except Exception:
+                    pass
+            time.sleep(0.3)
+
+        caption_text = (
+            f"🎬 <b>{title}</b> ({idx + 1}/{len(matches)})\n"
+            f"💵 Price: ₦{price:,}\n"
+            f"📁 Total Files: {total_files}\n\n"
+            f"Wannan ne shine?"
+        )
+    else:
+        caption_text = (
+            f"🔍 <b>An samu sakamako ({idx + 1}/{len(matches)}):</b>\n\n"
+            f"🎬 <b>{title}</b>\n"
+            f"💵 Price: ₦{price:,}\n"
+            f"📁 <b>An samu fina-finai guda ({total_files}) a karkashinsa.</b>\n\n"
+            f"Wannan ne shine?"
+        )
+
+    # Tura Poster idan akwai, ko Message idan babu
+    if poster_id:
+        m_main = bot.send_photo(uid, poster_id, caption=caption_text, parse_mode="HTML", reply_markup=kb)
+    else:
+        m_main = bot.send_message(uid, caption_text, parse_mode="HTML", reply_markup=kb)
+
+    sess["sent_msg_ids"].append(m_main.message_id)
 
 
-# ==========================================
-# 1. HANDLER NA DANNA "Film Updater" BUTTON
-# ==========================================
-@bot.callback_query_handler(func=lambda call: call.data == "F_updater")
-def handle_film_updater_click(call):
-    bot.answer_callback_query(call.id)
+# ================= 1. START REPOST CALLBACK =================
+@bot.callback_query_handler(func=lambda c: c.data == "repost")
+def start_repost_callback(call):
     uid = call.from_user.id
 
-    updater_sessions[uid] = {
-        "stage": "awaiting_title", 
-        "files": [],
-        "sent_msg_ids": [],
-        "status_msg_id": None
+    repost_sessions[uid] = {
+        "stage": "awaiting_name",
+        "sent_msg_ids": []
     }
 
-    text = "🎬 Gayamin sunan fim din da zamu sabunta:"
-    bot.edit_message_text(text, call.message.chat.id, call.message.message_id)
+    m = bot.send_message(uid, "Oga gaya min wanne fim zamuyi Reposting?😊")
+    repost_sessions[uid]["sent_msg_ids"].append(m.message_id)
+    bot.answer_callback_query(call.id)
 
 
-# ==========================================
-# 2. KARBITAR SUNAN FIM DA BINCIKE A DATABASE
-# ==========================================
+# ================= 2. SEARCH MOVIE BY NAME (SMART MULTI-MATCH SEARCH) =================
 @bot.message_handler(
-    func=lambda m: m.from_user.id in updater_sessions and updater_sessions[m.from_user.id].get("stage") == "awaiting_title"
+    func=lambda m: m.from_user.id in repost_sessions and repost_sessions[m.from_user.id].get("stage") == "awaiting_name",
+    content_types=["text"]
 )
-def search_film_for_update(m):
+def search_repost_movie(m):
     uid = m.from_user.id
-    search_title = m.text.strip()
+    movie_query = m.text.strip()
+    sess = repost_sessions[uid]
 
-    progress_msg = bot.send_message(uid, "⏳ Loading...")
+    progress_msg = bot.send_message(uid, "⏳ Ana bincika DB...")
 
-    try:
-        conn = get_conn()
-        cur = conn.cursor()
+    conn = get_conn()
+    cur = conn.cursor()
 
-        # Binciko fina-finai masu kama da sunan (LIKE Search)
+    matches = []
+
+    # 1. Bincika duk abubuwan da suka dace a 'series' table
+    cur.execute(
+        """
+        SELECT id, title, price, poster_file_id 
+        FROM series 
+        WHERE LOWER(title) LIKE LOWER(%s) 
+        ORDER BY id DESC
+        """,
+        (f"%{movie_query}%",)
+    )
+    series_rows = cur.fetchall()
+
+    found_series_titles = set()
+
+    for s_row in series_rows:
+        s_id, title, price, poster_id = s_row
+        found_series_titles.add(title.lower())
+
         cur.execute(
-            """
-            SELECT id, title, file_id, file_name, group_key 
-            FROM items 
-            WHERE LOWER(title) LIKE LOWER(%s) 
-            ORDER BY id ASC
-            """,
-            (f"%{search_title}%",)
+            "SELECT file_id, file_name, group_key FROM items WHERE LOWER(title)=LOWER(%s)",
+            (title,)
         )
-        found_rows = cur.fetchall()
-        cur.close()
-        conn.close()
+        items_rows = cur.fetchall()
+        group_key = items_rows[0][2] if items_rows else None
 
-        if not found_rows:
-            bot.edit_message_text("❌ Abun takaici, ba a sami fim mai wannan sunan a Database ba. Sake gwadawa.", uid, progress_msg.message_id)
-            del updater_sessions[uid]
-            return
+        matches.append({
+            "series_id": s_id,
+            "title": title,
+            "price": price or 0,
+            "poster_file_id": poster_id,
+            "group_key": group_key,
+            "items_rows": items_rows
+        })
 
-        # Rarraba sakamakon zuwa Rukunai (Grouping by group_key or title)
-        grouped = {}
-        for r in found_rows:
-            g_key = r[4] if r[4] else f"single_{r[0]}"
-            if g_key not in grouped:
-                grouped[g_key] = []
-            grouped[g_key].append(r)
+    # 2. FALLBACK / EXTRA SEARCH A ITEMS TABLE
+    cur.execute(
+        """
+        SELECT file_id, file_name, group_key, title, price 
+        FROM items 
+        WHERE LOWER(title) LIKE LOWER(%s)
+        """,
+        (f"%{movie_query}%",)
+    )
+    fallback_items = cur.fetchall()
 
-        matches_list = list(grouped.values())
+    cur.close()
+    conn.close()
 
-        # Adana sakamako
-        updater_sessions[uid]["matches"] = matches_list
-        updater_sessions[uid]["current_index"] = 0
-        updater_sessions[uid]["stage"] = "confirm_film"
+    # Grouping din items
+    grouped_items = {}
+    for row in fallback_items:
+        f_id, f_name, g_key, item_title, item_price = row
+        if item_title.lower() not in found_series_titles:
+            key = g_key if g_key else f"single_{item_title}"
+            if key not in grouped_items:
+                grouped_items[key] = {
+                    "title": item_title,
+                    "price": item_price or 0,
+                    "items": []
+                }
+            grouped_items[key]["items"].append((f_id, f_name, g_key))
 
-        bot.delete_message(uid, progress_msg.message_id)
+    for g_key, data in grouped_items.items():
+        matches.append({
+            "series_id": None,
+            "title": data["title"],
+            "price": data["price"],
+            "poster_file_id": None,
+            "group_key": g_key,
+            "items_rows": data["items"]
+        })
 
-        # Nuna fim na farko
-        show_updater_match(uid)
+    bot.delete_message(uid, progress_msg.message_id)
 
-    except Exception as e:
-        bot.send_message(uid, f"❌ An samu kuskure wajen bincike: {e}")
-        if uid in updater_sessions:
-            del updater_sessions[uid]
-
-
-# ==========================================
-# 3. HANDLER NA YES / NEXT / NO (CONFIRMATION)
-# ==========================================
-@bot.callback_query_handler(func=lambda call: call.data in ["update_confirm_yes", "update_confirm_next", "update_confirm_no"])
-def handle_update_confirmation(call):
-    uid = call.from_user.id
-    sess = updater_sessions.get(uid)
-
-    if not sess or sess.get("stage") != "confirm_film":
-        bot.answer_callback_query(call.id, text="❌ Session ɗinka ya mutu. Sake farawa da Film Updater.", show_alert=True)
+    # Idan gaba daya babu shi
+    if not matches:
+        bot.send_message(uid, f"❌ Ban samu fim mai sunan '{movie_query}' a 'Series' ko 'Items' table ba. Dan Allah sake gwada wani sunan.")
+        del repost_sessions[uid]
         return
 
-    # --- IDAN AKA DANNA NO (CANCEL) ---
-    if call.data == "update_confirm_no":
+    # Adana duk sakamakon bincike a Session
+    sess["matches"] = matches
+    sess["current_index"] = 0
+    sess["stage"] = "confirm_film"
+
+    # Nuna Match na farko
+    show_repost_match(uid)
+
+
+# ================= 3. CONFIRMATION CALLBACKS (YES / NEXT / NO) =================
+@bot.callback_query_handler(func=lambda c: c.data in ["repost_confirm_yes", "repost_confirm_next", "repost_confirm_no"])
+def handle_repost_confirmation(call):
+    uid = call.from_user.id
+    sess = repost_sessions.get(uid)
+
+    if not sess or sess.get("stage") != "confirm_film":
+        bot.answer_callback_query(call.id, "Session expired.")
+        return
+
+    # --- IDAN AKA DANNA NO ---
+    if call.data == "repost_confirm_no":
         bot.answer_callback_query(call.id)
-        cleanup_updater_sent_messages(uid)
-        bot.send_message(uid, "❌ An fasa sabunta fim ɗin.")
-        del updater_sessions[uid]
+        cleanup_repost_sent_messages(uid)
+        bot.send_message(uid, "❌ An soke aikin Reposting.")
+        del repost_sessions[uid]
         return
 
     # --- IDAN AKA DANNA NEXT ➡️ ---
-    if call.data == "update_confirm_next":
+    if call.data == "repost_confirm_next":
         idx = sess["current_index"]
         total_matches = len(sess["matches"])
 
-        # Duba ko akwai sauran fim a gaba
         if idx + 1 < total_matches:
             bot.answer_callback_query(call.id)
             sess["current_index"] += 1
-            show_updater_match(uid)
+            show_repost_match(uid)
         else:
-            # POP ALERT SCREEN idan babu fim a gaba!
+            # POP SCREEN ALERT IDAN BABU SAURAN SHAFUKAN FIM A GABA
             bot.answer_callback_query(
-                call.id, 
-                text="❌ Babu wani fim a page din gaba!", 
+                call.id,
+                text="❌ Babu wani fim a page din gaba!",
                 show_alert=True
             )
         return
 
     # --- IDAN AKA DANNA YES ✅ ---
-    if call.data == "update_confirm_yes":
+    if call.data == "repost_confirm_yes":
         bot.answer_callback_query(call.id)
-        
-        # Goge sakonnin sakamako da buttons na baya
-        cleanup_updater_sent_messages(uid)
 
-        idx = sess["current_index"]
-        selected_match = sess["matches"][idx]
+        # Goge sakonnin shafin sakamako
+        cleanup_repost_sent_messages(uid)
 
-        # Adana zabadden fim ɗin da za a sabunta
-        sess["old_items"] = selected_match
-        sess["stage"] = "awaiting_new_files"
+        # Adana ainihin fim din da aka zaba
+        selected = sess["matches"][sess["current_index"]]
+        sess["series_id"] = selected["series_id"]
+        sess["old_title"] = selected["title"]
+        sess["old_price"] = selected["price"]
+        sess["poster_file_id"] = selected["poster_file_id"]
+        sess["group_key"] = selected["group_key"]
 
-        msg = bot.send_message(
-            uid, 
-            "📥 Madalla! Turo min sabon fim / fayiloli (Video ko Document) da za a sauya dasu.\n\n"
-            "👉 Idan ka gama turo fayilolin duka, kawai ka rubuta **Yes** ka tura.",
-            parse_mode="Markdown"
+        sess["stage"] = "choose_update_type"
+
+        kb = InlineKeyboardMarkup()
+        kb.add(
+            InlineKeyboardButton("✅ Yes (Sauya Suna & Poster)", callback_data="repost_change_yes"),
+            InlineKeyboardButton("❌ No (Sauya Poster Kawai)", callback_data="repost_change_no")
         )
-        sess["status_msg_id"] = msg.message_id
+
+        m_choose = bot.send_message(
+            uid,
+            "Za a chanja sabon Poster da Suna/Farashi ne?",
+            reply_markup=kb
+        )
+        sess["sent_msg_ids"].append(m_choose.message_id)
 
 
-# ==========================================
-# 4. TARA SABBIN FAYILOLI (VIDEOS / DOCUMENTS)
-# ==========================================
-@bot.message_handler(
-    content_types=["document", "video"],
-    func=lambda m: m.from_user.id in updater_sessions and updater_sessions[m.from_user.id].get("stage") == "awaiting_new_files"
-)
-def collect_new_update_files(m):
-    uid = m.from_user.id
-    sess = updater_sessions[uid]
-    doc = m.document or m.video
+# ================= 4. UPDATE CHOICE CALLBACKS =================
+@bot.callback_query_handler(func=lambda c: c.data in ["repost_change_yes", "repost_change_no"])
+def handle_update_choice(call):
+    uid = call.from_user.id
+    sess = repost_sessions.get(uid)
 
-    if not doc:
+    if not sess or sess.get("stage") != "choose_update_type":
+        bot.answer_callback_query(call.id, "Session expired.")
         return
 
-    file_name = getattr(doc, 'file_name', 'video.mp4') or 'video.mp4'
+    cleanup_repost_sent_messages(uid)
 
-    # Ajiye fayil a session
-    sess["files"].append({
-        "dm_file_id": doc.file_id,
-        "file_name": file_name
-    })
+    if call.data == "repost_change_yes":
+        sess["stage"] = "awaiting_full_update"
+        m = bot.send_message(
+            uid,
+            "Aiko min da sabon Hoto tare da Caption (Suna, Farashi, da Cashback idan akwai) kamar sabon fim."
+        )
+        sess["sent_msg_ids"].append(m.message_id)
+    else:
+        sess["stage"] = "awaiting_poster_only"
+        m = bot.send_message(
+            uid,
+            "Aiko min da Sabon Poster (Hoto kawai) ba tare da ka rubuta Suna ko Farashi ba."
+        )
+        sess["sent_msg_ids"].append(m.message_id)
 
-    count = len(sess["files"])
-    text_content = f"📥 An karɓi fayiloli ({count}). Idan ka gama sai ka rubuta **Yes**."
+    bot.answer_callback_query(call.id)
 
-    # Maimakon sake aikawa da sabon message, zai yi EDIT ne kawai
-    status_msg_id = sess.get("status_msg_id")
-    if status_msg_id:
+
+# ================= 5. RECEIVE PHOTO & EXECUTE REPOST =================
+@bot.message_handler(
+    content_types=["photo"],
+    func=lambda m: m.from_user.id in repost_sessions and repost_sessions[m.from_user.id].get("stage") in ["awaiting_full_update", "awaiting_poster_only"]
+)
+def execute_repost_finalize(m):
+    uid = m.from_user.id
+    sess = repost_sessions.get(uid)
+    stage = sess.get("stage")
+
+    poster_file_id = m.photo[-1].file_id
+    old_title = sess["old_title"]
+    group_key = sess["group_key"]
+    series_id = sess.get("series_id")
+
+    cashback_amount = 0
+
+    if stage == "awaiting_full_update":
+        raw_caption = m.caption or ""
+
+        all_lines = [line.strip() for line in raw_caption.strip().split("\n")]
+        valid_lines = [l for l in all_lines if l]
+
+        if len(valid_lines) < 2:
+            bot.send_message(uid, "❌ Caption bai dace ba. Akalla ana bukatar Suna da Farashi.")
+            return
+
+        new_title = valid_lines[0]
+
+        last_valid = valid_lines[-1]
+        if last_valid.lower().startswith('c') and last_valid[1:].replace(",", "").strip().isdigit():
+            cashback_amount = int(last_valid[1:].replace(",", "").strip())
+            valid_lines.pop()
+            for i in range(len(all_lines) - 1, -1, -1):
+                if all_lines[i] == last_valid:
+                    all_lines.pop(i)
+                    break
+
+        if len(valid_lines) < 2:
+            bot.send_message(uid, "❌ Caption bai dace ba. Muna buƙatar Suna da Farashi.")
+            return
+
+        raw_price = valid_lines[-1]
+        has_comma = "," in raw_price
+
         try:
-            bot.edit_message_text(text_content, uid, status_msg_id, parse_mode="Markdown")
+            new_price = int(raw_price.replace(",", "").strip())
+        except ValueError:
+            bot.send_message(uid, f"❌ An samu matsala gane farashi daga: '{raw_price}'. Tabbatar lambobi me kawai.")
+            return
+
+        last_line_raw = all_lines[-1] if all_lines else ""
+        if last_line_raw == raw_price:
+            channel_display_title = "\n".join(all_lines[:-1]).strip()
+        else:
+            joined_text = "\n".join(all_lines)
+            idx = joined_text.rfind(raw_price)
+            channel_display_title = joined_text[:idx].strip() if idx != -1 else joined_text.strip()
+
+    else:
+        new_title = old_title
+        new_price = sess["old_price"]
+        channel_display_title = old_title
+        has_comma = True
+
+    # ================= DATABASE UPDATES =================
+    conn = get_conn()
+    cur = conn.cursor()
+
+    try:
+        if series_id:
+            cur.execute(
+                "UPDATE series SET title=%s, price=%s, poster_file_id=%s WHERE id=%s",
+                (new_title, new_price, poster_file_id, series_id)
+            )
+
+        cur.execute(
+            "UPDATE items SET title=%s, price=%s, cashback_amount=%s WHERE group_key=%s",
+            (new_title, new_price, cashback_amount, group_key)
+        )
+
+        try:
+            cur.execute(
+                "UPDATE user_movies SET title=%s WHERE title=%s",
+                (new_title, old_title)
+            )
         except Exception:
             pass
-    else:
-        new_msg = bot.send_message(uid, text_content, parse_mode="Markdown")
-        sess["status_msg_id"] = new_msg.message_id
 
+        conn.commit()
 
-# ==========================================
-# 5. FINALIZE UPDATE (STORAGE & DB UPDATE FOR ITEMS, ORDERS, SERIES)
-# ==========================================
-@bot.message_handler(
-    func=lambda m: m.from_user.id in updater_sessions 
-    and updater_sessions[m.from_user.id].get("stage") == "awaiting_new_files"
-    and m.text.strip().lower() == "yes"
-)
-def process_final_film_update(m):
-    uid = m.from_user.id
-    sess = updater_sessions.get(uid)
-
-    if not sess:
-        return
-
-    new_files = sess.get("files", [])
-    old_items = sess.get("old_items", [])
-
-    if not new_files:
-        bot.send_message(uid, "❌ Baka turo kowane sabon fayil ba tukunna. Turo fayil sannan ka rubuta Yes.")
-        return
-
-    total_files = len(new_files)
-    progress_msg = bot.send_message(uid, f"⏳ Ana sabunta fina-finai a Storage da Database... (0/{total_files})")
-
-    # ================= 1. HAƊIN DATABASE =================
-    try:
-        conn = get_conn()
-        cur = conn.cursor()
     except Exception as e:
-        bot.send_message(uid, f"❌ DB Connection error: {e}")
-        return
-
-    ref_item = old_items[0] if old_items else None
-    if not ref_item:
-        bot.send_message(uid, "❌ Kuskure: Tsoffin bayanan fim ɗin ba su samamu ba.")
-        return
-
-    try:
-        cur.execute("SELECT title, price, group_key, cashback_amount FROM items WHERE id = %s", (ref_item[0],))
-        ref_data = cur.fetchone()
-        orig_title, orig_price, orig_group_key, orig_cashback = ref_data[0], ref_data[1], ref_data[2], ref_data[3]
-    except Exception as e:
+        conn.rollback()
         cur.close()
         conn.close()
+        bot.send_message(uid, f"❌ An sami matsalar gyara DB: {e}")
         return
-
-    # ================= 2. SAFE SEND DOCUMENT FUNCTION =================
-    def local_safe_send_document(chat_id, file_id, caption):
-        while True:
-            try:
-                return bot.send_document(chat_id, file_id, caption=caption)
-            except ApiTelegramException as e:
-                if e.error_code == 429:
-                    retry = int(e.result_json.get("parameters", {}).get("retry_after", 5))
-                    time.sleep(retry)
-                    continue
-                else:
-                    return None
-            except Exception:
-                return None
-
-    updated_count = 0
-
-    # Indicators don Tables Status
-    items_updated = False
-    order_items_updated = False
-    series_updated = False
-
-    created_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-    min_len = min(len(new_files), len(old_items))
-
-    # ================= 3A. UPDATE NA WADANDA SUKA DAIDACE (1 TO 1) =================
-    for idx in range(min_len):
-        f = new_files[idx]
-        target_item = old_items[idx]
-        target_item_id = target_item[0]
-        old_file_id = target_item[2]
-
-        msg = local_safe_send_document(STORAGE_CHANNEL, f["dm_file_id"], f["file_name"])
-        if not msg:
-            continue
-
-        new_doc = msg.document or msg.video
-        if not new_doc:
-            continue
-
-        new_file_id = new_doc.file_id
-
-        try:
-            # 1. Update Items Table
-            cur.execute(
-                "UPDATE items SET file_id = %s, file_name = %s WHERE id = %s",
-                (new_file_id, f["file_name"], target_item_id)
-            )
-            if cur.rowcount > 0:
-                items_updated = True
-
-            # 2. Update Order Items Table
-            cur.execute(
-                "UPDATE order_items SET file_id = %s WHERE item_id = %s",
-                (new_file_id, target_item_id)
-            )
-            if cur.rowcount > 0:
-                order_items_updated = True
-
-            # 3. Update Series Table (Duba ta item_id ko tsohon file_id)
-            cur.execute(
-                "UPDATE series SET file_id = %s, file_name = %s WHERE item_id = %s OR file_id = %s",
-                (new_file_id, f["file_name"], target_item_id, old_file_id)
-            )
-            if cur.rowcount > 0:
-                series_updated = True
-
-            updated_count += 1
-        except Exception:
-            continue
-
-        try:
-            bot.edit_message_text(f"⏳ Ana sabuntawa... ({updated_count}/{total_files})", uid, progress_msg.message_id)
-        except Exception:
-            pass
-
-        time.sleep(1.1)
-
-    # ================= 3B. IDAN SABABBI SUN FI TSOFFI YAWA (INSERT NEW ITEMS) =================
-    if len(new_files) > len(old_items):
-        extra_files = new_files[len(old_items):]
-
-        for idx_extra, f in enumerate(extra_files):
-            msg = local_safe_send_document(STORAGE_CHANNEL, f["dm_file_id"], f["file_name"])
-            if not msg:
-                continue
-
-            new_doc = msg.document or msg.video
-            if not new_doc:
-                continue
-
-            new_file_id = new_doc.file_id
-
-            try:
-                cur.execute(
-                    """
-                    INSERT INTO items
-                    (title, price, file_id, file_name, group_key, created_at, channel_msg_id, channel_username, cashback_amount)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    (
-                        orig_title,
-                        orig_price,
-                        new_file_id,
-                        f["file_name"],
-                        orig_group_key,
-                        created_at,
-                        msg.message_id,
-                        STORAGE_CHANNEL,
-                        orig_cashback
-                    )
-                )
-                items_updated = True
-                updated_count += 1
-            except Exception:
-                continue
-
-            try:
-                bot.edit_message_text(f"⏳ Ana sabuntawa... ({updated_count}/{total_files})", uid, progress_msg.message_id)
-            except Exception:
-                pass
-
-            time.sleep(1.1)
-
-    # ================= 3C. IDAN TSOFFI SUN FI SABABBI YAWA (DELETE EXCESS OLD ITEMS) =================
-    elif len(old_items) > len(new_files):
-        excess_items = old_items[len(new_files):]
-
-        for item in excess_items:
-            excess_id = item[0]
-            try:
-                cur.execute("DELETE FROM order_items WHERE item_id = %s", (excess_id,))
-                cur.execute("DELETE FROM series WHERE item_id = %s", (excess_id,))
-                cur.execute("DELETE FROM items WHERE id = %s", (excess_id,))
-            except Exception:
-                pass
-
-    # ================= 4. COMMIT & CLOSE =================
-    try:
-        conn.commit()
-    except Exception:
-        pass
 
     cur.close()
     conn.close()
 
-    # Sakamakon Tables guda 3 (Yes / No)
-    status_items = "Yes" if items_updated else "No"
-    status_orders = "Yes" if order_items_updated else "No"
-    status_series = "Yes" if series_updated else "No"
+    # Goge saƙonnin matakan baya kafin aikawa zuwa Channel
+    cleanup_repost_sent_messages(uid)
 
-    # Sanarwa ta ƙarshe zuwa ga Admin
-    bot.edit_message_text(
-        f"✅ An sabunta fim din lafiya! 🎉\n\n"
-        f"📊 Adadin tsoffin fina-finai: {len(old_items)}\n"
-        f"📁 Adadin sabbin fina-finai: {len(new_files)}\n"
-        f"✨ Sakamako: Yanzu jerin fim ɗin yana ɗauke da ainihin fayiloli {len(new_files)} a Database.\n\n"
-        f"📌 Items Table: {status_items}\n"
-        f"🛒 Orders Movies Table: {status_orders}\n"
-        f"🎬 Series Table: {status_series}",
-        uid,
-        progress_msg.message_id
-    )
+    # ================= PUBLIC POST TO CHANNEL =================
+    try:
+        display_price = f"{new_price:,}" if has_comma else str(new_price)
 
-    del updater_sessions[uid]
+        kb = InlineKeyboardMarkup()
+        kb.add(
+            InlineKeyboardButton(
+                "🛒 Add to cart",
+                callback_data=f"addcartdm:{group_key}"
+            ),
+            InlineKeyboardButton(
+                "💳 Buy now",
+                url=f"https://t.me/{BOT_USERNAME}?start=groupitem_{group_key}"
+            )
+        )
 
+        bot.send_photo(
+            CHANNEL,
+            poster_file_id,
+            caption=f"🎬 <b>{channel_display_title}</b>\n💵Price: ₦{display_price}",
+            parse_mode="HTML",
+            reply_markup=kb
+        )
 
+        # Sanar da Admin sakamakon aiki
+        bot.send_message(
+            uid,
+            f"🎉 <b>An kammala Aikin Reposting ba wata matsala!</b>\n\n"
+            f"📢 An aika post zuwa Channel.\n"
+            f"🔹 Series DB: {'YES' if series_id else 'SKIPPED (Not in Series)'}\n"
+            f"🔹 Items DB: YES\n"
+            f"🔹 User Movies DB: YES",
+            parse_mode="HTML"
+        )
+
+    except Exception as e:
+        bot.send_message(uid, f"⚠️ An gyara DB amma an sami matsalar aika post zuwa Channel: {e}")
+
+    del repost_sessions[uid]
 
 
 
