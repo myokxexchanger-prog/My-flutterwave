@@ -1909,7 +1909,48 @@ def deliver_items(call):
 
 
 
+@bot.callback_query_handler(func=lambda call: call.data.startswith("view_cb_bal:"))
+def callback_view_wallet_balance(call):
+    try:
+        # 1. Tabbatar Telegram ta samu kiran button
+        bot.answer_callback_query(call.id)
+        
+        user_id = call.from_user.id
 
+        # 2. Bude haɗin Database na WALLET (daidai da screenshots dinki)
+        wallet_conn = get_wallet_conn()
+        wallet_cur = wallet_conn.cursor()
+
+        # 3. Zako CIKAKKEN BALANCE daga wallet_balance table
+        wallet_cur.execute(
+            "SELECT balance FROM wallet_balance WHERE user_id = %s", 
+            (user_id,)
+        )
+        row = wallet_cur.fetchone()
+
+        total_balance = row[0] if row else 0
+
+        # Rufe Database na wallet
+        wallet_cur.close()
+        wallet_conn.close()
+
+        # 4. Rubutun saƙon da zai canza zuwa gare shi
+        edited_text = (
+            f"💳 **YOUR AVAILABLE BALANCE**\n\n"
+            f"Balance: ₦{total_balance}\n\n"
+            f"Buy more movie to get more reward💰😊"
+        )
+
+        # 5. Yanzu sai a yi Edit ɗin saƙon
+        bot.edit_message_text(
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            text=edited_text,
+            parse_mode="Markdown"
+        )
+
+    except Exception as e:
+        print(f"Kuskure wajen duba wallet balance: {e}")
 
 from telebot import types
 
