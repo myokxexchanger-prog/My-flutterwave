@@ -1477,62 +1477,53 @@ Use the button below to open your wallet.
                 wallet_cur.close()
                 wallet_conn.close()
 
-                # Tura Saƙon Cashback Dangane da Nau'in Tsari (Custom ko Tsohon Tsari)
-                if is_custom_cashback:
-                    bot.send_message(
-                        user_id,
-                        f"""Congratulations wannan fim ka siya mun ji dadin siyayyarka😍
-Kuma kai tsaye mun baka <b>₦{cashback}</b> CASHBACK zuwa wallet din ka.
-
-Ka duba wallet din ka, zaka iya siyayya dashi a nan gaba.
-
-Wallet Balance: ₦{user_wallet_balance}""",
-                        parse_mode="HTML"
+                # ================= SABON TSARIN SAKON CASHBACK =================
+                cb_kb = InlineKeyboardMarkup()
+                cb_kb.add(
+                    InlineKeyboardButton(
+                        "💼 View Wallet", 
+                        callback_data=f"view_cb_bal:{user_wallet_balance}",
+                        style="primary"
                     )
-                else:
-                    bot.send_message(
-                        user_id,
-                        f"""🎁 Cashback Reward🎉
+                )
 
-Wallet ID: <code>{user_id}</code>
+                cb_text = (
+                    f"🎁 **Cashback Reward**🎉\n\n"
+                    f"Wallet ID: `{user_id}`\n"
+                    f"You received ₦{cashback} cashback,\n"
+                    f"View your wallet to see available balance"
+                )
 
-You received ₦{cashback} cashback,  
-
-Ka duba wallet din ka, zaka iya siyayya dashi a nan gaba.
-
-Wallet Balance: ₦{user_wallet_balance}""",
-                        parse_mode="HTML"
-                    )
+                bot.send_message(user_id, cb_text, parse_mode="Markdown", reply_markup=cb_kb)
 
             conn.commit()
             cur.close()
             conn.close()
 
+            # ================= SABON TSARIN SAKON PAYMENT SUCCESSFUL =================
             kb = InlineKeyboardMarkup()
             kb.add(
                 InlineKeyboardButton(
                     "⬇️ DOWNLOAD NOW",
-                    callback_data=f"deliver:{order_id}"
+                    callback_data=f"deliver:{order_id}",
+                    style="success"
                 )
             )
 
-            bot.send_message(
-                user_id,
-                f"""🎉 <b>PAYMENT SUCCESSFUL</b>
-
-👤 <b>Name:</b> {full_name}
-🆔 <b>User ID:</b> <code>{user_id}</code>
-
-🎬 <b>Items:</b> {titles_text}
-🗃 <b>Order ID:</b> <code>{order_id}</code>
-
-💳 <b>Amount Paid:</b> ₦{paid_amount}
-
-⬇️ Click the button below to download your files.
-""",
-                parse_mode="HTML",
-                reply_markup=kb
+            success_text = (
+                f"🎉 **PAYMENT SUCCESSFUL!**\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"Mun Gode {full_name}\n\n"
+                f"🎬 **Film:** {titles_text}\n"
+                f"💵 **Amount Paid:** ₦{paid_amount}\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🎁 **Cashback Earned:** ₦{cashback}\n\n"
+                f"✅ Biyan ya kammala! 😊\n"
+                f"Danna DOWNLOAD domin sauke fim din\n"
+                f"👇👇👇"
             )
+
+            bot.send_message(user_id, success_text, parse_mode="Markdown", reply_markup=kb)
 
             if PAYMENT_NOTIFY_GROUP:
                 from datetime import datetime, timedelta
@@ -1722,6 +1713,8 @@ Na gode da kasancewa tare da mu 🙏""",
     except Exception as e:
         print(f"Webhook Error: {e}")
         return "Internal Error", 500
+
+
 
 
 
