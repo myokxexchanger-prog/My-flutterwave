@@ -5136,12 +5136,33 @@ from telebot.apihelper import ApiTelegramException
 updater_sessions = {}
 
 # ==========================================
+# HELPER: GOGE TSOFFIN SAKONNIN PENDING
+# ==========================================
+def cleanup_updater_sent_messages(uid):
+    sess = updater_sessions.get(uid)
+    if not sess:
+        return
+    
+    sent_ids = sess.get("sent_msg_ids", [])
+    for m_id in sent_ids:
+        try:
+            bot.delete_message(uid, m_id)
+        except Exception:
+            pass
+    
+    # Sake share list din
+    sess["sent_msg_ids"] = []
+
+# ==========================================
 # HELPER: NUNA FIM GUDA ƊAYA DAGA SAKAMAKO
 # ==========================================
 def show_updater_match(uid):
     sess = updater_sessions.get(uid)
     if not sess or "matches" not in sess:
         return
+
+    # Fara goge tsoffin sakonnin da aka tura a shafin baya
+    cleanup_updater_sent_messages(uid)
 
     idx = sess["current_index"]
     matches = sess["matches"]
@@ -5159,7 +5180,7 @@ def show_updater_match(uid):
     )
     kb.add(InlineKeyboardButton("No ❌", callback_data="update_confirm_no"))
 
-    bot.send_message(
+    m1 = bot.send_message(
         uid,
         f"🔍 **An samo Fim ({idx + 1}/{len(matches)}):**\n"
         f"🎬 **Suna:** `{title}`\n"
@@ -5167,6 +5188,7 @@ def show_updater_match(uid):
         f"Shin wannan ne fim ɗin da kake son sabuntawa?",
         parse_mode="Markdown"
     )
+    sess["sent_msg_ids"].append(m1.message_id)
 
     # Idan fayilolin basu fi 3 ba, turo samfurinsu
     if total_files <= 3:
@@ -5174,11 +5196,13 @@ def show_updater_match(uid):
             f_id = item[2]
             f_name = item[3]
             try:
-                bot.send_document(uid, f_id, caption=f"📄 {f_name}")
+                doc_m = bot.send_document(uid, f_id, caption=f"📄 {f_name}")
+                sess["sent_msg_ids"].append(doc_m.message_id)
             except Exception:
                 pass
 
-    bot.send_message(uid, "Zaɓa ɗaya daga cikin maɓallan ƙasa 👇", reply_markup=kb)
+    m2 = bot.send_message(uid, "Zaɓa ɗaya daga cikin maɓallan ƙasa 👇", reply_markup=kb)
+    sess["sent_msg_ids"].append(m2.message_id)
 
 
 # ==========================================
@@ -5189,7 +5213,12 @@ def handle_film_updater_click(call):
     bot.answer_callback_query(call.id)
     uid = call.from_user.id
 
-    updater_sessions[uid] = {"stage": "awaiting_title", "files": []}
+    updater_sessions[uid] = {
+        "stage": "awaiting_title", 
+        "files": [],
+        "sent_msg_ids": [],
+        "status_msg_id": None
+    }
 
     text = "🎬 Gayamin sunan fim din da zamu sabunta:"
     bot.edit_message_text(text, call.message.chat.id, call.message.message_id)
@@ -5271,6 +5300,7 @@ def handle_update_confirmation(call):
     # --- IDAN AKA DANNA NO (CANCEL) ---
     if call.data == "update_confirm_no":
         bot.answer_callback_query(call.id)
+        cleanup_updater_sent_messages(uid)
         bot.send_message(uid, "❌ An fasa sabunta fim ɗin.")
         del updater_sessions[uid]
         return
@@ -5297,6 +5327,10 @@ def handle_update_confirmation(call):
     # --- IDAN AKA DANNA YES ✅ ---
     if call.data == "update_confirm_yes":
         bot.answer_callback_query(call.id)
+        
+        # Goge sakonnin sakamako da buttons na baya
+        cleanup_updater_sent_messages(uid)
+
         idx = sess["current_index"]
         selected_match = sess["matches"][idx]
 
@@ -5304,11 +5338,13 @@ def handle_update_confirmation(call):
         sess["old_items"] = selected_match
         sess["stage"] = "awaiting_new_files"
 
-        bot.send_message(
+        msg = bot.send_message(
             uid, 
             "📥 Madalla! Turo min sabon fim / fayiloli (Video ko Document) da za a sauya dasu.\n\n"
-            "👉 Idan ka gama turo fayilolin duka, kawai ka rubuta **Yes** ka tura."
+            "👉 Idan ka gama turo fayilolin duka, kawai ka rubuta **Yes** ka tura.",
+            parse_mode="Markdown"
         )
+        sess["status_msg_id"] = msg.message_id
 
 
 # ==========================================
@@ -5320,6 +5356,7 @@ def handle_update_confirmation(call):
 )
 def collect_new_update_files(m):
     uid = m.from_user.id
+    sess = updater_sessions[uid]
     doc = m.document or m.video
 
     if not doc:
@@ -5328,13 +5365,24 @@ def collect_new_update_files(m):
     file_name = getattr(doc, 'file_name', 'video.mp4') or 'video.mp4'
 
     # Ajiye fayil a session
-    updater_sessions[uid]["files"].append({
+    sess["files"].append({
         "dm_file_id": doc.file_id,
         "file_name": file_name
     })
 
-    count = len(updater_sessions[uid]["files"])
-    bot.reply_to(m, f"📥 An karɓi fayil na {count}. Idan ka gama sai ka rubuta **Yes**.")
+    count = len(sess["files"])
+    text_content = f"📥 An karɓi fayiloli ({count}). Idan ka gama sai ka rubuta **Yes**."
+
+    # Maimakon sake aikawa da sabon message, zai yi EDIT ne kawai
+    status_msg_id = sess.get("status_msg_id")
+    if status_msg_id:
+        try:
+            bot.edit_message_text(text_content, uid, status_msg_id, parse_mode="Markdown")
+        except Exception:
+            pass
+    else:
+        new_msg = bot.send_message(uid, text_content, parse_mode="Markdown")
+        sess["status_msg_id"] = new_msg.message_id
 
 
 # ==========================================
@@ -5549,6 +5597,7 @@ def process_final_film_update(m):
     )
 
     del updater_sessions[uid]
+
 
 
 
