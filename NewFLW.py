@@ -1729,7 +1729,6 @@ def telegram_webhook():
     return "OK", 200
 
 
-
 import time
 from telebot.apihelper import ApiTelegramException
 
@@ -1791,6 +1790,17 @@ def deliver_items(call):
     # remove popup message completely
     bot.answer_callback_query(call.id)
 
+    # 1. CANZA SAKO ZUWA LOADING...
+    try:
+        bot.edit_message_text(
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            text="⏳ Loading..."
+        )
+        time.sleep(1.0)
+    except Exception as e:
+        print(f"Error editing loading message: {e}")
+
     # ================= FETCH ITEMS =================
     cur.execute(
         """
@@ -1806,6 +1816,17 @@ def deliver_items(call):
     if not items:
         cur.close()
         conn.close()
+        
+        # IDAN BABU FIM A DB: Canza sako zuwa Error
+        try:
+            bot.edit_message_text(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                text="Delivery Error ❌😓\nPLEASE CONTACT ADMIN"
+            )
+        except:
+            pass
+            
         bot.send_message(user_id, "Order items not found.")
         return
 
@@ -1832,7 +1853,6 @@ def deliver_items(call):
                 if e.error_code == 429:
                     retry = int(e.result_json["parameters"]["retry_after"])
 
-                    # ONLY visible message to user
                     bot.send_message(
                         chat_id,
                         "Wait...\n"
@@ -1847,11 +1867,10 @@ def deliver_items(call):
             except:
                 return None
 
-    # ================= SEND LOOP WITH DYNAMIC CAPTION =================
+    # ================= SEND LOOP =================
     sent = 0
-    total_items = len(items)  # Kidaya adadin fina-finan da yake son karba
 
-    for idx, (item_id, file_id, title) in enumerate(items, start=1):
+    for item_id, file_id, title in items:
 
         if not file_id:
             continue
@@ -1863,18 +1882,7 @@ def deliver_items(call):
         if cur.fetchone():
             continue
 
-        # Tsara yadda Caption/Sunan fim din zai fito
-        if total_items == 2:
-            # Idan guda 2 ne: (1) Sunan Fim
-            custom_caption = f"({idx}) {title}"
-        elif total_items >= 3:
-            # Idan sun kai 3 ko fiye: Episode 1 \n Sunan Fim
-            custom_caption = f"Episode {idx}\n{title}"
-        else:
-            # Idan guda 1 ne kawai: Sunan Fim
-            custom_caption = title
-
-        msg = safe_send(user_id, file_id, custom_caption)
+        msg = safe_send(user_id, file_id, title)
 
         if not msg:
             continue
@@ -1895,9 +1903,30 @@ def deliver_items(call):
     cur.close()
     conn.close()
 
+    # ================= EDIT MESSAGE RESULT =================
     if sent == 0:
+        # IDAN AN KASA TURA KO GUDA DAYA: Canza zuwa Error
+        try:
+            bot.edit_message_text(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                text="Delivery Error ❌😓\nPLEASE CONTACT ADMIN"
+            )
+        except Exception as e:
+            print(f"Error editing message: {e}")
+
         bot.send_message(user_id, "Items could not be delivered.")
         return
+
+    # IDAN AN SAMU NASARAR TURAWA: Canza zuwa Success
+    try:
+        bot.edit_message_text(
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            text="Delivery Successful ✅"
+        )
+    except Exception as e:
+        print(f"Error editing message: {e}")
 
     bot.send_message(
         user_id,
@@ -1906,6 +1935,7 @@ def deliver_items(call):
     )
 
     send_feedback_prompt(user_id, order_id)
+
 
 
 
