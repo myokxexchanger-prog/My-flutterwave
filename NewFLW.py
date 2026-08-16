@@ -5127,8 +5127,59 @@ def handle_new_world(call):
     bot.send_message(call.message.chat.id, text, reply_markup=kb)
 
 
+import time
+from datetime import datetime
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+from telebot.apihelper import ApiTelegramException
+
 # Adana session din sabuntawa
 updater_sessions = {}
+
+# ==========================================
+# HELPER: NUNA FIM GUDA ƊAYA DAGA SAKAMAKO
+# ==========================================
+def show_updater_match(uid):
+    sess = updater_sessions.get(uid)
+    if not sess or "matches" not in sess:
+        return
+
+    idx = sess["current_index"]
+    matches = sess["matches"]
+    current_match = matches[idx]  # Fim/Series na yanzu
+
+    first_item = current_match[0]
+    title = first_item[1]
+    total_files = len(current_match)
+
+    # Gina Maɓallai
+    kb = InlineKeyboardMarkup()
+    kb.row(
+        InlineKeyboardButton("Yes ✅", callback_data="update_confirm_yes"),
+        InlineKeyboardButton("Next ➡️", callback_data="update_confirm_next")
+    )
+    kb.add(InlineKeyboardButton("No ❌", callback_data="update_confirm_no"))
+
+    bot.send_message(
+        uid,
+        f"🔍 **An samo Fim ({idx + 1}/{len(matches)}):**\n"
+        f"🎬 **Suna:** `{title}`\n"
+        f"📦 **Adadin Fayiloli:** {total_files}\n\n"
+        f"Shin wannan ne fim ɗin da kake son sabuntawa?",
+        parse_mode="Markdown"
+    )
+
+    # Idan fayilolin basu fi 3 ba, turo samfurinsu
+    if total_files <= 3:
+        for item in current_match:
+            f_id = item[2]
+            f_name = item[3]
+            try:
+                bot.send_document(uid, f_id, caption=f"📄 {f_name}")
+            except Exception:
+                pass
+
+    bot.send_message(uid, "Zaɓa ɗaya daga cikin maɓallan ƙasa 👇", reply_markup=kb)
+
 
 # ==========================================
 # 1. HANDLER NA DANNA "Film Updater" BUTTON
@@ -5137,10 +5188,9 @@ updater_sessions = {}
 def handle_film_updater_click(call):
     bot.answer_callback_query(call.id)
     uid = call.from_user.id
-    
-    # Fara session din updater
+
     updater_sessions[uid] = {"stage": "awaiting_title", "files": []}
-    
+
     text = "🎬 Gayamin sunan fim din da zamu sabunta:"
     bot.edit_message_text(text, call.message.chat.id, call.message.message_id)
 
@@ -5154,57 +5204,51 @@ def handle_film_updater_click(call):
 def search_film_for_update(m):
     uid = m.from_user.id
     search_title = m.text.strip()
-    
+
     progress_msg = bot.send_message(uid, "⏳ Loading...")
-    
+
     try:
         conn = get_conn()
         cur = conn.cursor()
-        
-        # Binciko fina-finan da suka dace da sunan
+
+        # Binciko fina-finai masu kama da sunan (LIKE Search)
         cur.execute(
-            "SELECT id, title, file_id, file_name FROM items WHERE LOWER(title) = LOWER(%s) ORDER BY id ASC",
-            (search_title,)
+            """
+            SELECT id, title, file_id, file_name, group_key 
+            FROM items 
+            WHERE LOWER(title) LIKE LOWER(%s) 
+            ORDER BY id ASC
+            """,
+            (f"%{search_title}%",)
         )
-        found_items = cur.fetchall()
+        found_rows = cur.fetchall()
         cur.close()
         conn.close()
-        
-        if not found_items:
-            bot.edit_message_text("❌ Abun takaici, ba a sami fim mai wannan sunan a Database ba. Seke gwadawa.", uid, progress_msg.message_id)
+
+        if not found_rows:
+            bot.edit_message_text("❌ Abun takaici, ba a sami fim mai wannan sunan a Database ba. Sake gwadawa.", uid, progress_msg.message_id)
             del updater_sessions[uid]
             return
-            
-        # Adana sakamakon bincike a session
-        updater_sessions[uid]["old_items"] = found_items
+
+        # Rarraba sakamakon zuwa Rukunai (Grouping by group_key or title)
+        grouped = {}
+        for r in found_rows:
+            g_key = r[4] if r[4] else f"single_{r[0]}"
+            if g_key not in grouped:
+                grouped[g_key] = []
+            grouped[g_key].append(r)
+
+        matches_list = list(grouped.values())
+
+        # Adana sakamako
+        updater_sessions[uid]["matches"] = matches_list
+        updater_sessions[uid]["current_index"] = 0
         updater_sessions[uid]["stage"] = "confirm_film"
-        
-        bot.edit_message_text("✅ Mun samo wannan fim din!", uid, progress_msg.message_id)
-        
-        # Gina Maɓallan Confimation [ Yes ] [ No ] a jere
-        kb = InlineKeyboardMarkup()
-        kb.row(
-            InlineKeyboardButton("Yes ✅", callback_data="update_confirm_yes"),
-            InlineKeyboardButton("No ❌", callback_data="update_confirm_no")
-        )
-        
-        total_found = len(found_items)
-        
-        # IDAN FINA-FINAN SUKA KAI 1 ZUWA 3 (Send Files)
-        if total_found <= 3:
-            for item in found_items:
-                f_id = item[2]
-                f_name = item[3]
-                try:
-                    bot.send_document(uid, f_id, caption=f"📄 {f_name}")
-                except Exception:
-                    pass
-            bot.send_message(uid, "Shin wannan ne fim din da kake son sabuntawa?", reply_markup=kb)
-            
-        # IDAN SERIES NE (YA WUCE GUDA 3)
-        else:
-            text_confirm = f"🎬 An samu series din fim din guda **{total_found}**.\n\nShin shi kake son sabuntawa?"
-            bot.send_message(uid, text_confirm, parse_mode="Markdown", reply_markup=kb)
+
+        bot.delete_message(uid, progress_msg.message_id)
+
+        # Nuna fim na farko
+        show_updater_match(uid)
 
     except Exception as e:
         bot.send_message(uid, f"❌ An samu kuskure wajen bincike: {e}")
@@ -5212,32 +5256,59 @@ def search_film_for_update(m):
             del updater_sessions[uid]
 
 
-
-
 # ==========================================
-# 3. HANDLER NA MAƁALLAN YES / NO (CONFIRMATION)
+# 3. HANDLER NA YES / NEXT / NO (CONFIRMATION)
 # ==========================================
-@bot.callback_query_handler(func=lambda call: call.data in ["update_confirm_yes", "update_confirm_no"])
+@bot.callback_query_handler(func=lambda call: call.data in ["update_confirm_yes", "update_confirm_next", "update_confirm_no"])
 def handle_update_confirmation(call):
-    bot.answer_callback_query(call.id)
     uid = call.from_user.id
-    
-    if uid not in updater_sessions:
-        bot.send_message(uid, "❌ Session ɗinka ya mutu. Saake farawa daga farko.")
+    sess = updater_sessions.get(uid)
+
+    if not sess or sess.get("stage") != "confirm_film":
+        bot.answer_callback_query(call.id, text="❌ Session ɗinka ya mutu. Sake farawa da Film Updater.", show_alert=True)
         return
 
+    # --- IDAN AKA DANNA NO (CANCEL) ---
     if call.data == "update_confirm_no":
+        bot.answer_callback_query(call.id)
         bot.send_message(uid, "❌ An fasa sabunta fim ɗin.")
         del updater_sessions[uid]
         return
 
-    # Idan ya danna YES:
-    updater_sessions[uid]["stage"] = "awaiting_new_files"
-    bot.send_message(
-        uid, 
-        "📥 Madalla! Turo min sabon fim / fayiloli (Video ko Document) da za a sauya dasu.\n\n"
-        "👉 Idan ka gama turo fayilolin duka, kawai ka rubuta **Yes** ka tura."
-    )
+    # --- IDAN AKA DANNA NEXT ➡️ ---
+    if call.data == "update_confirm_next":
+        idx = sess["current_index"]
+        total_matches = len(sess["matches"])
+
+        # Duba ko akwai sauran fim a gaba
+        if idx + 1 < total_matches:
+            bot.answer_callback_query(call.id)
+            sess["current_index"] += 1
+            show_updater_match(uid)
+        else:
+            # POP ALERT SCREEN idan babu fim a gaba!
+            bot.answer_callback_query(
+                call.id, 
+                text="❌ Babu wani fim a page din gaba!", 
+                show_alert=True
+            )
+        return
+
+    # --- IDAN AKA DANNA YES ✅ ---
+    if call.data == "update_confirm_yes":
+        bot.answer_callback_query(call.id)
+        idx = sess["current_index"]
+        selected_match = sess["matches"][idx]
+
+        # Adana zabadden fim ɗin da za a sabunta
+        sess["old_items"] = selected_match
+        sess["stage"] = "awaiting_new_files"
+
+        bot.send_message(
+            uid, 
+            "📥 Madalla! Turo min sabon fim / fayiloli (Video ko Document) da za a sauya dasu.\n\n"
+            "👉 Idan ka gama turo fayilolin duka, kawai ka rubuta **Yes** ka tura."
+        )
 
 
 # ==========================================
@@ -5250,23 +5321,24 @@ def handle_update_confirmation(call):
 def collect_new_update_files(m):
     uid = m.from_user.id
     doc = m.document or m.video
-    
+
     if not doc:
         return
 
     file_name = getattr(doc, 'file_name', 'video.mp4') or 'video.mp4'
-    
+
     # Ajiye fayil a session
     updater_sessions[uid]["files"].append({
         "dm_file_id": doc.file_id,
         "file_name": file_name
     })
-    
+
     count = len(updater_sessions[uid]["files"])
     bot.reply_to(m, f"📥 An karɓi fayil na {count}. Idan ka gama sai ka rubuta **Yes**.")
 
+
 # ==========================================
-# 5. FINALIZE UPDATE (SANYA A STORAGE & UPDATE DB) - DYNAMIC ADJUSTMENT
+# 5. FINALIZE UPDATE (STORAGE & DB UPDATE FOR ITEMS, ORDERS, SERIES)
 # ==========================================
 @bot.message_handler(
     func=lambda m: m.from_user.id in updater_sessions 
@@ -5298,7 +5370,6 @@ def process_final_film_update(m):
         bot.send_message(uid, f"❌ DB Connection error: {e}")
         return
 
-    # Dauko asalin bayanan jerin (group_key, title, price, cashback_amount) daga tsohon item na farko
     ref_item = old_items[0] if old_items else None
     if not ref_item:
         bot.send_message(uid, "❌ Kuskure: Tsoffin bayanan fim ɗin ba su samamu ba.")
@@ -5325,13 +5396,17 @@ def process_final_film_update(m):
                     continue
                 else:
                     return None
-            except Exception as e:
+            except Exception:
                 return None
 
     updated_count = 0
-    order_items_found = False  # Don gano ko an samu fim din a order_items table
-    created_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
+    # Indicators don Tables Status
+    items_updated = False
+    order_items_updated = False
+    series_updated = False
+
+    created_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     min_len = min(len(new_files), len(old_items))
 
     # ================= 3A. UPDATE NA WADANDA SUKA DAIDACE (1 TO 1) =================
@@ -5339,6 +5414,7 @@ def process_final_film_update(m):
         f = new_files[idx]
         target_item = old_items[idx]
         target_item_id = target_item[0]
+        old_file_id = target_item[2]
 
         msg = local_safe_send_document(STORAGE_CHANNEL, f["dm_file_id"], f["file_name"])
         if not msg:
@@ -5351,28 +5427,37 @@ def process_final_film_update(m):
         new_file_id = new_doc.file_id
 
         try:
-            # Update items table
+            # 1. Update Items Table
             cur.execute(
                 "UPDATE items SET file_id = %s, file_name = %s WHERE id = %s",
                 (new_file_id, f["file_name"], target_item_id)
             )
-            
-            # Update order_items table
+            if cur.rowcount > 0:
+                items_updated = True
+
+            # 2. Update Order Items Table
             cur.execute(
                 "UPDATE order_items SET file_id = %s WHERE item_id = %s",
                 (new_file_id, target_item_id)
             )
-            # Idan an samu akalla lamba guda 1 a order_items da aka sabunta:
             if cur.rowcount > 0:
-                order_items_found = True
+                order_items_updated = True
+
+            # 3. Update Series Table (Duba ta item_id ko tsohon file_id)
+            cur.execute(
+                "UPDATE series SET file_id = %s, file_name = %s WHERE item_id = %s OR file_id = %s",
+                (new_file_id, f["file_name"], target_item_id, old_file_id)
+            )
+            if cur.rowcount > 0:
+                series_updated = True
 
             updated_count += 1
-        except Exception as e:
+        except Exception:
             continue
 
         try:
             bot.edit_message_text(f"⏳ Ana sabuntawa... ({updated_count}/{total_files})", uid, progress_msg.message_id)
-        except:
+        except Exception:
             pass
 
         time.sleep(1.1)
@@ -5411,13 +5496,14 @@ def process_final_film_update(m):
                         orig_cashback
                     )
                 )
+                items_updated = True
                 updated_count += 1
-            except Exception as e:
+            except Exception:
                 continue
 
             try:
                 bot.edit_message_text(f"⏳ Ana sabuntawa... ({updated_count}/{total_files})", uid, progress_msg.message_id)
-            except:
+            except Exception:
                 pass
 
             time.sleep(1.1)
@@ -5429,38 +5515,42 @@ def process_final_film_update(m):
         for item in excess_items:
             excess_id = item[0]
             try:
-                # Goge shi daga order_items da farko idan yana ciki don guje wa FK error
                 cur.execute("DELETE FROM order_items WHERE item_id = %s", (excess_id,))
-                # Sannan goge daga items table
+                cur.execute("DELETE FROM series WHERE item_id = %s", (excess_id,))
                 cur.execute("DELETE FROM items WHERE id = %s", (excess_id,))
-            except Exception as e:
+            except Exception:
                 pass
 
     # ================= 4. COMMIT & CLOSE =================
     try:
         conn.commit()
-    except Exception as e:
+    except Exception:
         pass
 
     cur.close()
     conn.close()
 
-    # Sakamakon ko an samu a order_items
-    order_status = "Yes" if order_items_found else "No"
+    # Sakamakon Tables guda 3 (Yes / No)
+    status_items = "Yes" if items_updated else "No"
+    status_orders = "Yes" if order_items_updated else "No"
+    status_series = "Yes" if series_updated else "No"
 
-    # Sanarwa ta ƙarshe
+    # Sanarwa ta ƙarshe zuwa ga Admin
     bot.edit_message_text(
         f"✅ An sabunta fim din lafiya! 🎉\n\n"
         f"📊 Adadin tsoffin fina-finai: {len(old_items)}\n"
         f"📁 Adadin sabbin fina-finai: {len(new_files)}\n"
         f"✨ Sakamako: Yanzu jerin fim ɗin yana ɗauke da ainihin fayiloli {len(new_files)} a Database.\n\n"
-        f"📌 Items Table: Yes\n"
-        f"🛒 Orders Movies Table: {order_status}",
+        f"📌 Items Table: {status_items}\n"
+        f"🛒 Orders Movies Table: {status_orders}\n"
+        f"🎬 Series Table: {status_series}",
         uid,
         progress_msg.message_id
     )
 
     del updater_sessions[uid]
+
+
 
 
 # ======================================================
