@@ -1937,6 +1937,182 @@ def deliver_items(call):
     send_feedback_prompt(user_id, order_id)
 
 
+import time
+from telebot.apihelper import ApiTelegramException
+
+# ===============================================================
+# MEMORY CACHE (DON HANA DUPLICATE BA TARE DA SABON TABLE BA)
+# ===============================================================
+# Wannan memory din zai rike: {user_id: set(poster_file_id1, poster_file_id2, ...)}
+SENT_POSTERS_MEMORY = {}
+
+# ===============================================================
+# SYSTEM NA TURA POSTERS (SERIES TABLE KAWAI)
+# ===============================================================
+
+@bot.message_handler(commands=['posters'])
+def handle_send_posters_command(message):
+    admin_id = message.from_user.id
+
+    # Tsaro: Tabbatar Admin ne kawai yake amfani da wannan command
+    if admin_id != ADMIN_ID:
+        bot.reply_to(message, "❌ Wannan umarni na Admin ne kawai.")
+        return
+
+    # Ciro Target User ID daga umarnin (Misali: /posters 6652361839)
+    command_args = message.text.split()
+    if len(command_args) < 2:
+        bot.reply_to(message, "⚠️ Dan Allah shigar da User ID.\n\n**Tsarawa:** `/posters USER_ID`", parse_mode="Markdown")
+        return
+
+    target_user_id_str = command_args[1].strip()
+    if not target_user_id_str.isdigit():
+        bot.reply_to(message, "❌ User ID dole ne ya kasance lamba kawai.")
+        return
+
+    target_user_id = int(target_user_id_str)
+
+    # Kirkiro wurin ajiya a Memory idan babu shi a baya ga wannan User din
+    if target_user_id not in SENT_POSTERS_MEMORY:
+        SENT_POSTERS_MEMORY[target_user_id] = set()
+
+    # 1. Sanarwa ta farko ga Admin
+    progress_msg = bot.send_message(
+        admin_id,
+        f"⏳ **An fara gudanar da aiki...**\n🎯 **Target User:** `{target_user_id}`\n🔍 Ana binciko Posters na Algaita a DB...",
+        parse_mode="Markdown"
+    )
+
+    # 2. Binciko Posters daga Teburin SERIES naka na asali
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+
+        # Neman duk fina-finan da ke dauke da Algaita a teburin series
+        cur.execute(
+            "SELECT DISTINCT poster_file_id, title FROM series WHERE title ILIKE %s AND poster_file_id IS NOT NULL",
+            ("%Algaita%",)
+        )
+        algaita_series = cur.fetchall()
+
+        cur.close()
+        conn.close()
+
+    except Exception as e:
+        bot.edit_message_text(f"❌ **Kuskuren DB:** `{e}`", admin_id, progress_msg.message_id, parse_mode="Markdown")
+        return
+
+    if not algaita_series:
+        bot.edit_message_text("ℹ️ Ba a samu wani Fim ko Poster mai ɗauke da sunan **Algaita** a teburin `series` ba.", admin_id, progress_msg.message_id, parse_mode="Markdown")
+        return
+
+    # 3. SAFE SEND FUNCTION (Handling Rate Limit & User Block)
+    def safe_send_photo(user_id, photo_id, caption):
+        while True:
+            try:
+                msg = bot.send_photo(user_id, photo_id, caption=caption, parse_mode="HTML")
+                return {"status": "success", "msg": msg}
+
+            except ApiTelegramException as e:
+                # Idan User ya yi Blocking
+                if e.error_code in [403, 400] and ("bot was blocked" in e.description.lower() or "chat not found" in e.description.lower()):
+                    return {"status": "blocked", "error": e.description}
+
+                # Idan Telegram ya sa Rate Limit (429)
+                elif e.error_code == 429:
+                    retry_after = int(e.result_json.get("parameters", {}).get("retry_after", 5))
+                    
+                    try:
+                        bot.edit_message_text(
+                            f"⏸ **Telegram Rate Limit Hit!**\n"
+                            f"⏳ Bot din zai jira daƙiƙa `{retry_after}s` kafin ya ci gaba...\n"
+                            f"🎯 Target User: `{user_id}`",
+                            admin_id,
+                            progress_msg.message_id,
+                            parse_mode="Markdown"
+                        )
+                    except:
+                        pass
+
+                    time.sleep(retry_after)
+                    continue
+
+                else:
+                    return {"status": "error", "error": str(e)}
+
+            except Exception as ex:
+                return {"status": "error", "error": str(ex)}
+
+    # 4. LOOP NA TURAWA WANDA YAKE DUBA MEMORY (NO NEW TABLE)
+    total_found = len(algaita_series)
+    sent_count = 0
+    skipped_count = 0
+
+    for index, (poster_file_id, title) in enumerate(algaita_series, start=1):
+        
+        # A. DUPLICATE CHECK: Duba cikin RAM/Memory ko an taba tura wannan poster din ga user din
+        if poster_file_id in SENT_POSTERS_MEMORY[target_user_id]:
+            skipped_count += 1
+            continue  # Yi SKIP muddin yana cikin memory
+
+        # B. TURA POSTER KAWAI (HOTON)
+        caption_text = f"🎬 <b>{title}</b>\n\n✨ <i>Poster na Algaita Dubbing</i>"
+        result = safe_send_photo(target_user_id, poster_file_id, caption_text)
+
+        # C. HANDLING RESPONSES
+        if result["status"] == "blocked":
+            bot.edit_message_text(
+                f"❌ **Aiki Ya Tsaya!**\n\n"
+                f"User ID `{target_user_id}` ya yi **BLOCKING** ɗin bot ɗin.\n"
+                f"📊 **Sakamako:** An tura `{sent_count}` / Anyi Skip `{skipped_count}`.",
+                admin_id,
+                progress_msg.message_id,
+                parse_mode="Markdown"
+            )
+            return
+
+        elif result["status"] == "error":
+            print(f"Failed to send poster: {result['error']}")
+            continue
+
+        elif result["status"] == "success":
+            sent_count += 1
+
+            # D. ADANA FILE_ID A MEMORY KAWAI (RAM)
+            SENT_POSTERS_MEMORY[target_user_id].add(poster_file_id)
+
+            # E. UPDATE PROGRESS MESSAGE TO ADMIN
+            if sent_count % 2 == 0 or index == total_found:
+                try:
+                    bot.edit_message_text(
+                        f"🚀 **Ana Turawa User Posters...**\n\n"
+                        f"👤 **Target User:** `{target_user_id}`\n"
+                        f"📸 **An Tura:** `{sent_count}`\n"
+                        f"⏭ **An Yi Skip (In Memory):** `{skipped_count}`\n"
+                        f"📊 **Binciken DB:** `{index}/{total_found}`",
+                        admin_id,
+                        progress_msg.message_id,
+                        parse_mode="Markdown"
+                    )
+                except:
+                    pass
+
+            # Katsewa kadan saboda safe spacing
+            time.sleep(1.2)
+
+    # 5. FINAL REPORT TO ADMIN
+    bot.edit_message_text(
+        f"🎉 **Kammalawa LAFIYA!**\n\n"
+        f"👤 **User ID:** `{target_user_id}`\n"
+        f"✅ **Sabbin Posters da aka Tura:** `{sent_count}`\n"
+        f"🔄 **Tsoffin Posters (Skipped In-Memory):** `{skipped_count}`\n"
+        f"📁 **Jimillar Algaita Posters a DB:** `{total_found}`",
+        admin_id,
+        progress_msg.message_id,
+        parse_mode="Markdown"
+    )
+
+
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("view_cb_bal:"))
