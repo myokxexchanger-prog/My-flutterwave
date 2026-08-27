@@ -864,7 +864,7 @@ BOT_MODE = os.getenv("BOT_MODE", "polling")
 
 CASHBACK = 20
 
-VIP_PRICE = 1500
+VIP_PRICE = 2000
 VIP_DURATION_VALUE = 33
 VIP_DURATION_UNIT = "days"
 
@@ -2957,7 +2957,7 @@ def vip_group_info(call):
 
     text = """💎 <b>TSARIN SHIGA VIP GROUP</b>
 ━━━━━━━━━━━━━━━━━━
-🔹 <b>Kudin Rijista:</b> ₦1,500  
+🔹 <b>Kudin Rijista:</b> ₦2,000  
 🔹 <b>Subscription:</b> Kwana 33  
 🔹 Ba za a sake biyan kudi ba har sai bayan kwanaki 30
 ━━━━━━━━━━━━━━━━━━
