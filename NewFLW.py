@@ -862,6 +862,9 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 BOT_MODE = os.getenv("BOT_MODE", "polling")
 
+CASHBACK_PERCENT = 0.10
+CASHBACK_LIMIT = 200
+
 CASHBACK = 20
 
 VIP_PRICE = 2000
