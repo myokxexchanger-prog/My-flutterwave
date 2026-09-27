@@ -2054,6 +2054,68 @@ def deliver_items(call):
     send_feedback_prompt(user_id, order_id)
 
 
+# ==========================================
+# COMMAND DOMIN DUBA USER BALANCE A SABON DB
+# Usage: /? 55526262626
+# ==========================================
+
+@bot.message_handler(commands=['?'])
+def check_user_wallet_balance_cmd(message):
+    try:
+        # Raba rubutun sakon domin ciro User ID
+        args = message.text.split()
+        
+        if len(args) < 2:
+            bot.reply_to(message, "⚠️ **Aika command din kamar haka:**\n`/? 55526262626`", parse_mode="Markdown")
+            return
+
+        target_user_id = int(args[1])
+        
+        # Samun haɗin DB
+        w_conn = get_wallet_conn()
+        
+        if not w_conn:
+            bot.reply_to(message, "❌ **Kuskure:** An kasa haɗawa da Wallet DB.")
+            return
+
+        w_cur = w_conn.cursor()
+
+        # Duba balance a teburin wallet_balance
+        w_cur.execute(
+            "SELECT balance FROM wallet_balance WHERE user_id = %s;",
+            (target_user_id,)
+        )
+        row = w_cur.fetchone()
+
+        if row:
+            user_balance = row[0]
+        else:
+            # Idan babu amfani a teburin, mu shigar da shi da balance na 0
+            user_balance = 0
+            w_cur.execute(
+                "INSERT INTO wallet_balance (user_id, balance) VALUES (%s, %s);",
+                (target_user_id, 0)
+            )
+            w_conn.commit()
+
+        # Rufe connection da cursor
+        w_cur.close()
+        w_conn.close()
+
+        # Fitar da sakon balance
+        response_text = (
+            f"👤 **Balance din wannan user (`{target_user_id}`):**\n\n"
+            f"💰 Balance: **₦{user_balance}**"
+        )
+        bot.reply_to(message, response_text, parse_mode="Markdown")
+
+    except ValueError:
+        bot.reply_to(message, "❌ **Kuskure:** Tabbatar ID din lambobi ne kawai (misali `/? 55526262626`).")
+    except Exception as e:
+        print("❌ CHECK BALANCE COMMAND ERROR:", e)
+        bot.reply_to(message, f"❌ **An samu matsala wajen duba balance:**\n`{e}`", parse_mode="Markdown")
+
+
 import time
 from telebot.apihelper import ApiTelegramException
 
