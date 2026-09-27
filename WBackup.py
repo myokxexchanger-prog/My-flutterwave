@@ -31,6 +31,28 @@ conn.autocommit = True
 cur = conn.cursor()
 # =========================================
 # ======================
+
+
+# Karbotar sabuwar URL din daga Render Environment Variables
+W_DATABASE_URL = os.environ.get("W_DATABASE_URL")
+
+if not W_DATABASE_URL:
+    raise RuntimeError("W_DATABASE_URL is not set in Environment Variables")
+
+def get_wallet_conn():
+    try:
+        c = psycopg2.connect(
+            W_DATABASE_URL,
+            connect_timeout=5,
+            sslmode="require"
+        )
+        c.autocommit = True
+        return c
+    except Exception as e:
+        print("❌ WALLET DB CONNECT ERROR:", e)
+        return None
+
+
 # WALLET DATABASE CONNECTION
 # ======================
 WALLET_DATABASE_URL = os.environ.get("WALLET_DATABASE_URL")
