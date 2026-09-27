@@ -33,10 +33,14 @@ cur = conn.cursor()
 # ======================
 
 
+import os
+import psycopg2
+
 # Karbotar sabuwar URL din daga Render Environment Variables
 W_DATABASE_URL = os.environ.get("W_DATABASE_URL")
 
 if not W_DATABASE_URL:
+    print("❌ ERROR: W_DATABASE_URL bashi da bayani a Environment Variables!")
     raise RuntimeError("W_DATABASE_URL is not set in Environment Variables")
 
 def get_wallet_conn():
@@ -47,12 +51,11 @@ def get_wallet_conn():
             sslmode="require"
         )
         c.autocommit = True
+        print("✅ NewW an haɗa lafiya")
         return c
     except Exception as e:
-        print("❌ WALLET DB CONNECT ERROR:", e)
+        print("❌ WALLET DB CONNECT ERROR: Kasa haɗawa da DB -", e)
         return None
-
-
 # WALLET DATABASE CONNECTION
 # ======================
 WALLET_DATABASE_URL = os.environ.get("WALLET_DATABASE_URL")
