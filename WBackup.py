@@ -592,99 +592,86 @@ ON wallet_withdrawals(user_id)
 # END DB MyWallet
 #===============
 
-# ==========================================
-# SETUP & INITIALIZE NEW WALLET DB TABLES
-# ==========================================
-w_conn = get_wallet_conn()
+# ============================================================
+# SUPABASE WALLET DATABASE TABLES
+# NEW SUPABASE DATABASE ONLY
+# ============================================================
 
-if w_conn:
-    try:
-        # Tabbatar da autocommit ko commit da hannu
-        w_conn.autocommit = True 
-        w_cur = w_conn.cursor()
+# -------- WALLET BALANCE --------
+supabase_wallet_cur.execute("""
+CREATE TABLE IF NOT EXISTS wallet_balance (
+    user_id BIGINT PRIMARY KEY,
+    balance BIGINT DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+""")
 
-        # -------- WALLET BALANCE --------
-        w_cur.execute("""
-        CREATE TABLE IF NOT EXISTS wallet_balance (
-            user_id BIGINT PRIMARY KEY,
-            balance BIGINT DEFAULT 0,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-        """)
+# -------- WALLET TRANSACTIONS --------
+supabase_wallet_cur.execute("""
+CREATE TABLE IF NOT EXISTS wallet_transactions (
+    id SERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    amount BIGINT NOT NULL,
+    type VARCHAR(30) NOT NULL,
+    reference TEXT,
+    description TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+""")
 
-        # -------- WALLET TRANSACTIONS --------
-        w_cur.execute("""
-        CREATE TABLE IF NOT EXISTS wallet_transactions (
-            id SERIAL PRIMARY KEY,
-            user_id BIGINT NOT NULL,
-            amount BIGINT NOT NULL,
-            type VARCHAR(30) NOT NULL,
-            reference TEXT,
-            description TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-        """)
+# Index domin saurin transaction history
+supabase_wallet_cur.execute("""
+CREATE INDEX IF NOT EXISTS idx_wallet_transactions_user
+ON wallet_transactions(user_id)
+""")
 
-        w_cur.execute("""
-        CREATE INDEX IF NOT EXISTS idx_wallet_transactions_user
-        ON wallet_transactions(user_id)
-        """)
+# -------- WALLET DEPOSITS (PAYSTACK) --------
+supabase_wallet_cur.execute("""
+CREATE TABLE IF NOT EXISTS wallet_deposits (
+    id TEXT PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    amount BIGINT NOT NULL,
+    type VARCHAR(30) DEFAULT 'wallet',
+    paystack_ref TEXT UNIQUE,
+    status VARCHAR(20) DEFAULT 'pending',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    paid_at TIMESTAMP
+)
+""")
 
-        # -------- WALLET DEPOSITS (PAYSTACK) --------
-        w_cur.execute("""
-        CREATE TABLE IF NOT EXISTS wallet_deposits (
-            id TEXT PRIMARY KEY,
-            user_id BIGINT NOT NULL,
-            amount BIGINT NOT NULL,
-            type VARCHAR(30) DEFAULT 'wallet',
-            paystack_ref TEXT UNIQUE,
-            status VARCHAR(20) DEFAULT 'pending',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            paid_at TIMESTAMP
-        )
-        """)
+# Index domin saurin lookup
+supabase_wallet_cur.execute("""
+CREATE INDEX IF NOT EXISTS idx_wallet_deposits_user
+ON wallet_deposits(user_id)
+""")
 
-        w_cur.execute("""
-        CREATE INDEX IF NOT EXISTS idx_wallet_deposits_user
-        ON wallet_deposits(user_id)
-        """)
+# -------- WALLET WITHDRAWALS (ADMIN USE) --------
+supabase_wallet_cur.execute("""
+CREATE TABLE IF NOT EXISTS wallet_withdrawals (
+    id SERIAL PRIMARY KEY,
+    user_id BIGINT,
+    amount BIGINT,
+    status VARCHAR(20) DEFAULT 'pending',
+    processed_by BIGINT,
+    reference TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    processed_at TIMESTAMP
+)
+""")
 
-        # -------- WALLET WITHDRAWALS (ADMIN USE) --------
-        w_cur.execute("""
-        CREATE TABLE IF NOT EXISTS wallet_withdrawals (
-            id SERIAL PRIMARY KEY,
-            user_id BIGINT,
-            amount BIGINT,
-            status VARCHAR(20) DEFAULT 'pending',
-            processed_by BIGINT,
-            reference TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            processed_at TIMESTAMP
-        )
-        """)
+# Index domin saurin admin queries
+supabase_wallet_cur.execute("""
+CREATE INDEX IF NOT EXISTS idx_wallet_withdrawals_user
+ON wallet_withdrawals(user_id)
+""")
 
-        w_cur.execute("""
-        CREATE INDEX IF NOT EXISTS idx_wallet_withdrawals_user
-        ON wallet_withdrawals(user_id)
-        """)
+print("✅ SUPABASE WALLET TABLES CREATED SUCCESSFULLY")
 
-        # Aiwatar da canje-canje gaba ɗaya zuwa Database
-        w_conn.commit()
 
-        w_cur.close()
-        w_conn.close()
-        print("✅ Sabuwar Wallet DB ta kammala kera tables dinta cikin nasara da COMMIT!")
-
-    except Exception as e:
-        print("❌ WALLET DB INIT ERROR:", e)
-        if w_conn:
-            w_conn.close()
-else:
-    print("❌ An kasa samun haɗi da Sabuwar Wallet DB wajen ƙira tables.")
 
 #===============
-# END DB MyWallet
+# END DB super MyWallet
 #===============
 
 # =========================
