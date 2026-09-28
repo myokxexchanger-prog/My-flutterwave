@@ -32,49 +32,61 @@ cur = conn.cursor()
 # =========================================
 # ======================
 
+# ============================================================
+# SUPABASE WALLET DATABASE CONNECTION
+# ============================================================
 
 import os
 import psycopg2
 
-# Karbotar sabuwar URL din daga Render Environment Variables
-W_DATABASE_URL = os.environ.get("W_DATABASE_URL")
+# Wannan URL na SABON SUPABASE WALLET DATABASE ne kawai.
+# Ba ya da alaƙa da DATABASE_URL ko wani database.
+W_DATABASE_URL = os.environ.get("W_DATABASE_URL", "").strip()
 
 if not W_DATABASE_URL:
-    print("❌ ERROR: W_DATABASE_URL bashi da bayani a Environment Variables!")
-    raise RuntimeError("W_DATABASE_URL is not set in Environment Variables")
+    raise RuntimeError(
+        "W_DATABASE_URL is not set in Render Environment Variables"
+    )
+
 
 def get_wallet_conn():
+    """
+    Connection na Supabase Wallet Database kawai.
+
+    Wannan function ba ya amfani da:
+        DATABASE_URL
+        wani connection
+        wani database
+
+    Duk abin da aka tura ta wannan connection zai shiga
+    database ɗin da W_DATABASE_URL yake nunawa.
+    """
     try:
-        c = psycopg2.connect(
+        conn = psycopg2.connect(
             W_DATABASE_URL,
-            connect_timeout=5,
+            connect_timeout=10,
             sslmode="require"
         )
-        c.autocommit = True
-        print("✅ NewW an haɗa lafiya")
-        return c
-    except Exception as e:
-        print("❌ WALLET DB CONNECT ERROR: Kasa haɗawa da DB -", e)
-        return None
-# WALLET DATABASE CONNECTION
-# ======================
-WALLET_DATABASE_URL = os.environ.get("WALLET_DATABASE_URL")
 
-if not WALLET_DATABASE_URL:
-    raise RuntimeError("WALLET_DATABASE_URL is not set")
+        conn.autocommit = True
+        return conn
 
-def get_wallet_conn():
-    try:
-        c = psycopg2.connect(
-            WALLET_DATABASE_URL,
-            connect_timeout=5,
-            sslmode="require"
-        )
-        c.autocommit = True
-        return c
     except Exception as e:
-        print("❌ WALLET DB CONNECT ERROR:", e)
+        print("❌ SUPABASE WALLET DB CONNECTION ERROR:", e)
         return None
+
+
+# Global connection na SUPABASE WALLET DATABASE kawai.
+# Ana amfani da shi wajen ƙirƙira/karanta tables na wannan DB.
+wallet_conn = get_wallet_conn()
+
+if wallet_conn is None:
+    raise RuntimeError(
+        "An kasa haɗawa da SUPABASE WALLET DATABASE ta W_DATABASE_URL"
+    )
+
+wallet_cur = wallet_conn.cursor()
+
 
 # ===== GLOBAL CONNECTION (FOR TABLE CREATION) =====
 wallet_conn = psycopg2.connect(WALLET_DATABASE_URL)
