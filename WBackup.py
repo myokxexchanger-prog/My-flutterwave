@@ -57,60 +57,84 @@ wallet_conn.autocommit = True
 wallet_cur = wallet_conn.cursor()
 
 
+
 # ============================================================
-# SUPABASE WALLET DATABASE CONNECTION
-# ============================================================
+# SUPABASE WALLET DATABASE
+# DEDICATED CONNECTION — COMPLETELY SEPARATE
 
-import os
-import psycopg2
 
-# Wannan URL na SABON SUPABASE WALLET DATABASE ne kawai.
-# Ba ya da alaƙa da DATABASE_URL ko wani database.
-W_DATABASE_URL = os.environ.get("W_DATABASE_URL", "").strip()
+SUPABASE_WALLET_DATABASE_URL = os.environ.get(
+    "W_DATABASE_URL",
+    ""
+).strip()
 
-if not W_DATABASE_URL:
+
+if not SUPABASE_WALLET_DATABASE_URL:
     raise RuntimeError(
         "W_DATABASE_URL is not set in Render Environment Variables"
     )
 
 
-def get_wallet_conn():
-    """
-    Connection na Supabase Wallet Database kawai.
+# ============================================================
+# SUPABASE WALLET CONNECTION
+# ============================================================
 
-    Wannan function ba ya amfani da:
+def get_supabase_wallet_conn():
+    """
+    Dedicated connection for the NEW Supabase database.
+
+    Wannan connection yana amfani da:
+        W_DATABASE_URL
+
+    Ba ya amfani da:
         DATABASE_URL
-        wani connection
-        wani database
+        WALLET_DATABASE_URL
+        get_conn()
+        get_wallet_conn()
 
-    Duk abin da aka tura ta wannan connection zai shiga
-    database ɗin da W_DATABASE_URL yake nunawa.
+    Saboda haka connection ɗin Supabase yana zaman kansa.
     """
+
     try:
-        conn = psycopg2.connect(
-            W_DATABASE_URL,
+        supabase_conn = psycopg2.connect(
+            SUPABASE_WALLET_DATABASE_URL,
             connect_timeout=10,
             sslmode="require"
         )
 
-        conn.autocommit = True
-        return conn
+        supabase_conn.autocommit = True
+
+        return supabase_conn
 
     except Exception as e:
-        print("❌ SUPABASE WALLET DB CONNECTION ERROR:", e)
+        print(
+            "❌ SUPABASE WALLET DATABASE CONNECTION ERROR:",
+            e
+        )
+
         return None
 
 
-# Global connection na SUPABASE WALLET DATABASE kawai.
-# Ana amfani da shi wajen ƙirƙira/karanta tables na wannan DB.
-wallet_conn = get_wallet_conn()
+# ============================================================
+# GLOBAL SUPABASE CONNECTION
+# ============================================================
 
-if wallet_conn is None:
+supabase_wallet_conn = get_supabase_wallet_conn()
+
+
+if supabase_wallet_conn is None:
     raise RuntimeError(
-        "An kasa haɗawa da SUPABASE WALLET DATABASE ta W_DATABASE_URL"
+        "Failed to connect to Supabase Wallet Database "
+        "using W_DATABASE_URL"
     )
 
-wallet_cur = wallet_conn.cursor()
+
+# ============================================================
+# SUPABASE WALLET CURSOR
+# ============================================================
+
+supabase_wallet_cur = supabase_wallet_conn.cursor()
+
 
 #=== Farko
 
