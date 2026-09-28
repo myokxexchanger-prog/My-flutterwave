@@ -13,7 +13,7 @@ import os
 DATABASE_URL = os.environ.get("DATABASE_URL")
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL is not set")
-    
+
 def get_conn():
     try:
         c = psycopg2.connect(
@@ -31,6 +31,31 @@ conn.autocommit = True
 cur = conn.cursor()
 # =========================================
 # ======================
+# WALLET DATABASE CONNECTION
+# ======================
+WALLET_DATABASE_URL = os.environ.get("WALLET_DATABASE_URL")
+
+if not WALLET_DATABASE_URL:
+    raise RuntimeError("WALLET_DATABASE_URL is not set")
+
+def get_wallet_conn():
+    try:
+        c = psycopg2.connect(
+            WALLET_DATABASE_URL,
+            connect_timeout=5,
+            sslmode="require"
+        )
+        c.autocommit = True
+        return c
+    except Exception as e:
+        print("❌ WALLET DB CONNECT ERROR:", e)
+        return None
+
+# ===== GLOBAL CONNECTION (FOR TABLE CREATION) =====
+wallet_conn = psycopg2.connect(WALLET_DATABASE_URL)
+wallet_conn.autocommit = True
+wallet_cur = wallet_conn.cursor()
+
 
 # ============================================================
 # SUPABASE WALLET DATABASE CONNECTION
@@ -86,13 +111,6 @@ if wallet_conn is None:
     )
 
 wallet_cur = wallet_conn.cursor()
-
-
-# ===== GLOBAL CONNECTION (FOR TABLE CREATION) =====
-wallet_conn = psycopg2.connect(WALLET_DATABASE_URL)
-wallet_conn.autocommit = True
-wallet_cur = wallet_conn.cursor()
-
 
 #=== Farko
 
