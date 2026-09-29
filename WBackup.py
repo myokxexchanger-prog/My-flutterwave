@@ -1030,19 +1030,6 @@ CREATE TABLE IF NOT EXISTS how_to_buy (
 
 print("✅ DATABASE READY — BIGINT FIX APPLIED")
 
-# ============================================================
-# FILM SUPABASE DATABASE TABLES
-# ============================================================
-
-film_supabase_conn = get_film_supabase_conn()
-
-if not film_supabase_conn:
-    raise RuntimeError(
-        "FILM SUPABASE DATABASE CONNECTION FAILED"
-    )
-
-film_supabase_cur = film_supabase_conn.cursor()
-
 
 # =========================
 # DATABASE TABLES (SAFE)
