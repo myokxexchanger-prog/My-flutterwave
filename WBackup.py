@@ -1029,6 +1029,215 @@ CREATE TABLE IF NOT EXISTS how_to_buy (
 """)
 
 print("✅ DATABASE READY — BIGINT FIX APPLIED")
+
+# ============================================================
+# FILM SUPABASE DATABASE TABLES
+# ============================================================
+
+film_supabase_conn = get_film_supabase_conn()
+
+if not film_supabase_conn:
+    raise RuntimeError(
+        "FILM SUPABASE DATABASE CONNECTION FAILED"
+    )
+
+film_supabase_cur = film_supabase_conn.cursor()
+
+
+# =========================
+# DATABASE TABLES (SAFE)
+# =========================
+
+
+# ================= ADMIN NOTES TABLE =================
+
+film_supabase_cur.execute("""
+CREATE TABLE IF NOT EXISTS admin_notes (
+    id SERIAL PRIMARY KEY,
+    admin_id BIGINT NOT NULL,
+    content TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+""")
+
+# ===== INDEX domin saurin fetch =====
+
+film_supabase_cur.execute("""
+CREATE INDEX IF NOT EXISTS idx_admin_notes_admin
+ON admin_notes(admin_id)
+""")
+
+
+# -------- MOVIES --------
+
+film_supabase_cur.execute("""
+CREATE TABLE IF NOT EXISTS movies (
+    id SERIAL PRIMARY KEY,
+    title TEXT,
+    price INTEGER,
+    file_id TEXT,
+    file_name TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    channel_msg_id INTEGER,
+    channel_username TEXT
+)
+""")
+
+
+# -------- ITEMS --------
+
+film_supabase_cur.execute("""
+CREATE TABLE IF NOT EXISTS items (
+    id SERIAL PRIMARY KEY,
+    title TEXT,
+    price INTEGER,
+    file_id TEXT,
+    file_name TEXT,
+    group_key TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    channel_msg_id INTEGER,
+    channel_username TEXT,
+    cashback_amount INTEGER DEFAULT 0
+)
+""")
+
+
+# -------- ORDERS --------
+
+film_supabase_cur.execute("""
+CREATE TABLE IF NOT EXISTS orders (
+    id TEXT PRIMARY KEY,
+    user_id BIGINT,
+    movie_id INTEGER,
+    item_id INTEGER,
+    amount INTEGER,
+    paid INTEGER DEFAULT 0,
+    pay_ref TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    type VARCHAR(20) DEFAULT 'film'
+)
+""")
+
+
+# -------- VIP MEMBERS --------
+
+film_supabase_cur.execute("""
+CREATE TABLE IF NOT EXISTS vip_members (
+    id SERIAL PRIMARY KEY,
+    user_id BIGINT UNIQUE NOT NULL,
+    order_id TEXT,
+    join_date TIMESTAMP,
+    expire_at TIMESTAMP,
+    status VARCHAR(20) DEFAULT 'active',
+    warn1_sent BOOLEAN DEFAULT FALSE,
+    warn2_sent BOOLEAN DEFAULT FALSE,
+    payment_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    invite_link TEXT DEFAULT NULL
+)
+""")
+
+
+# -------- ORDER ITEMS --------
+
+film_supabase_cur.execute("""
+CREATE TABLE IF NOT EXISTS order_items (
+    id SERIAL PRIMARY KEY,
+    order_id TEXT,
+    movie_id INTEGER,
+    item_id INTEGER,
+    price INTEGER,
+    file_id TEXT
+)
+""")
+
+
+# -------- WEEKLY --------
+
+film_supabase_cur.execute("""
+CREATE TABLE IF NOT EXISTS weekly (
+    id SERIAL PRIMARY KEY,
+    poster_file_id TEXT,
+    items TEXT,
+    file_name TEXT,
+    file_id TEXT,
+    channel_msg_id INTEGER,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+""")
+
+
+# -------- CART --------
+
+film_supabase_cur.execute("""
+CREATE TABLE IF NOT EXISTS cart (
+    id SERIAL PRIMARY KEY,
+    user_id BIGINT,
+    movie_id INTEGER,
+    item_id INTEGER,
+    price INTEGER,
+    added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+""")
+
+
+# -------- REFERRALS --------
+
+film_supabase_cur.execute("""
+CREATE TABLE IF NOT EXISTS referrals (
+    id SERIAL PRIMARY KEY,
+    referrer_id BIGINT,
+    referred_id BIGINT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    reward_granted INTEGER DEFAULT 0
+)
+""")
+
+
+# -------- REORDERS --------
+
+film_supabase_cur.execute("""
+CREATE TABLE IF NOT EXISTS reorders (
+    old_order_id INTEGER,
+    new_order_id INTEGER,
+    user_id BIGINT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (old_order_id, user_id)
+)
+""")
+
+
+# -------- REFERRAL CREDITS --------
+
+film_supabase_cur.execute("""
+CREATE TABLE IF NOT EXISTS referral_credits (
+    id SERIAL PRIMARY KEY,
+    referrer_id BIGINT,
+    amount INTEGER,
+    used INTEGER DEFAULT 0,
+    granted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+""")
+
+
+# -------- USER PREFS --------
+
+film_supabase_cur.execute("""
+CREATE TABLE IF NOT EXISTS user_prefs (
+    user_id BIGINT PRIMARY KEY,
+    lang TEXT DEFAULT 'ha'
+)
+""")
+
+
+# -------- USER LIBRARY --------
+
+film_supabase_cur.execute("""
+CREATE TABLE IF NOT EXISTS user_library (
+    user_id BIGINT NOT NULL,
+    movie_id INTEGER,
+    item_id INTEGER
+
+
 import uuid
 import re
 import json
