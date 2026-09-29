@@ -7,13 +7,14 @@ import psycopg2
 import time
 import os
 
+
 # ======================
 # DATABASE CONNECTION
 # ======================
 DATABASE_URL = os.environ.get("DATABASE_URL")
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL is not set")
-    
+
 def get_conn():
     try:
         c = psycopg2.connect(
@@ -57,53 +58,118 @@ wallet_conn.autocommit = True
 wallet_cur = wallet_conn.cursor()
 
 
-#=== Farko
+# ============================================================
+# FILM SUPABASE DATABASE CONNECTION
+# ============================================================
 
-def ensure_items_table():
-    conn = None
+FILM_SUPABASE_DATABASE_URL = os.environ.get(
+    "FILM_SUPABASE_DATABASE_URL"
+)
+
+if not FILM_SUPABASE_DATABASE_URL:
+    raise RuntimeError(
+        "FILM_SUPABASE_DATABASE_URL is not set"
+    )
+
+
+def get_film_supabase_conn():
     try:
-        conn = get_conn()
-        cur = conn.cursor()
+        film_supabase_connection = psycopg2.connect(
+            FILM_SUPABASE_DATABASE_URL,
+            connect_timeout=10,
+            sslmode="require"
+        )
 
-        # 1️⃣ Create table if not exists
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS items (
-                id SERIAL PRIMARY KEY,
-                title TEXT,
-                price INTEGER,
-                file_id TEXT,
-                file_name TEXT,
-                group_key TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                channel_msg_id INTEGER,
-                channel_username TEXT
-            )
-        """)
-        conn.commit()
+        film_supabase_connection.autocommit = True
 
-        # 2️⃣ Add column directly safely
-        cur.execute("""
-            ALTER TABLE items 
-            ADD COLUMN IF NOT EXISTS cashback_amount INTEGER DEFAULT 0;
-        """)
-        conn.commit()
-
-        cur.close()
-        print("✅ items table structure verified successfully")
+        return film_supabase_connection
 
     except Exception as e:
-        if conn:
-            conn.rollback()
-        print("❌ ITEMS TABLE MIGRATION ERROR:", e)
-    finally:
-        if conn:
-            conn.close()
 
-# Gudanar da shi gilma lokacin da script ta tashi
-try:
-    ensure_items_table()
-except Exception as e:
-    print("Migration Execution Error:", e)
+        print(
+            "❌ FILM SUPABASE CONNECTION ERROR:",
+            repr(e)
+        )
+
+        return None
+# ============================================================
+# SUPABASE WALLET DATABASE
+# DEDICATED CONNECTION — COMPLETELY SEPARATE
+
+
+SUPABASE_WALLET_DATABASE_URL = os.environ.get(
+    "W_DATABASE_URL",
+    ""
+).strip()
+
+
+if not SUPABASE_WALLET_DATABASE_URL:
+    raise RuntimeError(
+        "W_DATABASE_URL is not set in Render Environment Variables"
+    )
+
+
+# ============================================================
+# SUPABASE WALLET CONNECTION
+# ============================================================
+
+def get_supabase_wallet_conn():
+    """
+    Dedicated connection for the NEW Supabase database.
+
+    Wannan connection yana amfani da:
+        W_DATABASE_URL
+
+    Ba ya amfani da:
+        DATABASE_URL
+        WALLET_DATABASE_URL
+        get_conn()
+        get_wallet_conn()
+
+    Saboda haka connection ɗin Supabase yana zaman kansa.
+    """
+
+    try:
+        supabase_conn = psycopg2.connect(
+            SUPABASE_WALLET_DATABASE_URL,
+            connect_timeout=10,
+            sslmode="require"
+        )
+
+        supabase_conn.autocommit = True
+
+        return supabase_conn
+
+    except Exception as e:
+        print(
+            "❌ SUPABASE WALLET DATABASE CONNECTION ERROR:",
+            e
+        )
+
+        return None
+
+
+# ============================================================
+# GLOBAL SUPABASE CONNECTION
+# ============================================================
+
+supabase_wallet_conn = get_supabase_wallet_conn()
+
+
+if supabase_wallet_conn is None:
+    raise RuntimeError(
+        "Failed to connect to Supabase Wallet Database "
+        "using W_DATABASE_URL"
+    )
+
+
+# ============================================================
+# SUPABASE WALLET CURSOR
+# ============================================================
+
+supabase_wallet_cur = supabase_wallet_conn.cursor()
+
+
 
 #=== Karshe
 # =============================
