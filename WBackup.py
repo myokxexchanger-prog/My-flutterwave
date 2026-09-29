@@ -2094,275 +2094,1967 @@ def deliver_items(call):
 
     send_feedback_prompt(user_id, order_id)
 
+
+
 # ============================================================
-# /b USER_ID — CHECK SUPABASE WALLET BALANCE
+# WALLET DB BACKUP / MIGRATION SYSTEM
+# OLD WALLET DB  --->  NEW SUPABASE WALLET DB
+#
+# SAFE RECONCILIATION VERSION
+#
+# Uses existing:
+#   get_wallet_conn()
+#   get_supabase_wallet_conn()
+#   ADMIN_ID
+#   bot
+#
+# NO NEW BOT
+# NO NEW DATABASE URL
+# NO NEW ENVIRONMENT VARIABLE
 # ============================================================
 
-@bot.message_handler(commands=["b"])
-def check_supabase_balance(message):
+import time
+import psycopg2
+from telebot import types
+
+
+# ============================================================
+# SETTINGS
+# ============================================================
+
+WALLET_MIGRATION_BATCH_SIZE = 50
+
+# Prevent two wallet migrations from running simultaneously
+WALLET_MIGRATION_RUNNING = False
+
+
+# ============================================================
+# TRANSACTION TYPE CONFIGURATION
+#
+# IMPORTANT:
+#
+# Idan amount a wallet_transactions yana zuwa negative
+# lokacin cire kudi, system zai gane kai tsaye.
+#
+# Idan amount kullum POSITIVE ne, system zai duba type.
+#
+# Ka iya kara irin type din da bot dinka yake amfani da shi
+# a wadannan sets.
+# ============================================================
+
+CREDIT_TYPES = {
+    "credit",
+    "deposit",
+    "deposit_credit",
+    "wallet_deposit",
+    "fund",
+    "funding",
+    "topup",
+    "top_up",
+    "add",
+    "added",
+    "bonus",
+    "refund",
+    "referral",
+    "referral_credit",
+    "cashback",
+    "income",
+    "credit_wallet",
+    "add_money",
+}
+
+DEBIT_TYPES = {
+    "debit",
+    "withdraw",
+    "withdrawal",
+    "wallet_withdrawal",
+    "purchase",
+    "payment",
+    "pay",
+    "spent",
+    "spend",
+    "remove",
+    "removed",
+    "deduct",
+    "deduction",
+    "charge",
+    "debit_wallet",
+    "buy",
+}
+
+
+# ============================================================
+# TABLE DEFINITIONS
+# ============================================================
+
+WALLET_MIGRATION_TABLES = {
+
+    "wallet_balance": {
+        "columns": [
+            "user_id",
+            "balance",
+            "created_at",
+            "updated_at"
+        ],
+        "key": "user_id"
+    },
+
+    "wallet_transactions": {
+        "columns": [
+            "id",
+            "user_id",
+            "amount",
+            "type",
+            "reference",
+            "description",
+            "created_at"
+        ],
+        "key": "id"
+    },
+
+    "wallet_deposits": {
+        "columns": [
+            "id",
+            "user_id",
+            "amount",
+            "type",
+            "paystack_ref",
+            "status",
+            "created_at",
+            "paid_at"
+        ],
+        "key": "id"
+    },
+
+    "wallet_withdrawals": {
+        "columns": [
+            "id",
+            "user_id",
+            "amount",
+            "status",
+            "processed_by",
+            "reference",
+            "created_at",
+            "processed_at"
+        ],
+        "key": "id"
+    }
+}
+
+
+# ============================================================
+# SAFE VALUE COMPARISON
+# ============================================================
+
+def wallet_values_equal(a, b):
+
+    if a is None and b is None:
+        return True
+
+    return a == b
+
+
+# ============================================================
+# COMPLETE ROW COMPARISON
+# ============================================================
+
+def wallet_rows_equal(source_row, target_row):
+
+    if source_row is None or target_row is None:
+        return False
+
+    if len(source_row) != len(target_row):
+        return False
+
+    for source_value, target_value in zip(
+        source_row,
+        target_row
+    ):
+
+        if not wallet_values_equal(
+            source_value,
+            target_value
+        ):
+
+            return False
+
+    return True
+
+
+# ============================================================
+# TRANSACTION SIGN CALCULATOR
+# ============================================================
+
+def wallet_transaction_signed_amount(
+    amount,
+    transaction_type
+):
+    """
+    Determines the real balance effect of a transaction.
+
+    Examples:
+
+        amount = -100
+        type   = anything
+        result = -100
+
+        amount = 100
+        type   = credit
+        result = +100
+
+        amount = 100
+        type   = withdrawal
+        result = -100
+
+    IMPORTANT:
+    If amount is already negative, we trust the sign.
+
+    If amount is positive, type must tell us whether
+    it is credit or debit.
+    """
+
+    if amount is None:
+        raise RuntimeError(
+            "Transaction amount is NULL."
+        )
+
     try:
-        # Admin only
-        if message.from_user.id != ADMIN_ID:
-            return
+        numeric_amount = int(amount)
+    except Exception:
 
-        parts = message.text.strip().split()
+        raise RuntimeError(
+            f"Invalid transaction amount: {amount}"
+        )
 
-        if len(parts) != 2 or not parts[1].isdigit():
-            bot.reply_to(
-                message,
-                "❌ Amfani:\n/b USER_ID\n\nMisali:\n/b 6388483838"
-            )
-            return
+    # --------------------------------------------------------
+    # Negative amount already represents a debit
+    # --------------------------------------------------------
 
-        user_id = int(parts[1])
+    if numeric_amount < 0:
+        return numeric_amount
 
-        conn = get_supabase_wallet_conn()
+    # --------------------------------------------------------
+    # Zero
+    # --------------------------------------------------------
 
-        if conn is None:
-            bot.reply_to(
-                message,
-                "❌ An kasa haɗawa da Supabase Wallet Database."
-            )
-            return
+    if numeric_amount == 0:
+        return 0
 
-        try:
-            cur = conn.cursor()
+    # --------------------------------------------------------
+    # Positive amount
+    # --------------------------------------------------------
 
-            cur.execute(
-                """
-                SELECT user_id, balance
-                FROM wallet_balance
-                WHERE user_id = %s
-                """,
-                (user_id,)
-            )
+    tx_type = ""
 
-            row = cur.fetchone()
+    if transaction_type is not None:
 
-            if row:
-                db_user_id, balance = row
+        tx_type = str(
+            transaction_type
+        ).strip().lower()
 
-                bot.reply_to(
-                    message,
-                    f"✅ SUPABASE DATA\n\n"
-                    f"👤 User ID: {db_user_id}\n"
-                    f"💰 Balance: {balance}\n\n"
-                    f"🟢 An karanta daga wallet_balance."
-                )
-            else:
-                bot.reply_to(
-                    message,
-                    f"❌ Ba a samu User ID `{user_id}` a Supabase ba."
-                )
+    # --------------------------------------------------------
+    # CREDIT
+    # --------------------------------------------------------
 
-        finally:
-            cur.close()
-            conn.close()
+    if tx_type in CREDIT_TYPES:
+        return numeric_amount
+
+    # --------------------------------------------------------
+    # DEBIT
+    # --------------------------------------------------------
+
+    if tx_type in DEBIT_TYPES:
+        return -numeric_amount
+
+    # --------------------------------------------------------
+    # UNKNOWN TYPE
+    #
+    # VERY IMPORTANT:
+    # Kada mu san type ba a sani ba, ba za mu yi guess ba.
+    # Wannan yana kare balance daga kuskure.
+    # --------------------------------------------------------
+
+    raise RuntimeError(
+        "UNKNOWN TRANSACTION TYPE.\n"
+        f"type={transaction_type!r}\n"
+        f"amount={amount!r}\n\n"
+        "Ba a iya tabbatar da cewa transaction "
+        "din credit ne ko debit ba."
+    )
+
+
+# ============================================================
+# ADMIN MESSAGE EDIT HELPER
+# ============================================================
+
+def wallet_backup_edit(
+    chat_id,
+    message_id,
+    text
+):
+
+    try:
+
+        bot.edit_message_text(
+            text,
+            chat_id=chat_id,
+            message_id=message_id
+        )
 
     except Exception as e:
-        print("❌ /b ERROR:", e)
 
-        bot.reply_to(
-            message,
-            f"❌ Error wajen duba Supabase:\n{e}"
+        print(
+            "⚠️ Wallet backup message edit error:",
+            e
         )
-# ============================================================
-# WALLET BALANCE TEST
-# OLD WALLET DB -> NEW SUPABASE WALLET DB
-# ============================================================
-
-@bot.message_handler(commands=["hi"])
-def wallet_transfer_start(message):
-
-    # ================= ADMIN ONLY =================
-    if message.from_user.id != ADMIN_ID:
-        return
-
-    bot.send_message(
-        message.chat.id,
-        "Sannu oga 👋\n\n"
-        "Bani User ID din da zaka duba kudinsa."
-    )
-
-    # Next message from ADMIN zai zama User ID
-    bot.register_next_step_handler(
-        message,
-        wallet_check_old_db
-    )
 
 
 # ============================================================
-# CHECK BALANCE FROM OLD WALLET DATABASE
+# /backup
 # ============================================================
 
-def wallet_check_old_db(message):
+@bot.message_handler(
+    commands=["backup"]
+)
+def wallet_backup_start(message):
+
+    global WALLET_MIGRATION_RUNNING
 
     if message.from_user.id != ADMIN_ID:
         return
 
-    text = (message.text or "").strip()
-
-    # ================= CHECK USER ID =================
-    if not text.isdigit():
-
-        bot.send_message(
-            message.chat.id,
-            "❌ User ID bai dace ba.\n\n"
-            "Ka sake amfani da /hi sannan ka turo User ID."
-        )
-        return
-
-    target_user_id = int(text)
-
-    conn = None
-    cur = None
-
-    try:
-
-        # ====================================================
-        # OLD WALLET DATABASE ONLY
-        # ====================================================
-
-        conn = get_wallet_conn()
-
-        if conn is None:
-
-            bot.send_message(
-                ADMIN_ID,
-                "❌ <b>OLD WALLET DB ERROR</b>\n\n"
-                "An kasa bude connection zuwa tsohon database.\n\n"
-                "Ba a shiga sabon Supabase DB ba."
-            )
-            return
-
-        cur = conn.cursor()
-
-        # ====================================================
-        # CHECK TABLE
-        # ====================================================
-
-        cur.execute("""
-            SELECT to_regclass('public.wallet_balance')
-        """)
-
-        table = cur.fetchone()
-
-        if not table or table[0] is None:
-
-            bot.send_message(
-                ADMIN_ID,
-                "❌ <b>OLD WALLET DB ERROR</b>\n\n"
-                "An shiga database amma table "
-                "<code>wallet_balance</code> babu.\n\n"
-                "Ba a shiga sabon Supabase DB ba."
-            )
-            return
-
-        # ====================================================
-        # GET USER BALANCE
-        # ====================================================
-
-        cur.execute(
-            """
-            SELECT user_id, balance
-            FROM wallet_balance
-            WHERE user_id=%s
-            """,
-            (target_user_id,)
-        )
-
-        row = cur.fetchone()
-
-        if not row:
-
-            bot.send_message(
-                ADMIN_ID,
-                "❌ Ba a samu wannan user a tsohon DB ba.\n\n"
-                f"👤 User ID: <code>{target_user_id}</code>"
-            )
-            return
-
-        old_user_id = row[0]
-        old_balance = row[1]
-
-        # ====================================================
-        # SAVE DATA FOR YES / NO
-        # ====================================================
-
-        wallet_transfer_pending[ADMIN_ID] = {
-            "user_id": old_user_id,
-            "balance": old_balance
-        }
-
-        # ====================================================
-        # YES / NO BUTTON
-        # ====================================================
-
-        kb = InlineKeyboardMarkup()
-
-        kb.row(
-            InlineKeyboardButton(
-                "✅ YES",
-                callback_data="wallet_copy_yes"
-            ),
-            InlineKeyboardButton(
-                "❌ NO",
-                callback_data="wallet_copy_no"
-            )
-        )
+    if WALLET_MIGRATION_RUNNING:
 
         bot.send_message(
             ADMIN_ID,
-            "🔎 <b>OLD WALLET DB</b>\n\n"
-            f"👤 User ID:\n"
-            f"<code>{old_user_id}</code>\n\n"
-            f"💰 Wannan user yana da:\n"
-            f"<b>{old_balance}</b>\n\n"
-            "━━━━━━━━━━━━━━━━━━\n\n"
-            "Kana so a shigar da wannan kudin "
-            "a sabon Supabase DB?",
+            "⚠️ Wani Wallet Backup yana gudana yanzu.\n"
+            "Da fatan a jira ya gama."
+        )
+
+        return
+
+    kb = types.InlineKeyboardMarkup()
+
+    kb.row(
+        types.InlineKeyboardButton(
+            "💰 Wallet DB",
+            callback_data="backup_wallet_db"
+        ),
+        types.InlineKeyboardButton(
+            "🎬 Film DB",
+            callback_data="backup_film_db"
+        )
+    )
+
+    bot.send_message(
+        ADMIN_ID,
+        "Wanne DB zamuyi Backup oga?",
+        reply_markup=kb
+    )
+
+
+# ============================================================
+# WALLET DB BUTTON
+# ============================================================
+
+@bot.callback_query_handler(
+    func=lambda c: c.data == "backup_wallet_db"
+)
+def wallet_backup_confirm(call):
+
+    if call.from_user.id != ADMIN_ID:
+
+        bot.answer_callback_query(
+            call.id,
+            "Ba ka da izinin wannan aikin.",
+            show_alert=True
+        )
+
+        return
+
+    bot.answer_callback_query(call.id)
+
+    kb = types.InlineKeyboardMarkup()
+
+    kb.row(
+        types.InlineKeyboardButton(
+            "✅ YES",
+            callback_data="backup_wallet_confirm_yes"
+        ),
+        types.InlineKeyboardButton(
+            "❌ NO",
+            callback_data="backup_wallet_confirm_no"
+        )
+    )
+
+    wallet_backup_edit(
+        call.message.chat.id,
+        call.message.message_id,
+        "⚠️ KA TABBATA?\n\n"
+        "Kana son tura tsohon Wallet DB data "
+        "da babu a sabon Supabase Wallet DB?\n\n"
+        "Za a duba rows ɗaya bayan ɗaya cikin batches.\n"
+        "Za a tabbatar da su bayan an rubuta su.\n\n"
+        "Danna YES domin fara aikin ko NO domin fasa."
+    )
+
+    try:
+
+        bot.edit_message_reply_markup(
+            call.message.chat.id,
+            call.message.message_id,
             reply_markup=kb
         )
 
     except Exception as e:
 
         print(
-            "❌ OLD WALLET DB ERROR:",
+            "Backup confirmation keyboard error:",
+            e
+        )
+
+
+# ============================================================
+# CANCEL BACKUP
+# ============================================================
+
+@bot.callback_query_handler(
+    func=lambda c: c.data == "backup_wallet_confirm_no"
+)
+def wallet_backup_cancel(call):
+
+    if call.from_user.id != ADMIN_ID:
+
+        bot.answer_callback_query(
+            call.id,
+            "Ba ka da izinin wannan aikin.",
+            show_alert=True
+        )
+
+        return
+
+    bot.answer_callback_query(
+        call.id,
+        "Backup an soke."
+    )
+
+    wallet_backup_edit(
+        call.message.chat.id,
+        call.message.message_id,
+        "❌ WALLET BACKUP AN SOKE.\n\n"
+        "Babu wani migration da aka fara."
+    )
+
+
+# ============================================================
+# START WALLET MIGRATION
+# ============================================================
+
+@bot.callback_query_handler(
+    func=lambda c: c.data == "backup_wallet_confirm_yes"
+)
+def wallet_backup_confirm_yes(call):
+
+    global WALLET_MIGRATION_RUNNING
+
+    if call.from_user.id != ADMIN_ID:
+
+        bot.answer_callback_query(
+            call.id,
+            "Ba ka da izinin wannan aikin.",
+            show_alert=True
+        )
+
+        return
+
+    if WALLET_MIGRATION_RUNNING:
+
+        bot.answer_callback_query(
+            call.id,
+            "Backup yana gudana yanzu.",
+            show_alert=True
+        )
+
+        return
+
+    WALLET_MIGRATION_RUNNING = True
+
+    bot.answer_callback_query(
+        call.id,
+        "Backup ya fara..."
+    )
+
+    wallet_backup_edit(
+        call.message.chat.id,
+        call.message.message_id,
+        "🚀 WALLET BACKUP YA FARA\n\n"
+        "Ana haɗawa da tsohon Wallet DB...\n"
+        "Ana haɗawa da sabon Supabase Wallet DB..."
+    )
+
+    try:
+
+        result = run_wallet_database_migration(
+            call.message.chat.id,
+            call.message.message_id
+        )
+
+        if result:
+
+            wallet_backup_edit(
+                call.message.chat.id,
+                call.message.message_id,
+                result
+            )
+
+    except Exception as e:
+
+        print(
+            "❌ WALLET MIGRATION FATAL ERROR:",
             repr(e)
         )
 
-        bot.send_message(
-            ADMIN_ID,
-            "❌ <b>OLD WALLET DB ERROR</b>\n\n"
-            "An samu matsala yayin karanta balance.\n\n"
-            f"<b>Error:</b>\n"
-            f"<code>{str(e)}</code>\n\n"
-            "Ba a shiga sabon Supabase DB ba."
+        wallet_backup_edit(
+            call.message.chat.id,
+            call.message.message_id,
+            "❌ WALLET BACKUP YA TSAYA\n\n"
+            "An samu babban kuskure:\n\n"
+            f"{str(e)[:3000]}"
         )
 
     finally:
 
+        WALLET_MIGRATION_RUNNING = False
+
+
+# ============================================================
+# SPECIAL WALLET BALANCE RECONCILIATION
+# ============================================================
+
+def reconcile_wallet_balance_user(
+    old_cur,
+    new_cur,
+    user_id,
+    source_balance,
+    source_balance_created_at,
+    source_balance_updated_at
+):
+    """
+    Wannan shine babban tsaron wallet_balance.
+
+    Idan user already yana target:
+
+        old target balance = 300
+        source balance     = 200
+
+    Ba mu amince da UPDATE kai tsaye ba.
+
+    Muna nemo wallet_transactions da suke source
+    amma babu su target.
+
+    Misali:
+
+        missing transaction = -100
+
+    sai:
+
+        300 + (-100) = 200
+
+    Idan result ya yi daidai da source balance:
+        -> transaction missing ne kawai
+        -> balance zai zama 200
+
+    Idan bai yi daidai ba:
+        -> STOP
+        -> kada a taba balance.
+    """
+
+    # ========================================================
+    # GET TARGET BALANCE ROW
+    # ========================================================
+
+    new_cur.execute(
+        """
+        SELECT
+            user_id,
+            balance,
+            created_at,
+            updated_at
+        FROM wallet_balance
+        WHERE user_id = %s
+        """,
+        (user_id,)
+    )
+
+    target_balance_row = new_cur.fetchone()
+
+    # ========================================================
+    # USER DOES NOT EXIST IN TARGET
+    #
+    # Initial migration:
+    # simply copy exact source balance.
+    # ========================================================
+
+    if target_balance_row is None:
+
+        new_cur.execute(
+            """
+            INSERT INTO wallet_balance
+            (
+                user_id,
+                balance,
+                created_at,
+                updated_at
+            )
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (user_id)
+            DO NOTHING
+            """,
+            (
+                user_id,
+                source_balance,
+                source_balance_created_at,
+                source_balance_updated_at
+            )
+        )
+
+        # ----------------------------------------------------
+        # VERIFY
+        # ----------------------------------------------------
+
+        new_cur.execute(
+            """
+            SELECT
+                user_id,
+                balance,
+                created_at,
+                updated_at
+            FROM wallet_balance
+            WHERE user_id = %s
+            """,
+            (user_id,)
+        )
+
+        verify_row = new_cur.fetchone()
+
+        expected_row = (
+            user_id,
+            source_balance,
+            source_balance_created_at,
+            source_balance_updated_at
+        )
+
+        if not wallet_rows_equal(
+            expected_row,
+            verify_row
+        ):
+
+            raise RuntimeError(
+                "wallet_balance INITIAL "
+                "VERIFICATION FAILED.\n"
+                f"user_id={user_id}"
+            )
+
+        return {
+            "action": "copied",
+            "missing_transactions": [],
+            "old_balance": None,
+            "new_balance": source_balance
+        }
+
+    # ========================================================
+    # TARGET ALREADY EXISTS
+    # ========================================================
+
+    target_user_id = target_balance_row[0]
+    target_balance = target_balance_row[1]
+
+    # ========================================================
+    # EXACT MATCH
+    #
+    # Balance and timestamps all match.
+    # ========================================================
+
+    if (
+        target_user_id == user_id
+        and wallet_values_equal(
+            target_balance,
+            source_balance
+        )
+        and wallet_values_equal(
+            target_balance_row[2],
+            source_balance_created_at
+        )
+        and wallet_values_equal(
+            target_balance_row[3],
+            source_balance_updated_at
+        )
+    ):
+
+        return {
+            "action": "exact",
+            "missing_transactions": [],
+            "old_balance": target_balance,
+            "new_balance": source_balance
+        }
+
+    # ========================================================
+    # FIND SOURCE TRANSACTIONS MISSING FROM TARGET
+    #
+    # We only need transaction IDs.
+    # ========================================================
+
+    old_cur.execute(
+        """
+        SELECT
+            id,
+            user_id,
+            amount,
+            type,
+            reference,
+            description,
+            created_at
+        FROM wallet_transactions
+        WHERE user_id = %s
+        ORDER BY id ASC
+        """,
+        (user_id,)
+    )
+
+    source_transactions = old_cur.fetchall()
+
+    if not source_transactions:
+
+        # ----------------------------------------------------
+        # If there are no transactions, a changed balance
+        # cannot safely be explained by transactions.
+        # ----------------------------------------------------
+
+        if target_balance != source_balance:
+
+            raise RuntimeError(
+                "BALANCE RECONCILIATION FAILED.\n"
+                f"user_id={user_id}\n"
+                f"Target balance={target_balance}\n"
+                f"Source balance={source_balance}\n"
+                "Babu transaction da zai bayyana "
+                "canjin balance."
+            )
+
+    # ========================================================
+    # GET TARGET TRANSACTION IDS
+    # ========================================================
+
+    new_cur.execute(
+        """
+        SELECT id
+        FROM wallet_transactions
+        WHERE user_id = %s
+        """,
+        (user_id,)
+    )
+
+    target_transaction_ids = {
+        row[0]
+        for row in new_cur.fetchall()
+    }
+
+    # ========================================================
+    # FIND MISSING TRANSACTIONS
+    # ========================================================
+
+    missing_transactions = []
+
+    for tx in source_transactions:
+
+        tx_id = tx[0]
+
+        if tx_id not in target_transaction_ids:
+
+            missing_transactions.append(tx)
+
+    # ========================================================
+    # CALCULATE DELTA
+    # ========================================================
+
+    source_balance_int = int(source_balance or 0)
+    target_balance_int = int(target_balance or 0)
+
+    expected_delta = (
+        source_balance_int
+        - target_balance_int
+    )
+
+    transaction_delta = 0
+
+    for tx in missing_transactions:
+
+        tx_id = tx[0]
+        amount = tx[2]
+        tx_type = tx[3]
+
+        signed_amount = (
+            wallet_transaction_signed_amount(
+                amount,
+                tx_type
+            )
+        )
+
+        transaction_delta += signed_amount
+
+    # ========================================================
+    # SAFETY CHECK
+    # ========================================================
+
+    if transaction_delta != expected_delta:
+
+        raise RuntimeError(
+            "🔐 BALANCE RECONCILIATION FAILED\n\n"
+            f"user_id={user_id}\n"
+            f"Target balance={target_balance}\n"
+            f"Source balance={source_balance}\n"
+            f"Expected balance delta={expected_delta}\n"
+            f"Missing transaction delta={transaction_delta}\n\n"
+            f"Missing transactions="
+            f"{len(missing_transactions)}\n\n"
+            "An dakatar da wannan user domin "
+            "kada a lalata balance."
+        )
+
+    # ========================================================
+    # INSERT ONLY MISSING TRANSACTIONS
+    # ========================================================
+
+    inserted_transactions = []
+
+    for tx in missing_transactions:
+
+        (
+            tx_id,
+            tx_user_id,
+            tx_amount,
+            tx_type,
+            tx_reference,
+            tx_description,
+            tx_created_at
+        ) = tx
+
+        new_cur.execute(
+            """
+            INSERT INTO wallet_transactions
+            (
+                id,
+                user_id,
+                amount,
+                type,
+                reference,
+                description,
+                created_at
+            )
+            VALUES (
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s
+            )
+            ON CONFLICT (id)
+            DO NOTHING
+            """,
+            (
+                tx_id,
+                tx_user_id,
+                tx_amount,
+                tx_type,
+                tx_reference,
+                tx_description,
+                tx_created_at
+            )
+        )
+
+        inserted_transactions.append(
+            tx_id
+        )
+
+    # ========================================================
+    # NOW UPDATE BALANCE
+    #
+    # Only after missing transactions were identified and
+    # delta was mathematically confirmed.
+    # ========================================================
+
+    new_cur.execute(
+        """
+        UPDATE wallet_balance
+        SET
+            balance = %s,
+            created_at = %s,
+            updated_at = %s
+        WHERE user_id = %s
+        """,
+        (
+            source_balance,
+            source_balance_created_at,
+            source_balance_updated_at,
+            user_id
+        )
+    )
+
+    # ========================================================
+    # VERIFY BALANCE
+    # ========================================================
+
+    new_cur.execute(
+        """
+        SELECT
+            user_id,
+            balance,
+            created_at,
+            updated_at
+        FROM wallet_balance
+        WHERE user_id = %s
+        """,
+        (user_id,)
+    )
+
+    verified_balance = new_cur.fetchone()
+
+    expected_balance_row = (
+        user_id,
+        source_balance,
+        source_balance_created_at,
+        source_balance_updated_at
+    )
+
+    if not wallet_rows_equal(
+        expected_balance_row,
+        verified_balance
+    ):
+
+        raise RuntimeError(
+            "wallet_balance FINAL "
+            "VERIFICATION FAILED.\n"
+            f"user_id={user_id}"
+        )
+
+    # ========================================================
+    # VERIFY EVERY MISSING TRANSACTION
+    # ========================================================
+
+    for tx in missing_transactions:
+
+        tx_id = tx[0]
+
+        new_cur.execute(
+            """
+            SELECT
+                id,
+                user_id,
+                amount,
+                type,
+                reference,
+                description,
+                created_at
+            FROM wallet_transactions
+            WHERE id = %s
+            """,
+            (tx_id,)
+        )
+
+        target_tx = new_cur.fetchone()
+
+        if target_tx is None:
+
+            raise RuntimeError(
+                "Transaction verification failed.\n"
+                f"user_id={user_id}\n"
+                f"transaction_id={tx_id}"
+            )
+
+        if not wallet_rows_equal(
+            tx,
+            target_tx
+        ):
+
+            raise RuntimeError(
+                "Transaction data mismatch.\n"
+                f"user_id={user_id}\n"
+                f"transaction_id={tx_id}"
+            )
+
+    return {
+        "action": "reconciled",
+        "missing_transactions": inserted_transactions,
+        "old_balance": target_balance,
+        "new_balance": source_balance,
+        "delta": expected_delta
+    }
+
+
+# ============================================================
+# MAIN MIGRATION ENGINE
+# ============================================================
+
+def run_wallet_database_migration(
+    chat_id,
+    message_id
+):
+
+    old_conn = None
+    new_conn = None
+
+    old_cur = None
+    new_cur = None
+
+    total_source_rows = 0
+    total_copied_rows = 0
+    total_skipped_rows = 0
+    total_updated_rows = 0
+    total_verified_rows = 0
+    total_failed_rows = 0
+
+    total_reconciled_balances = 0
+    total_missing_transactions_recovered = 0
+
+    table_results = []
+
+    try:
+
         # ====================================================
-        # CLOSE OLD CURSOR
+        # CONNECT SOURCE
         # ====================================================
 
-        if cur is not None:
+        old_conn = get_wallet_conn()
+
+        if not old_conn:
+
+            raise RuntimeError(
+                "Tsohon Wallet DB ya kasa bada connection."
+            )
+
+        # ====================================================
+        # CONNECT TARGET
+        # ====================================================
+
+        new_conn = get_supabase_wallet_conn()
+
+        if not new_conn:
+
+            raise RuntimeError(
+                "Sabon Supabase Wallet DB ya kasa bada connection."
+            )
+
+        # ====================================================
+        # SOURCE SNAPSHOT
+        #
+        # Keep this for the normal table migration.
+        #
+        # IMPORTANT:
+        # wallet_balance reconciliation itself performs
+        # a transaction-aware safety check.
+        # ====================================================
+
+        old_conn.autocommit = False
+
+        old_cur = old_conn.cursor()
+
+        old_cur.execute(
+            "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"
+        )
+
+        # ====================================================
+        # TARGET
+        # ====================================================
+
+        new_conn.autocommit = False
+
+        new_cur = new_conn.cursor()
+
+        # ====================================================
+        # PROCESS TABLES
+        # ====================================================
+
+        table_names = list(
+            WALLET_MIGRATION_TABLES.keys()
+        )
+
+        for table_index, table_name in enumerate(
+            table_names,
+            start=1
+        ):
+
+            config = WALLET_MIGRATION_TABLES[
+                table_name
+            ]
+
+            columns = config["columns"]
+            key_column = config["key"]
+
+            wallet_backup_edit(
+                chat_id,
+                message_id,
+                "🔄 WALLET BACKUP\n\n"
+                f"📦 Table {table_index}/4:\n"
+                f"🗃 {table_name}\n\n"
+                "Working... 🔄"
+            )
+
+            # =================================================
+            # SOURCE COUNT
+            # =================================================
+
+            old_cur.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM "{table_name}"
+                """
+            )
+
+            source_count = old_cur.fetchone()[0]
+
+            total_source_rows += source_count
+
+            # =================================================
+            # EMPTY TABLE
+            # =================================================
+
+            if source_count == 0:
+
+                table_results.append(
+                    (
+                        table_name,
+                        0,
+                        0,
+                        0,
+                        0
+                    )
+                )
+
+                wallet_backup_edit(
+                    chat_id,
+                    message_id,
+                    "🔄 WALLET BACKUP\n\n"
+                    f"📦 {table_name}\n\n"
+                    "Source rows: 0\n"
+                    "Copied: 0 ✅\n"
+                    "Skipped: 0\n"
+                    "Updated: 0\n"
+                    "Verified: 0 ✅\n\n"
+                    "➡️ Table empty.\n"
+                    "Moving to next table..."
+                )
+
+                continue
+
+            table_copied = 0
+            table_skipped = 0
+            table_updated = 0
+            table_verified = 0
+            table_failed = 0
+
+            # =================================================
+            # SPECIAL BALANCE TABLE
+            #
+            # We process wallet_balance user by user and
+            # reconcile missing transactions before changing
+            # an already-existing user's balance.
+            # =================================================
+
+            if table_name == "wallet_balance":
+
+                key_index = columns.index(
+                    key_column
+                )
+
+                last_key = None
+
+                while True:
+
+                    column_sql = ", ".join(
+                        f'"{c}"'
+                        for c in columns
+                    )
+
+                    if last_key is None:
+
+                        old_cur.execute(
+                            f"""
+                            SELECT {column_sql}
+                            FROM "{table_name}"
+                            ORDER BY "{key_column}" ASC
+                            LIMIT %s
+                            """,
+                            (
+                                WALLET_MIGRATION_BATCH_SIZE,
+                            )
+                        )
+
+                    else:
+
+                        old_cur.execute(
+                            f"""
+                            SELECT {column_sql}
+                            FROM "{table_name}"
+                            WHERE "{key_column}" > %s
+                            ORDER BY "{key_column}" ASC
+                            LIMIT %s
+                            """,
+                            (
+                                last_key,
+                                WALLET_MIGRATION_BATCH_SIZE
+                            )
+                        )
+
+                    batch = old_cur.fetchall()
+
+                    if not batch:
+                        break
+
+                    for source_row in batch:
+
+                        (
+                            user_id,
+                            source_balance,
+                            source_created_at,
+                            source_updated_at
+                        ) = source_row
+
+                        try:
+
+                            result = (
+                                reconcile_wallet_balance_user(
+                                    old_cur,
+                                    new_cur,
+                                    user_id,
+                                    source_balance,
+                                    source_created_at,
+                                    source_updated_at
+                                )
+                            )
+
+                            if result["action"] == "copied":
+
+                                table_copied += 1
+                                total_copied_rows += 1
+
+                            elif result["action"] == "exact":
+
+                                table_skipped += 1
+                                total_skipped_rows += 1
+
+                            elif result["action"] == "reconciled":
+
+                                table_updated += 1
+                                total_updated_rows += 1
+
+                                total_reconciled_balances += 1
+
+                                total_missing_transactions_recovered += len(
+                                    result[
+                                        "missing_transactions"
+                                    ]
+                                )
+
+                            table_verified += 1
+                            total_verified_rows += 1
+
+                            # ---------------------------------
+                            # COMMIT THIS USER
+                            # ---------------------------------
+
+                            new_conn.commit()
+
+                        except Exception as user_error:
+
+                            new_conn.rollback()
+
+                            table_failed += 1
+                            total_failed_rows += 1
+
+                            raise RuntimeError(
+                                f"wallet_balance user "
+                                f"{user_id} failed.\n\n"
+                                f"{user_error}"
+                            )
+
+                    last_key = batch[-1][key_index]
+
+                    processed = (
+                        table_copied
+                        + table_skipped
+                        + table_updated
+                    )
+
+                    wallet_backup_edit(
+                        chat_id,
+                        message_id,
+                        "🔄 WALLET BACKUP\n\n"
+                        f"📦 Table {table_index}/4\n"
+                        f"🗃 {table_name}\n\n"
+                        f"Source rows: {source_count:,}\n"
+                        f"Processed: {processed:,} / "
+                        f"{source_count:,}\n\n"
+                        f"Copied: {table_copied:,} ✅\n"
+                        f"Already existed: "
+                        f"{table_skipped:,} ⏭️\n"
+                        f"Reconciled: "
+                        f"{table_updated:,} 🔄\n"
+                        f"Verified: {table_verified:,} ✅\n"
+                        f"Failed: {table_failed:,}\n\n"
+                        f"Recovered missing transactions: "
+                        f"{total_missing_transactions_recovered:,}\n\n"
+                        "Working... 🔄"
+                    )
+
+                # ---------------------------------------------
+                # TABLE CHECK
+                # ---------------------------------------------
+
+                processed_total = (
+                    table_copied
+                    + table_skipped
+                    + table_updated
+                )
+
+                if processed_total != source_count:
+
+                    raise RuntimeError(
+                        f"TABLE INCOMPLETE: "
+                        f"{table_name}\n"
+                        f"Source={source_count}\n"
+                        f"Processed={processed_total}"
+                    )
+
+                if table_verified != source_count:
+
+                    raise RuntimeError(
+                        f"TABLE VERIFICATION INCOMPLETE: "
+                        f"{table_name}\n"
+                        f"Source={source_count}\n"
+                        f"Verified={table_verified}"
+                    )
+
+                table_results.append(
+                    (
+                        table_name,
+                        source_count,
+                        table_copied,
+                        table_skipped,
+                        table_updated
+                    )
+                )
+
+                wallet_backup_edit(
+                    chat_id,
+                    message_id,
+                    "✅ TABLE COMPLETED\n\n"
+                    f"🗃 {table_name}\n\n"
+                    f"Source rows: {source_count:,}\n"
+                    f"Copied: {table_copied:,} ✅\n"
+                    f"Already existed: "
+                    f"{table_skipped:,} ⏭️\n"
+                    f"Reconciled: "
+                    f"{table_updated:,} 🔄\n"
+                    f"Verified: {table_verified:,} ✅\n"
+                    f"Failed: {table_failed:,}\n\n"
+                    f"Missing transactions recovered: "
+                    f"{total_missing_transactions_recovered:,}\n\n"
+                    "➡️ Moving to next table..."
+                )
+
+                time.sleep(0.5)
+
+                continue
+
+            # =================================================
+            # NORMAL TABLE MIGRATION
+            #
+            # wallet_transactions
+            # wallet_deposits
+            # wallet_withdrawals
+            # =================================================
+
+            last_key = None
+
+            key_index = columns.index(
+                key_column
+            )
+
+            column_sql = ", ".join(
+                f'"{c}"'
+                for c in columns
+            )
+
+            while True:
+
+                # =============================================
+                # FETCH BATCH
+                # =============================================
+
+                if last_key is None:
+
+                    old_cur.execute(
+                        f"""
+                        SELECT {column_sql}
+                        FROM "{table_name}"
+                        ORDER BY "{key_column}" ASC
+                        LIMIT %s
+                        """,
+                        (
+                            WALLET_MIGRATION_BATCH_SIZE,
+                        )
+                    )
+
+                else:
+
+                    old_cur.execute(
+                        f"""
+                        SELECT {column_sql}
+                        FROM "{table_name}"
+                        WHERE "{key_column}" > %s
+                        ORDER BY "{key_column}" ASC
+                        LIMIT %s
+                        """,
+                        (
+                            last_key,
+                            WALLET_MIGRATION_BATCH_SIZE
+                        )
+                    )
+
+                batch = old_cur.fetchall()
+
+                if not batch:
+                    break
+
+                keys = [
+                    row[key_index]
+                    for row in batch
+                ]
+
+                placeholders = ", ".join(
+                    ["%s"] * len(keys)
+                )
+
+                # =============================================
+                # TARGET LOOKUP
+                # =============================================
+
+                new_cur.execute(
+                    f"""
+                    SELECT {column_sql}
+                    FROM "{table_name}"
+                    WHERE "{key_column}" IN (
+                        {placeholders}
+                    )
+                    """,
+                    tuple(keys)
+                )
+
+                target_rows = new_cur.fetchall()
+
+                target_by_key = {}
+
+                for target_row in target_rows:
+
+                    target_key = target_row[
+                        key_index
+                    ]
+
+                    target_by_key[
+                        target_key
+                    ] = target_row
+
+                # =============================================
+                # PROCESS ROWS
+                # =============================================
+
+                for source_row in batch:
+
+                    source_key = source_row[
+                        key_index
+                    ]
+
+                    existing_row = (
+                        target_by_key.get(
+                            source_key
+                        )
+                    )
+
+                    # =========================================
+                    # EXACT EXISTING ROW
+                    # =========================================
+
+                    if existing_row is not None:
+
+                        if wallet_rows_equal(
+                            source_row,
+                            existing_row
+                        ):
+
+                            table_skipped += 1
+                            total_skipped_rows += 1
+
+                            continue
+
+                    # =========================================
+                    # INSERT / UPDATE
+                    # =========================================
+
+                    insert_columns = ", ".join(
+                        f'"{c}"'
+                        for c in columns
+                    )
+
+                    insert_placeholders = ", ".join(
+                        ["%s"] * len(columns)
+                    )
+
+                    update_columns = [
+                        c
+                        for c in columns
+                        if c != key_column
+                    ]
+
+                    update_sql = ", ".join(
+                        f'"{c}" = EXCLUDED."{c}"'
+                        for c in update_columns
+                    )
+
+                    insert_sql = f"""
+                        INSERT INTO "{table_name}"
+                        ({insert_columns})
+                        VALUES ({insert_placeholders})
+                        ON CONFLICT ("{key_column}")
+                        DO UPDATE SET
+                            {update_sql}
+                    """
+
+                    try:
+
+                        new_cur.execute(
+                            insert_sql,
+                            tuple(source_row)
+                        )
+
+                        if existing_row is None:
+
+                            table_copied += 1
+                            total_copied_rows += 1
+
+                        else:
+
+                            table_updated += 1
+                            total_updated_rows += 1
+
+                    except Exception as row_error:
+
+                        new_conn.rollback()
+
+                        table_failed += 1
+                        total_failed_rows += 1
+
+                        raise RuntimeError(
+                            f"Failed migrating "
+                            f"{table_name} "
+                            f"key={source_key}\n"
+                            f"Error: {row_error}"
+                        )
+
+                # =============================================
+                # VERIFY BATCH
+                # =============================================
+
+                new_cur.execute(
+                    f"""
+                    SELECT {column_sql}
+                    FROM "{table_name}"
+                    WHERE "{key_column}" IN (
+                        {placeholders}
+                    )
+                    """,
+                    tuple(keys)
+                )
+
+                verified_rows = new_cur.fetchall()
+
+                verified_by_key = {}
+
+                for verified_row in verified_rows:
+
+                    verified_key = verified_row[
+                        key_index
+                    ]
+
+                    verified_by_key[
+                        verified_key
+                    ] = verified_row
+
+                for source_row in batch:
+
+                    source_key = source_row[
+                        key_index
+                    ]
+
+                    target_row = (
+                        verified_by_key.get(
+                            source_key
+                        )
+                    )
+
+                    if target_row is None:
+
+                        raise RuntimeError(
+                            f"VERIFICATION FAILED: "
+                            f"{table_name} "
+                            f"key={source_key} "
+                            f"babu a target."
+                        )
+
+                    if not wallet_rows_equal(
+                        source_row,
+                        target_row
+                    ):
+
+                        raise RuntimeError(
+                            f"VERIFICATION FAILED: "
+                            f"{table_name} "
+                            f"key={source_key}\n"
+                            f"Source da Target "
+                            f"ba yi daidai ba."
+                        )
+
+                    table_verified += 1
+                    total_verified_rows += 1
+
+                # =============================================
+                # COMMIT BATCH
+                # =============================================
+
+                new_conn.commit()
+
+                # =============================================
+                # CHECKPOINT
+                # =============================================
+
+                last_key = batch[-1][key_index]
+
+                processed = (
+                    table_copied
+                    + table_skipped
+                    + table_updated
+                )
+
+                wallet_backup_edit(
+                    chat_id,
+                    message_id,
+                    "🔄 WALLET BACKUP\n\n"
+                    f"📦 Table {table_index}/4\n"
+                    f"🗃 {table_name}\n\n"
+                    f"Source rows: {source_count:,}\n"
+                    f"Processed: {processed:,} / "
+                    f"{source_count:,}\n\n"
+                    f"Copied: {table_copied:,} ✅\n"
+                    f"Already existed: "
+                    f"{table_skipped:,} ⏭️\n"
+                    f"Updated: {table_updated:,} 🔄\n"
+                    f"Verified: {table_verified:,} ✅\n"
+                    f"Failed: {table_failed:,}\n\n"
+                    "Working... 🔄"
+                )
+
+            # =================================================
+            # TABLE COMPLETION CHECK
+            # =================================================
+
+            processed_total = (
+                table_copied
+                + table_skipped
+                + table_updated
+            )
+
+            if processed_total != source_count:
+
+                raise RuntimeError(
+                    f"TABLE INCOMPLETE: "
+                    f"{table_name}\n"
+                    f"Source={source_count}\n"
+                    f"Processed={processed_total}"
+                )
+
+            if table_verified != source_count:
+
+                raise RuntimeError(
+                    f"TABLE VERIFICATION INCOMPLETE: "
+                    f"{table_name}\n"
+                    f"Source={source_count}\n"
+                    f"Verified={table_verified}"
+                )
+
+            table_results.append(
+                (
+                    table_name,
+                    source_count,
+                    table_copied,
+                    table_skipped,
+                    table_updated
+                )
+            )
+
+            # =================================================
+            # RESET SERIAL SEQUENCE
+            # =================================================
+
+            if key_column == "id":
+
+                try:
+
+                    new_cur.execute(
+                        f"""
+                        SELECT setval(
+                            pg_get_serial_sequence(
+                                %s,
+                                %s
+                            ),
+                            COALESCE(
+                                (
+                                    SELECT MAX("id")
+                                    FROM "{table_name}"
+                                ),
+                                1
+                            ),
+                            true
+                        )
+                        """,
+                        (
+                            table_name,
+                            "id"
+                        )
+                    )
+
+                    new_conn.commit()
+
+                except Exception as sequence_error:
+
+                    new_conn.rollback()
+
+                    print(
+                        "⚠️ Sequence reset warning:",
+                        table_name,
+                        sequence_error
+                    )
+
+            # =================================================
+            # TABLE SUCCESS
+            # =================================================
+
+            wallet_backup_edit(
+                chat_id,
+                message_id,
+                "✅ TABLE COMPLETED\n\n"
+                f"🗃 {table_name}\n\n"
+                f"Source rows: {source_count:,}\n"
+                f"Copied: {table_copied:,} ✅\n"
+                f"Already existed: "
+                f"{table_skipped:,} ⏭️\n"
+                f"Updated: {table_updated:,} 🔄\n"
+                f"Verified: {table_verified:,} ✅\n"
+                f"Failed: {table_failed:,}\n\n"
+                "➡️ Moving to next table..."
+            )
+
+            time.sleep(0.5)
+
+        # ====================================================
+        # FINAL SOURCE/TARGET COUNT VERIFICATION
+        # ====================================================
+
+        final_lines = []
+
+        for table_name in WALLET_MIGRATION_TABLES:
+
+            old_cur.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM "{table_name}"
+                """
+            )
+
+            source_final_count = (
+                old_cur.fetchone()[0]
+            )
+
+            new_cur.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM "{table_name}"
+                """
+            )
+
+            target_final_count = (
+                new_cur.fetchone()[0]
+            )
+
+            if (
+                source_final_count
+                != target_final_count
+            ):
+
+                raise RuntimeError(
+                    f"FINAL COUNT MISMATCH: "
+                    f"{table_name}\n"
+                    f"Source={source_final_count}\n"
+                    f"Target={target_final_count}"
+                )
+
+            final_lines.append(
+                f"{table_name}: "
+                f"{target_final_count:,}/"
+                f"{source_final_count:,} ✅"
+            )
+
+        # ====================================================
+        # END SOURCE SNAPSHOT
+        # ====================================================
+
+        old_conn.rollback()
+
+        # ====================================================
+        # CLOSE
+        # ====================================================
+
+        old_cur.close()
+        old_cur = None
+
+        new_cur.close()
+        new_cur = None
+
+        old_conn.close()
+        old_conn = None
+
+        new_conn.close()
+        new_conn = None
+
+        # ====================================================
+        # FINAL REPORT
+        # ====================================================
+
+        report = (
+            "🏁 WALLET BACKUP COMPLETED\n\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "📦 TABLES\n"
+            "━━━━━━━━━━━━━━━━━━\n\n"
+            + "\n".join(final_lines)
+            + "\n\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "📊 MIGRATION SUMMARY\n"
+            "━━━━━━━━━━━━━━━━━━\n\n"
+            f"Source rows: {total_source_rows:,}\n"
+            f"Copied: {total_copied_rows:,} ✅\n"
+            f"Already existed: "
+            f"{total_skipped_rows:,} ⏭️\n"
+            f"Updated: {total_updated_rows:,} 🔄\n"
+            f"Verified: {total_verified_rows:,} ✅\n"
+            f"Failed: {total_failed_rows:,}\n\n"
+            f"Balance reconciled: "
+            f"{total_reconciled_balances:,} 🔄\n"
+            f"Missing transactions recovered: "
+            f"{total_missing_transactions_recovered:,} 🧾\n\n"
+            "🔐 Every processed row was verified.\n"
+            "💰 Balance changes were checked against "
+            "missing transactions.\n"
+            "🧾 Missing transaction IDs were recovered.\n"
+            "🕒 Original timestamps were preserved.\n"
+            "🧾 Original IDs were preserved.\n"
+            "NULL values were preserved.\n\n"
+            "🎉 WALLET MIGRATION VERIFIED."
+        )
+
+        return report
+
+    except Exception:
+
+        if new_conn:
 
             try:
-                cur.close()
+                new_conn.rollback()
             except:
                 pass
 
-        # ====================================================
-        # CLOSE OLD CONNECTION
-        # ====================================================
-
-        if conn is not None:
+        if old_conn:
 
             try:
-                conn.close()
+                old_conn.rollback()
             except:
                 pass
+
+        raise
+
+    finally:
+
+        if old_cur:
+
+            try:
+                old_cur.close()
+            except:
+                pass
+
+        if new_cur:
+
+            try:
+                new_cur.close()
+            except:
+                pass
+
+        if old_conn:
+
+            try:
+                old_conn.close()
+            except:
+                pass
+
+        if new_conn:
+
+            try:
+                new_conn.close()
+            except:
+                pass
+
+
+# ============================================================
+# FILM DB CALLBACK PLACEHOLDER
+#
+# Ba mu gina Film DB yanzu.
+# ============================================================
+
+@bot.callback_query_handler(
+    func=lambda c: c.data == "backup_film_db"
+)
+def backup_film_db_placeholder(call):
+
+    if call.from_user.id != ADMIN_ID:
+
+        bot.answer_callback_query(
+            call.id,
+            "Ba ka da izinin wannan aikin.",
+            show_alert=True
+        )
+
+        return
+
+    bot.answer_callback_query(call.id)
+
+    wallet_backup_edit(
+        call.message.chat.id,
+        call.message.message_id,
+        "🎬 FILM DB\n\n"
+        "An zaɓi Film DB.\n\n"
+        "⏳ Film DB backup system "
+        "ba mu gina shi yanzu ba.\n\n"
+        "Za mu gina nasa migration system "
+        "dabam bayan an kammala Wallet DB."
+    )
 
 
 # ============================================================
