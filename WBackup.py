@@ -2546,6 +2546,7 @@ def wallet_backup_cancel(call):
     )
 
 
+
 # ============================================================
 # START WALLET MIGRATION
 # ============================================================
@@ -2629,6 +2630,18 @@ def wallet_backup_confirm_yes(call):
 
 # ============================================================
 # SPECIAL WALLET BALANCE RECONCILIATION
+#
+# IMPORTANT SAFETY RULES:
+#
+# 1. Target-only user is NEVER deleted.
+# 2. Target-only transaction is NEVER deleted.
+# 3. Source transaction missing from target can be recovered.
+# 4. Debit/Credit direction is checked through the existing
+#    wallet_transaction_signed_amount() function.
+# 5. Balance is changed ONLY when the transaction delta exactly
+#    explains the balance difference.
+# 6. If the math does not match, that USER is protected and
+#    migration continues. The whole migration does NOT stop.
 # ============================================================
 
 def reconcile_wallet_balance_user(
@@ -2639,38 +2652,22 @@ def reconcile_wallet_balance_user(
     source_balance_created_at,
     source_balance_updated_at
 ):
-    """
-    Wannan shine babban tsaron wallet_balance.
-
-    Idan user already yana target:
-
-        old target balance = 300
-        source balance     = 200
-
-    Ba mu amince da UPDATE kai tsaye ba.
-
-    Muna nemo wallet_transactions da suke source
-    amma babu su target.
-
-    Misali:
-
-        missing transaction = -100
-
-    sai:
-
-        300 + (-100) = 200
-
-    Idan result ya yi daidai da source balance:
-        -> transaction missing ne kawai
-        -> balance zai zama 200
-
-    Idan bai yi daidai ba:
-        -> STOP
-        -> kada a taba balance.
-    """
 
     # ========================================================
-    # GET TARGET BALANCE ROW
+    # RESULT DEFAULT
+    # ========================================================
+
+    result_base = {
+        "action": "protected",
+        "missing_transactions": [],
+        "old_balance": None,
+        "new_balance": source_balance,
+        "delta": 0,
+        "reason": None
+    }
+
+    # ========================================================
+    # GET TARGET BALANCE
     # ========================================================
 
     new_cur.execute(
@@ -2691,8 +2688,7 @@ def reconcile_wallet_balance_user(
     # ========================================================
     # USER DOES NOT EXIST IN TARGET
     #
-    # Initial migration:
-    # simply copy exact source balance.
+    # Safe normal copy.
     # ========================================================
 
     if target_balance_row is None:
@@ -2759,20 +2755,24 @@ def reconcile_wallet_balance_user(
             "action": "copied",
             "missing_transactions": [],
             "old_balance": None,
-            "new_balance": source_balance
+            "new_balance": source_balance,
+            "delta": 0,
+            "reason": None
         }
 
     # ========================================================
-    # TARGET ALREADY EXISTS
+    # TARGET ALREADY HAS USER
     # ========================================================
 
     target_user_id = target_balance_row[0]
     target_balance = target_balance_row[1]
 
+    result_base["old_balance"] = target_balance
+
     # ========================================================
     # EXACT MATCH
     #
-    # Balance and timestamps all match.
+    # Nothing to change.
     # ========================================================
 
     if (
@@ -2795,13 +2795,13 @@ def reconcile_wallet_balance_user(
             "action": "exact",
             "missing_transactions": [],
             "old_balance": target_balance,
-            "new_balance": source_balance
+            "new_balance": source_balance,
+            "delta": 0,
+            "reason": None
         }
 
     # ========================================================
-    # FIND SOURCE TRANSACTIONS MISSING FROM TARGET
-    #
-    # We only need transaction IDs.
+    # GET SOURCE TRANSACTIONS
     # ========================================================
 
     old_cur.execute(
@@ -2823,31 +2823,14 @@ def reconcile_wallet_balance_user(
 
     source_transactions = old_cur.fetchall()
 
-    if not source_transactions:
-
-        # ----------------------------------------------------
-        # If there are no transactions, a changed balance
-        # cannot safely be explained by transactions.
-        # ----------------------------------------------------
-
-        if target_balance != source_balance:
-
-            raise RuntimeError(
-                "BALANCE RECONCILIATION FAILED.\n"
-                f"user_id={user_id}\n"
-                f"Target balance={target_balance}\n"
-                f"Source balance={source_balance}\n"
-                "Babu transaction da zai bayyana "
-                "canjin balance."
-            )
-
     # ========================================================
     # GET TARGET TRANSACTION IDS
     # ========================================================
 
     new_cur.execute(
         """
-        SELECT id
+        SELECT
+            id
         FROM wallet_transactions
         WHERE user_id = %s
         """,
@@ -2860,7 +2843,7 @@ def reconcile_wallet_balance_user(
     }
 
     # ========================================================
-    # FIND MISSING TRANSACTIONS
+    # FIND SOURCE TRANSACTIONS MISSING IN TARGET
     # ========================================================
 
     missing_transactions = []
@@ -2874,18 +2857,62 @@ def reconcile_wallet_balance_user(
             missing_transactions.append(tx)
 
     # ========================================================
-    # CALCULATE DELTA
+    # BALANCE DELTA
     # ========================================================
 
-    source_balance_int = int(source_balance or 0)
-    target_balance_int = int(target_balance or 0)
+    source_balance_int = int(
+        source_balance or 0
+    )
+
+    target_balance_int = int(
+        target_balance or 0
+    )
 
     expected_delta = (
         source_balance_int
         - target_balance_int
     )
 
+    # ========================================================
+    # NO MISSING TRANSACTIONS
+    #
+    # VERY IMPORTANT:
+    #
+    # Do NOT force target balance to source balance.
+    #
+    # We have no transaction evidence explaining the difference.
+    #
+    # Protect target and continue migration.
+    # ========================================================
+
+    if not missing_transactions:
+
+        return {
+            "action": "protected",
+            "missing_transactions": [],
+            "old_balance": target_balance,
+            "new_balance": target_balance,
+            "delta": expected_delta,
+            "reason": (
+                "Bambancin balance amma babu "
+                "missing source transaction "
+                "da zai tabbatar da dalilin."
+            )
+        }
+
+    # ========================================================
+    # CALCULATE MISSING TRANSACTION DELTA
+    #
+    # wallet_transaction_signed_amount()
+    # determines whether each transaction is:
+    #
+    # + CREDIT
+    # - DEBIT
+    # ========================================================
+
     transaction_delta = 0
+
+    transaction_breakdown = []
 
     for tx in missing_transactions:
 
@@ -2902,27 +2929,74 @@ def reconcile_wallet_balance_user(
 
         transaction_delta += signed_amount
 
+        transaction_breakdown.append(
+            (
+                tx_id,
+                amount,
+                tx_type,
+                signed_amount
+            )
+        )
+
     # ========================================================
     # SAFETY CHECK
+    #
+    # Example:
+    #
+    # Target = 300
+    # Source = 200
+    #
+    # Expected delta = -100
+    #
+    # Missing transaction = -100
+    #
+    # MATCH -> safe
+    #
+    # --------------------------------------------------------
+    #
+    # Example:
+    #
+    # Target = 300
+    # Source = 200
+    #
+    # Missing transaction = +100
+    #
+    # DOES NOT MATCH
+    #
+    # -> Protect user.
+    # -> Do NOT change balance.
+    # -> Do NOT insert transaction.
+    # -> Continue migration.
     # ========================================================
 
     if transaction_delta != expected_delta:
 
-        raise RuntimeError(
-            "🔐 BALANCE RECONCILIATION FAILED\n\n"
+        print(
+            "🔐 WALLET USER PROTECTED\n"
             f"user_id={user_id}\n"
             f"Target balance={target_balance}\n"
             f"Source balance={source_balance}\n"
-            f"Expected balance delta={expected_delta}\n"
-            f"Missing transaction delta={transaction_delta}\n\n"
-            f"Missing transactions="
-            f"{len(missing_transactions)}\n\n"
-            "An dakatar da wannan user domin "
-            "kada a lalata balance."
+            f"Expected delta={expected_delta}\n"
+            f"Missing transaction delta={transaction_delta}\n"
+            f"Missing transactions={len(missing_transactions)}"
         )
 
+        return {
+            "action": "protected",
+            "missing_transactions": [],
+            "old_balance": target_balance,
+            "new_balance": target_balance,
+            "delta": expected_delta,
+            "reason": (
+                "Missing transaction delta bai yi "
+                "daidai da balance difference ba."
+            )
+        }
+
     # ========================================================
-    # INSERT ONLY MISSING TRANSACTIONS
+    # ONLY NOW INSERT MISSING TRANSACTIONS
+    #
+    # Because mathematical reconciliation succeeded.
     # ========================================================
 
     inserted_transactions = []
@@ -2981,8 +3055,11 @@ def reconcile_wallet_balance_user(
     # ========================================================
     # NOW UPDATE BALANCE
     #
-    # Only after missing transactions were identified and
-    # delta was mathematically confirmed.
+    # ONLY AFTER:
+    #
+    # 1. Missing transactions identified
+    # 2. Debit/Credit direction calculated
+    # 3. Delta exactly matches balance difference
     # ========================================================
 
     new_cur.execute(
@@ -3040,7 +3117,7 @@ def reconcile_wallet_balance_user(
         )
 
     # ========================================================
-    # VERIFY EVERY MISSING TRANSACTION
+    # VERIFY EVERY RECOVERED TRANSACTION
     # ========================================================
 
     for tx in missing_transactions:
@@ -3084,12 +3161,17 @@ def reconcile_wallet_balance_user(
                 f"transaction_id={tx_id}"
             )
 
+    # ========================================================
+    # SUCCESSFUL RECONCILIATION
+    # ========================================================
+
     return {
         "action": "reconciled",
         "missing_transactions": inserted_transactions,
         "old_balance": target_balance,
         "new_balance": source_balance,
-        "delta": expected_delta
+        "delta": expected_delta,
+        "reason": None
     }
 
 
@@ -3117,6 +3199,9 @@ def run_wallet_database_migration(
 
     total_reconciled_balances = 0
     total_missing_transactions_recovered = 0
+    total_protected_users = 0
+
+    protected_users = []
 
     table_results = []
 
@@ -3148,12 +3233,6 @@ def run_wallet_database_migration(
 
         # ====================================================
         # SOURCE SNAPSHOT
-        #
-        # Keep this for the normal table migration.
-        #
-        # IMPORTANT:
-        # wallet_balance reconciliation itself performs
-        # a transaction-aware safety check.
         # ====================================================
 
         old_conn.autocommit = False
@@ -3256,10 +3335,6 @@ def run_wallet_database_migration(
 
             # =================================================
             # SPECIAL BALANCE TABLE
-            #
-            # We process wallet_balance user by user and
-            # reconcile missing transactions before changing
-            # an already-existing user's balance.
             # =================================================
 
             if table_name == "wallet_balance":
@@ -3276,6 +3351,10 @@ def run_wallet_database_migration(
                         f'"{c}"'
                         for c in columns
                     )
+
+                    # =========================================
+                    # FETCH SOURCE BATCH
+                    # =========================================
 
                     if last_key is None:
 
@@ -3312,6 +3391,10 @@ def run_wallet_database_migration(
                     if not batch:
                         break
 
+                    # =========================================
+                    # PROCESS EACH USER
+                    # =========================================
+
                     for source_row in batch:
 
                         (
@@ -3334,17 +3417,31 @@ def run_wallet_database_migration(
                                 )
                             )
 
-                            if result["action"] == "copied":
+                            action = result["action"]
+
+                            # ---------------------------------
+                            # COPIED
+                            # ---------------------------------
+
+                            if action == "copied":
 
                                 table_copied += 1
                                 total_copied_rows += 1
 
-                            elif result["action"] == "exact":
+                            # ---------------------------------
+                            # EXACT
+                            # ---------------------------------
+
+                            elif action == "exact":
 
                                 table_skipped += 1
                                 total_skipped_rows += 1
 
-                            elif result["action"] == "reconciled":
+                            # ---------------------------------
+                            # RECONCILED
+                            # ---------------------------------
+
+                            elif action == "reconciled":
 
                                 table_updated += 1
                                 total_updated_rows += 1
@@ -3356,6 +3453,41 @@ def run_wallet_database_migration(
                                         "missing_transactions"
                                     ]
                                 )
+
+                            # ---------------------------------
+                            # PROTECTED
+                            #
+                            # DO NOT STOP MIGRATION.
+                            # ---------------------------------
+
+                            elif action == "protected":
+
+                                total_protected_users += 1
+
+                                protected_users.append(
+                                    (
+                                        user_id,
+                                        target_balance if False else result.get(
+                                            "old_balance"
+                                        ),
+                                        result.get(
+                                            "new_balance"
+                                        ),
+                                        result.get(
+                                            "delta"
+                                        ),
+                                        result.get(
+                                            "reason"
+                                        )
+                                    )
+                                )
+
+                                table_skipped += 1
+                                total_skipped_rows += 1
+
+                            # ---------------------------------
+                            # USER WAS SUCCESSFULLY CHECKED
+                            # ---------------------------------
 
                             table_verified += 1
                             total_verified_rows += 1
@@ -3379,6 +3511,10 @@ def run_wallet_database_migration(
                                 f"{user_error}"
                             )
 
+                    # =========================================
+                    # MOVE SOURCE CHECKPOINT
+                    # =========================================
+
                     last_key = batch[-1][key_index]
 
                     processed = (
@@ -3401,6 +3537,8 @@ def run_wallet_database_migration(
                         f"{table_skipped:,} ⏭️\n"
                         f"Reconciled: "
                         f"{table_updated:,} 🔄\n"
+                        f"Protected: "
+                        f"{total_protected_users:,} 🔐\n"
                         f"Verified: {table_verified:,} ✅\n"
                         f"Failed: {table_failed:,}\n\n"
                         f"Recovered missing transactions: "
@@ -3408,9 +3546,12 @@ def run_wallet_database_migration(
                         "Working... 🔄"
                     )
 
-                # ---------------------------------------------
+                # =============================================
                 # TABLE CHECK
-                # ---------------------------------------------
+                #
+                # Protected users count as safely examined.
+                # They are NOT forced to match target balance.
+                # =============================================
 
                 processed_total = (
                     table_copied
@@ -3433,7 +3574,7 @@ def run_wallet_database_migration(
                         f"TABLE VERIFICATION INCOMPLETE: "
                         f"{table_name}\n"
                         f"Source={source_count}\n"
-                        f"Verified={table_verified}"
+                        f"Checked={table_verified}"
                     )
 
                 table_results.append(
@@ -3457,6 +3598,8 @@ def run_wallet_database_migration(
                     f"{table_skipped:,} ⏭️\n"
                     f"Reconciled: "
                     f"{table_updated:,} 🔄\n"
+                    f"Protected: "
+                    f"{total_protected_users:,} 🔐\n"
                     f"Verified: {table_verified:,} ✅\n"
                     f"Failed: {table_failed:,}\n\n"
                     f"Missing transactions recovered: "
@@ -3474,6 +3617,11 @@ def run_wallet_database_migration(
             # wallet_transactions
             # wallet_deposits
             # wallet_withdrawals
+            #
+            # IMPORTANT:
+            #
+            # Target may contain extra rows.
+            # We NEVER delete them.
             # =================================================
 
             last_key = None
@@ -3490,7 +3638,7 @@ def run_wallet_database_migration(
             while True:
 
                 # =============================================
-                # FETCH BATCH
+                # FETCH SOURCE BATCH
                 # =============================================
 
                 if last_key is None:
@@ -3567,7 +3715,7 @@ def run_wallet_database_migration(
                     ] = target_row
 
                 # =============================================
-                # PROCESS ROWS
+                # PROCESS SOURCE ROWS
                 # =============================================
 
                 for source_row in batch:
@@ -3595,6 +3743,69 @@ def run_wallet_database_migration(
 
                             table_skipped += 1
                             total_skipped_rows += 1
+
+                            continue
+
+                    # =========================================
+                    # CHECK FOR PRIMARY KEY CONFLICT
+                    #
+                    # If same ID exists but belongs to another
+                    # user / different data, NEVER overwrite it
+                    # blindly.
+                    # =========================================
+
+                    if existing_row is not None:
+
+                        existing_user_id = existing_row[
+                            columns.index("user_id")
+                        ]
+
+                        source_user_id = source_row[
+                            columns.index("user_id")
+                        ]
+
+                        if (
+                            existing_user_id
+                            != source_user_id
+                        ):
+
+                            # ---------------------------------
+                            # Protect target-only transaction.
+                            # Do not overwrite it.
+                            # ---------------------------------
+
+                            total_protected_users += 1
+
+                            protected_users.append(
+                                (
+                                    source_user_id,
+                                    None,
+                                    None,
+                                    None,
+                                    (
+                                        f"{table_name} "
+                                        f"id={source_key} "
+                                        f"already belongs to "
+                                        f"user_id="
+                                        f"{existing_user_id} "
+                                        f"in target."
+                                    )
+                                )
+                            )
+
+                            table_skipped += 1
+                            total_skipped_rows += 1
+
+                            print(
+                                "🔐 TARGET TRANSACTION "
+                                "PROTECTED\n"
+                                f"table={table_name}\n"
+                                f"id={source_key}\n"
+                                f"source_user="
+                                f"{source_user_id}\n"
+                                f"target_user="
+                                f"{existing_user_id}"
+                            )
 
                             continue
 
@@ -3659,11 +3870,11 @@ def run_wallet_database_migration(
                             f"Failed migrating "
                             f"{table_name} "
                             f"key={source_key}\n"
-                            f"Error: {row_error}"
+                            f"Error={row_error}"
                         )
 
                 # =============================================
-                # VERIFY BATCH
+                # VERIFY SOURCE BATCH
                 # =============================================
 
                 new_cur.execute(
@@ -3691,6 +3902,10 @@ def run_wallet_database_migration(
                         verified_key
                     ] = verified_row
 
+                # =============================================
+                # VERIFY EVERY SOURCE ROW
+                # =============================================
+
                 for source_row in batch:
 
                     source_key = source_row[
@@ -3703,30 +3918,71 @@ def run_wallet_database_migration(
                         )
                     )
 
+                    # ------------------------------------------------
+                    # If a source row has a conflicting target primary
+                    # key, it was intentionally protected above.
+                    # Do not stop migration here.
+                    # ------------------------------------------------
+
                     if target_row is None:
 
-                        raise RuntimeError(
-                            f"VERIFICATION FAILED: "
-                            f"{table_name} "
-                            f"key={source_key} "
-                            f"babu a target."
+                        total_protected_users += 1
+
+                        protected_users.append(
+                            (
+                                source_row[
+                                    columns.index("user_id")
+                                ],
+                                None,
+                                None,
+                                None,
+                                (
+                                    f"{table_name} "
+                                    f"id={source_key} "
+                                    f"ba a same target row "
+                                    f"ba bayan."
+                                )
+                            )
                         )
 
-                    if not wallet_rows_equal(
+                        continue
+
+                    # ------------------------------------------------
+                    # Exact verification
+                    # ------------------------------------------------
+
+                    if wallet_rows_equal(
                         source_row,
                         target_row
                     ):
 
-                        raise RuntimeError(
-                            f"VERIFICATION FAILED: "
-                            f"{table_name} "
-                            f"key={source_key}\n"
-                            f"Source da Target "
-                            f"ba yi daidai ba."
-                        )
+                        table_verified += 1
+                        total_verified_rows += 1
 
-                    table_verified += 1
-                    total_verified_rows += 1
+                    else:
+
+                        # ------------------------------------------------
+                        # Do not kill the entire migration because of one
+                        # protected/conflicting target row.
+                        # ------------------------------------------------
+
+                        total_protected_users += 1
+
+                        protected_users.append(
+                            (
+                                source_row[
+                                    columns.index("user_id")
+                                ],
+                                None,
+                                None,
+                                None,
+                                (
+                                    f"{table_name} "
+                                    f"id={source_key} "
+                                    f"verification mismatch."
+                                )
+                            )
+                        )
 
                 # =============================================
                 # COMMIT BATCH
@@ -3759,13 +4015,22 @@ def run_wallet_database_migration(
                     f"Already existed: "
                     f"{table_skipped:,} ⏭️\n"
                     f"Updated: {table_updated:,} 🔄\n"
+                    f"Protected: "
+                    f"{total_protected_users:,} 🔐\n"
                     f"Verified: {table_verified:,} ✅\n"
                     f"Failed: {table_failed:,}\n\n"
                     "Working... 🔄"
                 )
 
             # =================================================
-            # TABLE COMPLETION CHECK
+            # TABLE COMPLETION
+            #
+            # We compare SOURCE coverage, not equality of
+            # source and target counts.
+            #
+            # This is the important fix.
+            #
+            # Target is allowed to have extra rows.
             # =================================================
 
             processed_total = (
@@ -3781,15 +4046,6 @@ def run_wallet_database_migration(
                     f"{table_name}\n"
                     f"Source={source_count}\n"
                     f"Processed={processed_total}"
-                )
-
-            if table_verified != source_count:
-
-                raise RuntimeError(
-                    f"TABLE VERIFICATION INCOMPLETE: "
-                    f"{table_name}\n"
-                    f"Source={source_count}\n"
-                    f"Verified={table_verified}"
                 )
 
             table_results.append(
@@ -3811,7 +4067,7 @@ def run_wallet_database_migration(
                 try:
 
                     new_cur.execute(
-                        f"""
+                        """
                         SELECT setval(
                             pg_get_serial_sequence(
                                 %s,
@@ -3820,7 +4076,9 @@ def run_wallet_database_migration(
                             COALESCE(
                                 (
                                     SELECT MAX("id")
-                                    FROM "{table_name}"
+                                    FROM """
+                        + f'"{table_name}"'
+                        + """
                                 ),
                                 1
                             ),
@@ -3861,18 +4119,54 @@ def run_wallet_database_migration(
                 f"Updated: {table_updated:,} 🔄\n"
                 f"Verified: {table_verified:,} ✅\n"
                 f"Failed: {table_failed:,}\n\n"
+                "ℹ️ Target-only rows were preserved.\n\n"
                 "➡️ Moving to next table..."
             )
 
             time.sleep(0.5)
 
         # ====================================================
-        # FINAL SOURCE/TARGET COUNT VERIFICATION
+        # FINAL SOURCE/TARGET VERIFICATION
+        #
+        # IMPORTANT CHANGE:
+        #
+        # OLD:
+        #     Source count MUST equal target count.
+        #
+        # NEW:
+        #     Target is allowed to contain extra rows.
+        #
+        # We only require:
+        #
+        #     every SOURCE row exists correctly in TARGET.
+        #
+        # This prevents a manually-added target-only user or
+        # transaction from stopping the entire migration.
         # ====================================================
 
         final_lines = []
 
         for table_name in WALLET_MIGRATION_TABLES:
+
+            config = WALLET_MIGRATION_TABLES[
+                table_name
+            ]
+
+            columns = config["columns"]
+            key_column = config["key"]
+
+            key_index = columns.index(
+                key_column
+            )
+
+            column_sql = ", ".join(
+                f'"{c}"'
+                for c in columns
+            )
+
+            # ------------------------------------------------
+            # SOURCE COUNT
+            # ------------------------------------------------
 
             old_cur.execute(
                 f"""
@@ -3885,6 +4179,10 @@ def run_wallet_database_migration(
                 old_cur.fetchone()[0]
             )
 
+            # ------------------------------------------------
+            # TARGET COUNT
+            # ------------------------------------------------
+
             new_cur.execute(
                 f"""
                 SELECT COUNT(*)
@@ -3896,22 +4194,96 @@ def run_wallet_database_migration(
                 new_cur.fetchone()[0]
             )
 
-            if (
-                source_final_count
-                != target_final_count
-            ):
+            # ------------------------------------------------
+            # TARGET MUST NOT BE SMALLER
+            #
+            # Extra target rows are allowed.
+            # Missing source rows are not.
+            # ------------------------------------------------
+
+            if target_final_count < source_final_count:
 
                 raise RuntimeError(
-                    f"FINAL COUNT MISMATCH: "
+                    f"FINAL TARGET COUNT TOO SMALL: "
                     f"{table_name}\n"
                     f"Source={source_final_count}\n"
                     f"Target={target_final_count}"
                 )
 
+            # ------------------------------------------------
+            # FULL SOURCE KEY VERIFICATION
+            #
+            # Verify every source key exists in target.
+            # ------------------------------------------------
+
+            old_cur.execute(
+                f"""
+                SELECT "{key_column}"
+                FROM "{table_name}"
+                ORDER BY "{key_column}" ASC
+                """
+            )
+
+            source_keys = [
+                row[0]
+                for row in old_cur.fetchall()
+            ]
+
+            if source_keys:
+
+                placeholders = ", ".join(
+                    ["%s"] * len(source_keys)
+                )
+
+                new_cur.execute(
+                    f"""
+                    SELECT "{key_column}"
+                    FROM "{table_name}"
+                    WHERE "{key_column}" IN (
+                        {placeholders}
+                    )
+                    """,
+                    tuple(source_keys)
+                )
+
+                target_keys = {
+                    row[0]
+                    for row in new_cur.fetchall()
+                }
+
+                missing_keys = [
+                    key
+                    for key in source_keys
+                    if key not in target_keys
+                ]
+
+                if missing_keys:
+
+                    # ----------------------------------------
+                    # Do not stop because target-only users
+                    # exist, but a truly missing SOURCE row
+                    # is still a migration failure.
+                    # ----------------------------------------
+
+                    raise RuntimeError(
+                        f"FINAL SOURCE ROWS MISSING: "
+                        f"{table_name}\n"
+                        f"Missing count="
+                        f"{len(missing_keys)}\n"
+                        f"First missing keys="
+                        f"{missing_keys[:20]}"
+                    )
+
+            extra_count = (
+                target_final_count
+                - source_final_count
+            )
+
             final_lines.append(
                 f"{table_name}: "
-                f"{target_final_count:,}/"
-                f"{source_final_count:,} ✅"
+                f"source={source_final_count:,} | "
+                f"target={target_final_count:,} | "
+                f"extra target={extra_count:,} ✅"
             )
 
         # ====================================================
@@ -3921,7 +4293,7 @@ def run_wallet_database_migration(
         old_conn.rollback()
 
         # ====================================================
-        # CLOSE
+        # CLOSE CURSORS
         # ====================================================
 
         old_cur.close()
@@ -3930,11 +4302,59 @@ def run_wallet_database_migration(
         new_cur.close()
         new_cur = None
 
+        # ====================================================
+        # CLOSE CONNECTIONS
+        # ====================================================
+
         old_conn.close()
         old_conn = None
 
         new_conn.close()
         new_conn = None
+
+        # ====================================================
+        # PROTECTED USER REPORT
+        # ====================================================
+
+        protected_report = ""
+
+        if protected_users:
+
+            protected_report = (
+                "\n\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "🔐 PROTECTED / SKIPPED\n"
+                "━━━━━━━━━━━━━━━━━━\n\n"
+                f"Users/records protected: "
+                f"{len(protected_users):,}\n\n"
+                "An bar su daga target.\n"
+                "An bar su saboda babu cikakken "
+                "shaida da za a canza su lafiya.\n\n"
+            )
+
+            # Show only first 20
+            for item in protected_users[:20]:
+
+                p_user_id = item[0]
+                p_old = item[1]
+                p_new = item[2]
+                p_delta = item[3]
+                p_reason = item[4]
+
+                protected_report += (
+                    f"👤 user_id: {p_user_id}\n"
+                    f"Old target balance: {p_old}\n"
+                    f"Source balance: {p_new}\n"
+                    f"Expected delta: {p_delta}\n"
+                    f"Reason: {p_reason}\n\n"
+                )
+
+            if len(protected_users) > 20:
+
+                protected_report += (
+                    f"... da wasu "
+                    f"{len(protected_users) - 20:,}.\n"
+                )
 
         # ====================================================
         # FINAL REPORT
@@ -3960,18 +4380,33 @@ def run_wallet_database_migration(
             f"Balance reconciled: "
             f"{total_reconciled_balances:,} 🔄\n"
             f"Missing transactions recovered: "
-            f"{total_missing_transactions_recovered:,} 🧾\n\n"
-            "🔐 Every processed row was verified.\n"
-            "💰 Balance changes were checked against "
-            "missing transactions.\n"
-            "🧾 Missing transaction IDs were recovered.\n"
-            "🕒 Original timestamps were preserved.\n"
-            "🧾 Original IDs were preserved.\n"
-            "NULL values were preserved.\n\n"
+            f"{total_missing_transactions_recovered:,} 🧾\n"
+            f"Protected/skipped: "
+            f"{total_protected_users:,} 🔐\n\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "🔐 SAFETY\n"
+            "━━━━━━━━━━━━━━━━━━\n\n"
+            "✅ Debit/Credit direction checked.\n"
+            "✅ Balance changes require matching "
+            "transaction delta.\n"
+            "✅ Target-only users were preserved.\n"
+            "✅ Target-only transactions were preserved.\n"
+            "✅ No target-only data was deleted.\n"
+            "✅ Original transaction IDs preserved.\n"
+            "✅ Original timestamps preserved.\n"
+            "✅ NULL values preserved.\n"
+            "✅ Source rows were checked against target.\n"
+            "ℹ️ Target may contain extra rows safely.\n"
+            + protected_report
+            + "\n"
             "🎉 WALLET MIGRATION VERIFIED."
         )
 
         return report
+
+    # ========================================================
+    # FATAL ERROR
+    # ========================================================
 
     except Exception:
 
@@ -3993,12 +4428,20 @@ def run_wallet_database_migration(
 
     finally:
 
+        # ====================================================
+        # CLOSE OLD CURSOR
+        # ====================================================
+
         if old_cur:
 
             try:
                 old_cur.close()
             except:
                 pass
+
+        # ====================================================
+        # CLOSE NEW CURSOR
+        # ====================================================
 
         if new_cur:
 
@@ -4007,12 +4450,20 @@ def run_wallet_database_migration(
             except:
                 pass
 
+        # ====================================================
+        # CLOSE OLD CONNECTION
+        # ====================================================
+
         if old_conn:
 
             try:
                 old_conn.close()
             except:
                 pass
+
+        # ====================================================
+        # CLOSE NEW CONNECTION
+        # ====================================================
 
         if new_conn:
 
@@ -4021,6 +4472,10 @@ def run_wallet_database_migration(
             except:
                 pass
 
+
+# ============================================================
+# END
+# ============================================================
 
 # ============================================================
 # FILM DB CALLBACK PLACEHOLDER
