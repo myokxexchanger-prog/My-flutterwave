@@ -1399,7 +1399,11 @@ def create_flutterwave_payment(user_id, order_id, amount, title):
 def home():
     return "OK", 200
 
+# ========= FLUTTERWAVE CALLBACK PAGE =========
 
+@app.route("/flutterwave-callback", methods=["GET"])
+def flutterwave_callback():
+    return "BIYA YA NASARA. Zaka iya komawa Telegram yanzu."
 
 # ========= FEEDBACK =========
 def send_feedback_prompt(user_id, order_id):
