@@ -2094,7 +2094,78 @@ def deliver_items(call):
 
     send_feedback_prompt(user_id, order_id)
 
+# ============================================================
+# /b USER_ID — CHECK SUPABASE WALLET BALANCE
+# ============================================================
 
+@bot.message_handler(commands=["b"])
+def check_supabase_balance(message):
+    try:
+        # Admin only
+        if message.from_user.id != ADMIN_ID:
+            return
+
+        parts = message.text.strip().split()
+
+        if len(parts) != 2 or not parts[1].isdigit():
+            bot.reply_to(
+                message,
+                "❌ Amfani:\n/b USER_ID\n\nMisali:\n/b 6388483838"
+            )
+            return
+
+        user_id = int(parts[1])
+
+        conn = get_supabase_wallet_conn()
+
+        if conn is None:
+            bot.reply_to(
+                message,
+                "❌ An kasa haɗawa da Supabase Wallet Database."
+            )
+            return
+
+        try:
+            cur = conn.cursor()
+
+            cur.execute(
+                """
+                SELECT user_id, balance
+                FROM wallet_balance
+                WHERE user_id = %s
+                """,
+                (user_id,)
+            )
+
+            row = cur.fetchone()
+
+            if row:
+                db_user_id, balance = row
+
+                bot.reply_to(
+                    message,
+                    f"✅ SUPABASE DATA\n\n"
+                    f"👤 User ID: {db_user_id}\n"
+                    f"💰 Balance: {balance}\n\n"
+                    f"🟢 An karanta daga wallet_balance."
+                )
+            else:
+                bot.reply_to(
+                    message,
+                    f"❌ Ba a samu User ID `{user_id}` a Supabase ba."
+                )
+
+        finally:
+            cur.close()
+            conn.close()
+
+    except Exception as e:
+        print("❌ /b ERROR:", e)
+
+        bot.reply_to(
+            message,
+            f"❌ Error wajen duba Supabase:\n{e}"
+        )
 # ============================================================
 # WALLET BALANCE TEST
 # OLD WALLET DB -> NEW SUPABASE WALLET DB
