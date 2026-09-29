@@ -57,7 +57,40 @@ wallet_conn.autocommit = True
 wallet_cur = wallet_conn.cursor()
 
 
+# ============================================================
+# FILM SUPABASE DATABASE CONNECTION
+# ============================================================
 
+FILM_SUPABASE_DATABASE_URL = os.environ.get(
+    "FILM_SUPABASE_DATABASE_URL"
+)
+
+if not FILM_SUPABASE_DATABASE_URL:
+    raise RuntimeError(
+        "FILM_SUPABASE_DATABASE_URL is not set"
+    )
+
+
+def get_film_supabase_conn():
+    try:
+        film_supabase_connection = psycopg2.connect(
+            FILM_SUPABASE_DATABASE_URL,
+            connect_timeout=10,
+            sslmode="require"
+        )
+
+        film_supabase_connection.autocommit = True
+
+        return film_supabase_connection
+
+    except Exception as e:
+
+        print(
+            "❌ FILM SUPABASE CONNECTION ERROR:",
+            repr(e)
+        )
+
+        return None
 # ============================================================
 # SUPABASE WALLET DATABASE
 # DEDICATED CONNECTION — COMPLETELY SEPARATE
