@@ -2095,6 +2095,511 @@ def deliver_items(call):
     send_feedback_prompt(user_id, order_id)
 
 
+# ============================================================
+# WALLET BALANCE TEST
+# OLD WALLET DB -> NEW SUPABASE WALLET DB
+# ============================================================
+
+@bot.message_handler(commands=["hi"])
+def wallet_transfer_start(message):
+
+    # ================= ADMIN ONLY =================
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    bot.send_message(
+        message.chat.id,
+        "Sannu oga 👋\n\n"
+        "Bani User ID din da zaka duba kudinsa."
+    )
+
+    # Next message from ADMIN zai zama User ID
+    bot.register_next_step_handler(
+        message,
+        wallet_check_old_db
+    )
+
+
+# ============================================================
+# CHECK BALANCE FROM OLD WALLET DATABASE
+# ============================================================
+
+def wallet_check_old_db(message):
+
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    text = (message.text or "").strip()
+
+    # ================= CHECK USER ID =================
+    if not text.isdigit():
+
+        bot.send_message(
+            message.chat.id,
+            "❌ User ID bai dace ba.\n\n"
+            "Ka sake amfani da /hi sannan ka turo User ID."
+        )
+        return
+
+    target_user_id = int(text)
+
+    conn = None
+    cur = None
+
+    try:
+
+        # ====================================================
+        # OLD WALLET DATABASE ONLY
+        # ====================================================
+
+        conn = get_wallet_conn()
+
+        if conn is None:
+
+            bot.send_message(
+                ADMIN_ID,
+                "❌ <b>OLD WALLET DB ERROR</b>\n\n"
+                "An kasa bude connection zuwa tsohon database.\n\n"
+                "Ba a shiga sabon Supabase DB ba."
+            )
+            return
+
+        cur = conn.cursor()
+
+        # ====================================================
+        # CHECK TABLE
+        # ====================================================
+
+        cur.execute("""
+            SELECT to_regclass('public.wallet_balance')
+        """)
+
+        table = cur.fetchone()
+
+        if not table or table[0] is None:
+
+            bot.send_message(
+                ADMIN_ID,
+                "❌ <b>OLD WALLET DB ERROR</b>\n\n"
+                "An shiga database amma table "
+                "<code>wallet_balance</code> babu.\n\n"
+                "Ba a shiga sabon Supabase DB ba."
+            )
+            return
+
+        # ====================================================
+        # GET USER BALANCE
+        # ====================================================
+
+        cur.execute(
+            """
+            SELECT user_id, balance
+            FROM wallet_balance
+            WHERE user_id=%s
+            """,
+            (target_user_id,)
+        )
+
+        row = cur.fetchone()
+
+        if not row:
+
+            bot.send_message(
+                ADMIN_ID,
+                "❌ Ba a samu wannan user a tsohon DB ba.\n\n"
+                f"👤 User ID: <code>{target_user_id}</code>"
+            )
+            return
+
+        old_user_id = row[0]
+        old_balance = row[1]
+
+        # ====================================================
+        # SAVE DATA FOR YES / NO
+        # ====================================================
+
+        wallet_transfer_pending[ADMIN_ID] = {
+            "user_id": old_user_id,
+            "balance": old_balance
+        }
+
+        # ====================================================
+        # YES / NO BUTTON
+        # ====================================================
+
+        kb = InlineKeyboardMarkup()
+
+        kb.row(
+            InlineKeyboardButton(
+                "✅ YES",
+                callback_data="wallet_copy_yes"
+            ),
+            InlineKeyboardButton(
+                "❌ NO",
+                callback_data="wallet_copy_no"
+            )
+        )
+
+        bot.send_message(
+            ADMIN_ID,
+            "🔎 <b>OLD WALLET DB</b>\n\n"
+            f"👤 User ID:\n"
+            f"<code>{old_user_id}</code>\n\n"
+            f"💰 Wannan user yana da:\n"
+            f"<b>{old_balance}</b>\n\n"
+            "━━━━━━━━━━━━━━━━━━\n\n"
+            "Kana so a shigar da wannan kudin "
+            "a sabon Supabase DB?",
+            reply_markup=kb
+        )
+
+    except Exception as e:
+
+        print(
+            "❌ OLD WALLET DB ERROR:",
+            repr(e)
+        )
+
+        bot.send_message(
+            ADMIN_ID,
+            "❌ <b>OLD WALLET DB ERROR</b>\n\n"
+            "An samu matsala yayin karanta balance.\n\n"
+            f"<b>Error:</b>\n"
+            f"<code>{str(e)}</code>\n\n"
+            "Ba a shiga sabon Supabase DB ba."
+        )
+
+    finally:
+
+        # ====================================================
+        # CLOSE OLD CURSOR
+        # ====================================================
+
+        if cur is not None:
+
+            try:
+                cur.close()
+            except:
+                pass
+
+        # ====================================================
+        # CLOSE OLD CONNECTION
+        # ====================================================
+
+        if conn is not None:
+
+            try:
+                conn.close()
+            except:
+                pass
+
+
+# ============================================================
+# PENDING WALLET TRANSFER
+# ============================================================
+
+wallet_transfer_pending = {}
+
+
+# ============================================================
+# YES / NO
+# ============================================================
+
+@bot.callback_query_handler(
+    func=lambda c: c.data in [
+        "wallet_copy_yes",
+        "wallet_copy_no"
+    ]
+)
+def wallet_copy_decision(call):
+
+    if call.from_user.id != ADMIN_ID:
+
+        bot.answer_callback_query(
+            call.id,
+            "Admin only.",
+            show_alert=True
+        )
+        return
+
+    data = wallet_transfer_pending.get(ADMIN_ID)
+
+    if not data:
+
+        bot.answer_callback_query(
+            call.id,
+            "Babu pending wallet transfer.",
+            show_alert=True
+        )
+        return
+
+    # ========================================================
+    # NO
+    # ========================================================
+
+    if call.data == "wallet_copy_no":
+
+        wallet_transfer_pending.pop(
+            ADMIN_ID,
+            None
+        )
+
+        bot.answer_callback_query(
+            call.id,
+            "An soke."
+        )
+
+        try:
+
+            bot.edit_message_text(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                text=(
+                    "❌ <b>An soke transfer.</b>\n\n"
+                    "Ba a rubuta komai a sabon Supabase DB ba."
+                )
+            )
+
+        except:
+            pass
+
+        return
+
+    # ========================================================
+    # YES
+    # ========================================================
+
+    bot.answer_callback_query(
+        call.id,
+        "Ana shigar da kudin..."
+    )
+
+    user_id = data["user_id"]
+    balance = data["balance"]
+
+    conn = None
+    cur = None
+
+    try:
+
+        # ====================================================
+        # NEW SUPABASE DATABASE ONLY
+        # ====================================================
+
+        conn = get_supabase_wallet_conn()
+
+        if conn is None:
+
+            bot.send_message(
+                ADMIN_ID,
+                "❌ <b>SUPABASE CONNECTION ERROR</b>\n\n"
+                "An kasa bude sabon Supabase database.\n\n"
+                f"👤 User ID: <code>{user_id}</code>\n"
+                f"💰 Balance: <b>{balance}</b>\n\n"
+                "Ba a rubuta kudin ba."
+            )
+            return
+
+        cur = conn.cursor()
+
+        # ====================================================
+        # CHECK TABLE
+        # ====================================================
+
+        cur.execute("""
+            SELECT to_regclass('public.wallet_balance')
+        """)
+
+        table = cur.fetchone()
+
+        if not table or table[0] is None:
+
+            bot.send_message(
+                ADMIN_ID,
+                "❌ <b>SUPABASE TABLE ERROR</b>\n\n"
+                "An samu nasarar shiga Supabase.\n"
+                "Amma table:\n"
+                "<code>wallet_balance</code>\n"
+                "babu a sabon database.\n\n"
+                f"👤 User ID: <code>{user_id}</code>\n"
+                f"💰 Balance: <b>{balance}</b>"
+            )
+            return
+
+        # ====================================================
+        # CHECK IF USER ALREADY EXISTS
+        # ====================================================
+
+        cur.execute(
+            """
+            SELECT balance
+            FROM wallet_balance
+            WHERE user_id=%s
+            """,
+            (user_id,)
+        )
+
+        existing = cur.fetchone()
+
+        # ====================================================
+        # INSERT
+        # ====================================================
+
+        if existing is None:
+
+            cur.execute(
+                """
+                INSERT INTO wallet_balance (
+                    user_id,
+                    balance
+                )
+                VALUES (%s,%s)
+                """,
+                (
+                    user_id,
+                    balance
+                )
+            )
+
+            operation = "INSERT"
+
+        # ====================================================
+        # UPDATE
+        # ====================================================
+
+        else:
+
+            cur.execute(
+                """
+                UPDATE wallet_balance
+                SET balance=%s,
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE user_id=%s
+                """,
+                (
+                    balance,
+                    user_id
+                )
+            )
+
+            operation = "UPDATE"
+
+        # ====================================================
+        # VERIFY
+        # ====================================================
+
+        cur.execute(
+            """
+            SELECT balance
+            FROM wallet_balance
+            WHERE user_id=%s
+            """,
+            (user_id,)
+        )
+
+        verify = cur.fetchone()
+
+        if not verify:
+
+            raise Exception(
+                "An rubuta operation amma verification "
+                "bai samu user ba."
+            )
+
+        new_balance = verify[0]
+
+        # ====================================================
+        # CHECK BALANCE
+        # ====================================================
+
+        if int(new_balance) != int(balance):
+
+            raise Exception(
+                f"Balance mismatch. "
+                f"Old={balance}, New={new_balance}"
+            )
+
+        # ====================================================
+        # SUCCESS
+        # ====================================================
+
+        wallet_transfer_pending.pop(
+            ADMIN_ID,
+            None
+        )
+
+        bot.send_message(
+            ADMIN_ID,
+            "✅ <b>AN GAMA AIKIN</b>\n\n"
+            f"👤 User ID:\n"
+            f"<code>{user_id}</code>\n\n"
+            f"💰 Old DB Balance:\n"
+            f"<b>{balance}</b>\n\n"
+            f"💾 Operation:\n"
+            f"<b>{operation}</b>\n\n"
+            f"💰 Supabase Balance:\n"
+            f"<b>{new_balance}</b>\n\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "✅ <b>VERIFICATION SUCCESSFUL</b>"
+        )
+
+        try:
+
+            bot.edit_message_text(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                text=(
+                    "✅ <b>Transfer Complete</b>\n\n"
+                    f"User: <code>{user_id}</code>\n"
+                    f"Balance: <b>{new_balance}</b>\n\n"
+                    "An rubuta kuma an tabbatar."
+                )
+            )
+
+        except:
+            pass
+
+    except Exception as e:
+
+        print(
+            "❌ SUPABASE WALLET ERROR:",
+            repr(e)
+        )
+
+        bot.send_message(
+            ADMIN_ID,
+            "❌ <b>SUPABASE ERROR</b>\n\n"
+            f"👤 User ID: <code>{user_id}</code>\n"
+            f"💰 Balance: <b>{balance}</b>\n\n"
+            f"<b>Error:</b>\n"
+            f"<code>{str(e)}</code>\n\n"
+            "⚠️ Ba a tabbatar da cewa an rubuta kudin ba."
+        )
+
+    finally:
+
+        # ====================================================
+        # CLOSE SUPABASE CURSOR
+        # ====================================================
+
+        if cur is not None:
+
+            try:
+                cur.close()
+            except:
+                pass
+
+        # ====================================================
+        # CLOSE SUPABASE CONNECTION
+        # ====================================================
+
+        if conn is not None:
+
+            try:
+                conn.close()
+            except:
+                pass
+
 # ==========================================
 # COMMAND DOMIN DUBA USER BALANCE A SABON DB
 # Usage: /? 55526262626
