@@ -14719,7 +14719,7 @@ def weekly_sales():
     )
 
 
-# ================= AUTOMATIC MONTHLY (GROUP) =================
+## ================= AUTOMATIC MONTHLY (GROUP) =================
 def monthly_sales():
     now = _ng_now()
     since = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
