@@ -4913,40 +4913,6 @@ def run_wallet_database_migration(
 # END
 # ============================================================
 
-# ============================================================
-# FILM DB CALLBACK PLACEHOLDER
-#
-# Ba mu gina Film DB yanzu.
-# ============================================================
-
-@bot.callback_query_handler(
-    func=lambda c: c.data == "backup_film_db"
-)
-def backup_film_db_placeholder(call):
-
-    if call.from_user.id != ADMIN_ID:
-
-        bot.answer_callback_query(
-            call.id,
-            "Ba ka da izinin wannan aikin.",
-            show_alert=True
-        )
-
-        return
-
-    bot.answer_callback_query(call.id)
-
-    wallet_backup_edit(
-        call.message.chat.id,
-        call.message.message_id,
-        "🎬 FILM DB\n\n"
-        "An zaɓi Film DB.\n\n"
-        "⏳ Film DB backup system "
-        "ba mu gina shi yanzu ba.\n\n"
-        "Za mu gina nasa migration system "
-        "dabam bayan an kammala Wallet DB."
-    )
-
 
 
 # ============================================================
