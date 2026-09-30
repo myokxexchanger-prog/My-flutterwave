@@ -3841,21 +3841,6 @@ def register_film_db_backup(bot, admin_id):
                 ),
             )
 
-        # Run in a separate thread so polling/webhook handling stays alive.
-        worker = threading.Thread(
-            target=run_film_db_backup,
-            kwargs={
-                "bot": bot,
-                "admin_id": admin_id,
-                "progress_message": progress,
-            },
-            daemon=True,
-            name="film-db-backup-worker",
-        )
-        worker.start()
-
-    print("✅ FILM DB BACKUP CALLBACKS REGISTERED")
-
 
 
 # ============================================================
