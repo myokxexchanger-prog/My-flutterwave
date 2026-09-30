@@ -502,6 +502,85 @@ user_states = {}
 active_links = {}
 
 
+
+# ============================================================
+# SUPABASE WALLET DATABASE TABLES
+# NEW SUPABASE DATABASE ONLY
+# ============================================================
+
+# -------- WALLET BALANCE --------
+supabase_wallet_cur.execute("""
+CREATE TABLE IF NOT EXISTS wallet_balance (
+    user_id BIGINT PRIMARY KEY,
+    balance BIGINT DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+""")
+
+# -------- WALLET TRANSACTIONS --------
+supabase_wallet_cur.execute("""
+CREATE TABLE IF NOT EXISTS wallet_transactions (
+    id SERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    amount BIGINT NOT NULL,
+    type VARCHAR(30) NOT NULL,
+    reference TEXT,
+    description TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+""")
+
+# Index domin saurin transaction history
+supabase_wallet_cur.execute("""
+CREATE INDEX IF NOT EXISTS idx_wallet_transactions_user
+ON wallet_transactions(user_id)
+""")
+
+# -------- WALLET DEPOSITS (PAYSTACK) --------
+supabase_wallet_cur.execute("""
+CREATE TABLE IF NOT EXISTS wallet_deposits (
+    id TEXT PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    amount BIGINT NOT NULL,
+    type VARCHAR(30) DEFAULT 'wallet',
+    paystack_ref TEXT UNIQUE,
+    status VARCHAR(20) DEFAULT 'pending',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    paid_at TIMESTAMP
+)
+""")
+
+# Index domin saurin lookup
+supabase_wallet_cur.execute("""
+CREATE INDEX IF NOT EXISTS idx_wallet_deposits_user
+ON wallet_deposits(user_id)
+""")
+
+# -------- WALLET WITHDRAWALS (ADMIN USE) --------
+supabase_wallet_cur.execute("""
+CREATE TABLE IF NOT EXISTS wallet_withdrawals (
+    id SERIAL PRIMARY KEY,
+    user_id BIGINT,
+    amount BIGINT,
+    status VARCHAR(20) DEFAULT 'pending',
+    processed_by BIGINT,
+    reference TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    processed_at TIMESTAMP
+)
+""")
+
+# Index domin saurin admin queries
+supabase_wallet_cur.execute("""
+CREATE INDEX IF NOT EXISTS idx_wallet_withdrawals_user
+ON wallet_withdrawals(user_id)
+""")
+
+print("✅ SUPABASE WALLET TABLES CREATED SUCCESSFULLY")
+
+
+
 # =========================
 # WALLET DATABASE TABLES
 # =========================
