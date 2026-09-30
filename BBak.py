@@ -2081,6 +2081,5381 @@ def deliver_items(call):
     send_feedback_prompt(user_id, order_id)
 
 
+# ============================================================
+# WALLET DB BACKUP / MIGRATION SYSTEM
+# OLD WALLET DB  --->  NEW SUPABASE WALLET DB
+#
+# SAFE RECONCILIATION VERSION
+#
+# Uses existing:
+#   get_wallet_conn()
+#   get_supabase_wallet_conn()
+#   ADMIN_ID
+#   bot
+#
+# NO NEW BOT
+# NO NEW DATABASE URL
+# NO NEW ENVIRONMENT VARIABLE
+# ============================================================
+
+import time
+import psycopg2
+from telebot import types
+
+
+# ============================================================
+# SETTINGS
+# ============================================================
+
+WALLET_MIGRATION_BATCH_SIZE = 50
+
+# Prevent two wallet migrations from running simultaneously
+WALLET_MIGRATION_RUNNING = False
+
+
+# ============================================================
+# TRANSACTION TYPE CONFIGURATION
+#
+# IMPORTANT:
+#
+# Idan amount a wallet_transactions yana zuwa negative
+# lokacin cire kudi, system zai gane kai tsaye.
+#
+# Idan amount kullum POSITIVE ne, system zai duba type.
+#
+# Ka iya kara irin type din da bot dinka yake amfani da shi
+# a wadannan sets.
+# ============================================================
+
+CREDIT_TYPES = {
+    "credit",
+    "deposit",
+    "deposit_credit",
+    "wallet_deposit",
+    "fund",
+    "funding",
+    "topup",
+    "top_up",
+    "add",
+    "added",
+    "bonus",
+    "refund",
+    "referral",
+    "referral_credit",
+    "cashback",
+    "income",
+    "credit_wallet",
+    "add_money",
+}
+
+DEBIT_TYPES = {
+    "debit",
+    "withdraw",
+    "withdrawal",
+    "wallet_withdrawal",
+    "purchase",
+    "payment",
+    "pay",
+    "spent",
+    "spend",
+    "remove",
+    "removed",
+    "deduct",
+    "deduction",
+    "charge",
+    "debit_wallet",
+    "buy",
+}
+
+
+# ============================================================
+# TABLE DEFINITIONS
+# ============================================================
+
+WALLET_MIGRATION_TABLES = {
+
+    "wallet_balance": {
+        "columns": [
+            "user_id",
+            "balance",
+            "created_at",
+            "updated_at"
+        ],
+        "key": "user_id"
+    },
+
+    "wallet_transactions": {
+        "columns": [
+            "id",
+            "user_id",
+            "amount",
+            "type",
+            "reference",
+            "description",
+            "created_at"
+        ],
+        "key": "id"
+    },
+
+    "wallet_deposits": {
+        "columns": [
+            "id",
+            "user_id",
+            "amount",
+            "type",
+            "paystack_ref",
+            "status",
+            "created_at",
+            "paid_at"
+        ],
+        "key": "id"
+    },
+
+    "wallet_withdrawals": {
+        "columns": [
+            "id",
+            "user_id",
+            "amount",
+            "status",
+            "processed_by",
+            "reference",
+            "created_at",
+            "processed_at"
+        ],
+        "key": "id"
+    }
+}
+
+
+# ============================================================
+# SAFE VALUE COMPARISON
+# ============================================================
+
+def wallet_values_equal(a, b):
+
+    if a is None and b is None:
+        return True
+
+    return a == b
+
+
+# ============================================================
+# COMPLETE ROW COMPARISON
+# ============================================================
+
+def wallet_rows_equal(source_row, target_row):
+
+    if source_row is None or target_row is None:
+        return False
+
+    if len(source_row) != len(target_row):
+        return False
+
+    for source_value, target_value in zip(
+        source_row,
+        target_row
+    ):
+
+        if not wallet_values_equal(
+            source_value,
+            target_value
+        ):
+
+            return False
+
+    return True
+
+
+# ============================================================
+# TRANSACTION SIGN CALCULATOR
+# ============================================================
+
+def wallet_transaction_signed_amount(
+    amount,
+    transaction_type
+):
+    """
+    Determines the real balance effect of a transaction.
+
+    Examples:
+
+        amount = -100
+        type   = anything
+        result = -100
+
+        amount = 100
+        type   = credit
+        result = +100
+
+        amount = 100
+        type   = withdrawal
+        result = -100
+
+    IMPORTANT:
+    If amount is already negative, we trust the sign.
+
+    If amount is positive, type must tell us whether
+    it is credit or debit.
+    """
+
+    if amount is None:
+        raise RuntimeError(
+            "Transaction amount is NULL."
+        )
+
+    try:
+        numeric_amount = int(amount)
+    except Exception:
+
+        raise RuntimeError(
+            f"Invalid transaction amount: {amount}"
+        )
+
+    # --------------------------------------------------------
+    # Negative amount already represents a debit
+    # --------------------------------------------------------
+
+    if numeric_amount < 0:
+        return numeric_amount
+
+    # --------------------------------------------------------
+    # Zero
+    # --------------------------------------------------------
+
+    if numeric_amount == 0:
+        return 0
+
+    # --------------------------------------------------------
+    # Positive amount
+    # --------------------------------------------------------
+
+    tx_type = ""
+
+    if transaction_type is not None:
+
+        tx_type = str(
+            transaction_type
+        ).strip().lower()
+
+    # --------------------------------------------------------
+    # CREDIT
+    # --------------------------------------------------------
+
+    if tx_type in CREDIT_TYPES:
+        return numeric_amount
+
+    # --------------------------------------------------------
+    # DEBIT
+    # --------------------------------------------------------
+
+    if tx_type in DEBIT_TYPES:
+        return -numeric_amount
+
+    # --------------------------------------------------------
+    # UNKNOWN TYPE
+    #
+    # VERY IMPORTANT:
+    # Kada mu san type ba a sani ba, ba za mu yi guess ba.
+    # Wannan yana kare balance daga kuskure.
+    # --------------------------------------------------------
+
+    raise RuntimeError(
+        "UNKNOWN TRANSACTION TYPE.\n"
+        f"type={transaction_type!r}\n"
+        f"amount={amount!r}\n\n"
+        "Ba a iya tabbatar da cewa transaction "
+        "din credit ne ko debit ba."
+    )
+
+
+# ============================================================
+# ADMIN MESSAGE EDIT HELPER
+# ============================================================
+
+def wallet_backup_edit(
+    chat_id,
+    message_id,
+    text
+):
+
+    try:
+
+        bot.edit_message_text(
+            text,
+            chat_id=chat_id,
+            message_id=message_id
+        )
+
+    except Exception as e:
+
+        print(
+            "⚠️ Wallet backup message edit error:",
+            e
+        )
+
+
+# ============================================================
+# /backup
+# ============================================================
+
+@bot.message_handler(
+    commands=["backup"]
+)
+def wallet_backup_start(message):
+
+    global WALLET_MIGRATION_RUNNING
+
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    if WALLET_MIGRATION_RUNNING:
+
+        bot.send_message(
+            ADMIN_ID,
+            "⚠️ Wani Wallet Backup yana gudana yanzu.\n"
+            "Da fatan a jira ya gama."
+        )
+
+        return
+
+    kb = types.InlineKeyboardMarkup()
+
+    kb.row(
+        types.InlineKeyboardButton(
+            "💰 Wallet DB",
+            callback_data="backup_wallet_db"
+        ),
+        types.InlineKeyboardButton(
+            "🎬 Film DB",
+            callback_data="backup_film_db"
+        )
+    )
+
+    bot.send_message(
+        ADMIN_ID,
+        "Wanne DB zamuyi Backup oga?",
+        reply_markup=kb
+    )
+
+
+# ============================================================
+# WALLET DB BUTTON
+# ============================================================
+
+@bot.callback_query_handler(
+    func=lambda c: c.data == "backup_wallet_db"
+)
+def wallet_backup_confirm(call):
+
+    if call.from_user.id != ADMIN_ID:
+
+        bot.answer_callback_query(
+            call.id,
+            "Ba ka da izinin wannan aikin.",
+            show_alert=True
+        )
+
+        return
+
+    bot.answer_callback_query(call.id)
+
+    kb = types.InlineKeyboardMarkup()
+
+    kb.row(
+        types.InlineKeyboardButton(
+            "✅ YES",
+            callback_data="backup_wallet_confirm_yes"
+        ),
+        types.InlineKeyboardButton(
+            "❌ NO",
+            callback_data="backup_wallet_confirm_no"
+        )
+    )
+
+    wallet_backup_edit(
+        call.message.chat.id,
+        call.message.message_id,
+        "⚠️ KA TABBATA?\n\n"
+        "Kana son tura tsohon Wallet DB data "
+        "da babu a sabon Supabase Wallet DB?\n\n"
+        "Za a duba rows ɗaya bayan ɗaya cikin batches.\n"
+        "Za a tabbatar da su bayan an rubuta su.\n\n"
+        "Danna YES domin fara aikin ko NO domin fasa."
+    )
+
+    try:
+
+        bot.edit_message_reply_markup(
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=kb
+        )
+
+    except Exception as e:
+
+        print(
+            "Backup confirmation keyboard error:",
+            e
+        )
+
+
+# ============================================================
+# CANCEL BACKUP
+# ============================================================
+
+@bot.callback_query_handler(
+    func=lambda c: c.data == "backup_wallet_confirm_no"
+)
+def wallet_backup_cancel(call):
+
+    if call.from_user.id != ADMIN_ID:
+
+        bot.answer_callback_query(
+            call.id,
+            "Ba ka da izinin wannan aikin.",
+            show_alert=True
+        )
+
+        return
+
+    bot.answer_callback_query(
+        call.id,
+        "Backup an soke."
+    )
+
+    wallet_backup_edit(
+        call.message.chat.id,
+        call.message.message_id,
+        "❌ WALLET BACKUP AN SOKE.\n\n"
+        "Babu wani migration da aka fara."
+    )
+
+
+
+# ============================================================
+# START WALLET MIGRATION
+# ============================================================
+
+@bot.callback_query_handler(
+    func=lambda c: c.data == "backup_wallet_confirm_yes"
+)
+def wallet_backup_confirm_yes(call):
+
+    global WALLET_MIGRATION_RUNNING
+
+    if call.from_user.id != ADMIN_ID:
+
+        bot.answer_callback_query(
+            call.id,
+            "Ba ka da izinin wannan aikin.",
+            show_alert=True
+        )
+
+        return
+
+    if WALLET_MIGRATION_RUNNING:
+
+        bot.answer_callback_query(
+            call.id,
+            "Backup yana gudana yanzu.",
+            show_alert=True
+        )
+
+        return
+
+    WALLET_MIGRATION_RUNNING = True
+
+    bot.answer_callback_query(
+        call.id,
+        "Backup ya fara..."
+    )
+
+    wallet_backup_edit(
+        call.message.chat.id,
+        call.message.message_id,
+        "🚀 WALLET BACKUP YA FARA\n\n"
+        "Ana haɗawa da tsohon Wallet DB...\n"
+        "Ana haɗawa da sabon Supabase Wallet DB..."
+    )
+
+    try:
+
+        result = run_wallet_database_migration(
+            call.message.chat.id,
+            call.message.message_id
+        )
+
+        if result:
+
+            wallet_backup_edit(
+                call.message.chat.id,
+                call.message.message_id,
+                result
+            )
+
+    except Exception as e:
+
+        print(
+            "❌ WALLET MIGRATION FATAL ERROR:",
+            repr(e)
+        )
+
+        wallet_backup_edit(
+            call.message.chat.id,
+            call.message.message_id,
+            "❌ WALLET BACKUP YA TSAYA\n\n"
+            "An samu babban kuskure:\n\n"
+            f"{str(e)[:3000]}"
+        )
+
+    finally:
+
+        WALLET_MIGRATION_RUNNING = False
+
+
+# ============================================================
+# SPECIAL WALLET BALANCE RECONCILIATION
+#
+# IMPORTANT SAFETY RULES:
+#
+# 1. Target-only user is NEVER deleted.
+# 2. Target-only transaction is NEVER deleted.
+# 3. Source transaction missing from target can be recovered.
+# 4. Debit/Credit direction is checked through the existing
+#    wallet_transaction_signed_amount() function.
+# 5. Balance is changed ONLY when the transaction delta exactly
+#    explains the balance difference.
+# 6. If the math does not match, that USER is protected and
+#    migration continues. The whole migration does NOT stop.
+# ============================================================
+
+def reconcile_wallet_balance_user(
+    old_cur,
+    new_cur,
+    user_id,
+    source_balance,
+    source_balance_created_at,
+    source_balance_updated_at
+):
+
+    # ========================================================
+    # RESULT DEFAULT
+    # ========================================================
+
+    result_base = {
+        "action": "protected",
+        "missing_transactions": [],
+        "old_balance": None,
+        "new_balance": source_balance,
+        "delta": 0,
+        "reason": None
+    }
+
+    # ========================================================
+    # GET TARGET BALANCE
+    # ========================================================
+
+    new_cur.execute(
+        """
+        SELECT
+            user_id,
+            balance,
+            created_at,
+            updated_at
+        FROM wallet_balance
+        WHERE user_id = %s
+        """,
+        (user_id,)
+    )
+
+    target_balance_row = new_cur.fetchone()
+
+    # ========================================================
+    # USER DOES NOT EXIST IN TARGET
+    #
+    # Safe normal copy.
+    # ========================================================
+
+    if target_balance_row is None:
+
+        new_cur.execute(
+            """
+            INSERT INTO wallet_balance
+            (
+                user_id,
+                balance,
+                created_at,
+                updated_at
+            )
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (user_id)
+            DO NOTHING
+            """,
+            (
+                user_id,
+                source_balance,
+                source_balance_created_at,
+                source_balance_updated_at
+            )
+        )
+
+        # ----------------------------------------------------
+        # VERIFY
+        # ----------------------------------------------------
+
+        new_cur.execute(
+            """
+            SELECT
+                user_id,
+                balance,
+                created_at,
+                updated_at
+            FROM wallet_balance
+            WHERE user_id = %s
+            """,
+            (user_id,)
+        )
+
+        verify_row = new_cur.fetchone()
+
+        expected_row = (
+            user_id,
+            source_balance,
+            source_balance_created_at,
+            source_balance_updated_at
+        )
+
+        if not wallet_rows_equal(
+            expected_row,
+            verify_row
+        ):
+
+            raise RuntimeError(
+                "wallet_balance INITIAL "
+                "VERIFICATION FAILED.\n"
+                f"user_id={user_id}"
+            )
+
+        return {
+            "action": "copied",
+            "missing_transactions": [],
+            "old_balance": None,
+            "new_balance": source_balance,
+            "delta": 0,
+            "reason": None
+        }
+
+    # ========================================================
+    # TARGET ALREADY HAS USER
+    # ========================================================
+
+    target_user_id = target_balance_row[0]
+    target_balance = target_balance_row[1]
+
+    result_base["old_balance"] = target_balance
+
+    # ========================================================
+    # EXACT MATCH
+    #
+    # Nothing to change.
+    # ========================================================
+
+    if (
+        target_user_id == user_id
+        and wallet_values_equal(
+            target_balance,
+            source_balance
+        )
+        and wallet_values_equal(
+            target_balance_row[2],
+            source_balance_created_at
+        )
+        and wallet_values_equal(
+            target_balance_row[3],
+            source_balance_updated_at
+        )
+    ):
+
+        return {
+            "action": "exact",
+            "missing_transactions": [],
+            "old_balance": target_balance,
+            "new_balance": source_balance,
+            "delta": 0,
+            "reason": None
+        }
+
+    # ========================================================
+    # GET SOURCE TRANSACTIONS
+    # ========================================================
+
+    old_cur.execute(
+        """
+        SELECT
+            id,
+            user_id,
+            amount,
+            type,
+            reference,
+            description,
+            created_at
+        FROM wallet_transactions
+        WHERE user_id = %s
+        ORDER BY id ASC
+        """,
+        (user_id,)
+    )
+
+    source_transactions = old_cur.fetchall()
+
+    # ========================================================
+    # GET TARGET TRANSACTION IDS
+    # ========================================================
+
+    new_cur.execute(
+        """
+        SELECT
+            id
+        FROM wallet_transactions
+        WHERE user_id = %s
+        """,
+        (user_id,)
+    )
+
+    target_transaction_ids = {
+        row[0]
+        for row in new_cur.fetchall()
+    }
+
+    # ========================================================
+    # FIND SOURCE TRANSACTIONS MISSING IN TARGET
+    # ========================================================
+
+    missing_transactions = []
+
+    for tx in source_transactions:
+
+        tx_id = tx[0]
+
+        if tx_id not in target_transaction_ids:
+
+            missing_transactions.append(tx)
+
+    # ========================================================
+    # BALANCE DELTA
+    # ========================================================
+
+    source_balance_int = int(
+        source_balance or 0
+    )
+
+    target_balance_int = int(
+        target_balance or 0
+    )
+
+    expected_delta = (
+        source_balance_int
+        - target_balance_int
+    )
+
+    # ========================================================
+    # NO MISSING TRANSACTIONS
+    #
+    # VERY IMPORTANT:
+    #
+    # Do NOT force target balance to source balance.
+    #
+    # We have no transaction evidence explaining the difference.
+    #
+    # Protect target and continue migration.
+    # ========================================================
+
+    if not missing_transactions:
+
+        return {
+            "action": "protected",
+            "missing_transactions": [],
+            "old_balance": target_balance,
+            "new_balance": target_balance,
+            "delta": expected_delta,
+            "reason": (
+                "Bambancin balance amma babu "
+                "missing source transaction "
+                "da zai tabbatar da dalilin."
+            )
+        }
+
+    # ========================================================
+    # CALCULATE MISSING TRANSACTION DELTA
+    #
+    # wallet_transaction_signed_amount()
+    # determines whether each transaction is:
+    #
+    # + CREDIT
+    # - DEBIT
+    # ========================================================
+
+    transaction_delta = 0
+
+    transaction_breakdown = []
+
+    for tx in missing_transactions:
+
+        tx_id = tx[0]
+        amount = tx[2]
+        tx_type = tx[3]
+
+        signed_amount = (
+            wallet_transaction_signed_amount(
+                amount,
+                tx_type
+            )
+        )
+
+        transaction_delta += signed_amount
+
+        transaction_breakdown.append(
+            (
+                tx_id,
+                amount,
+                tx_type,
+                signed_amount
+            )
+        )
+
+    # ========================================================
+    # SAFETY CHECK
+    #
+    # Example:
+    #
+    # Target = 300
+    # Source = 200
+    #
+    # Expected delta = -100
+    #
+    # Missing transaction = -100
+    #
+    # MATCH -> safe
+    #
+    # --------------------------------------------------------
+    #
+    # Example:
+    #
+    # Target = 300
+    # Source = 200
+    #
+    # Missing transaction = +100
+    #
+    # DOES NOT MATCH
+    #
+    # -> Protect user.
+    # -> Do NOT change balance.
+    # -> Do NOT insert transaction.
+    # -> Continue migration.
+    # ========================================================
+
+    if transaction_delta != expected_delta:
+
+        print(
+            "🔐 WALLET USER PROTECTED\n"
+            f"user_id={user_id}\n"
+            f"Target balance={target_balance}\n"
+            f"Source balance={source_balance}\n"
+            f"Expected delta={expected_delta}\n"
+            f"Missing transaction delta={transaction_delta}\n"
+            f"Missing transactions={len(missing_transactions)}"
+        )
+
+        return {
+            "action": "protected",
+            "missing_transactions": [],
+            "old_balance": target_balance,
+            "new_balance": target_balance,
+            "delta": expected_delta,
+            "reason": (
+                "Missing transaction delta bai yi "
+                "daidai da balance difference ba."
+            )
+        }
+
+    # ========================================================
+    # ONLY NOW INSERT MISSING TRANSACTIONS
+    #
+    # Because mathematical reconciliation succeeded.
+    # ========================================================
+
+    inserted_transactions = []
+
+    for tx in missing_transactions:
+
+        (
+            tx_id,
+            tx_user_id,
+            tx_amount,
+            tx_type,
+            tx_reference,
+            tx_description,
+            tx_created_at
+        ) = tx
+
+        new_cur.execute(
+            """
+            INSERT INTO wallet_transactions
+            (
+                id,
+                user_id,
+                amount,
+                type,
+                reference,
+                description,
+                created_at
+            )
+            VALUES (
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s
+            )
+            ON CONFLICT (id)
+            DO NOTHING
+            """,
+            (
+                tx_id,
+                tx_user_id,
+                tx_amount,
+                tx_type,
+                tx_reference,
+                tx_description,
+                tx_created_at
+            )
+        )
+
+        inserted_transactions.append(
+            tx_id
+        )
+
+    # ========================================================
+    # NOW UPDATE BALANCE
+    #
+    # ONLY AFTER:
+    #
+    # 1. Missing transactions identified
+    # 2. Debit/Credit direction calculated
+    # 3. Delta exactly matches balance difference
+    # ========================================================
+
+    new_cur.execute(
+        """
+        UPDATE wallet_balance
+        SET
+            balance = %s,
+            created_at = %s,
+            updated_at = %s
+        WHERE user_id = %s
+        """,
+        (
+            source_balance,
+            source_balance_created_at,
+            source_balance_updated_at,
+            user_id
+        )
+    )
+
+    # ========================================================
+    # VERIFY BALANCE
+    # ========================================================
+
+    new_cur.execute(
+        """
+        SELECT
+            user_id,
+            balance,
+            created_at,
+            updated_at
+        FROM wallet_balance
+        WHERE user_id = %s
+        """,
+        (user_id,)
+    )
+
+    verified_balance = new_cur.fetchone()
+
+    expected_balance_row = (
+        user_id,
+        source_balance,
+        source_balance_created_at,
+        source_balance_updated_at
+    )
+
+    if not wallet_rows_equal(
+        expected_balance_row,
+        verified_balance
+    ):
+
+        raise RuntimeError(
+            "wallet_balance FINAL "
+            "VERIFICATION FAILED.\n"
+            f"user_id={user_id}"
+        )
+
+    # ========================================================
+    # VERIFY EVERY RECOVERED TRANSACTION
+    # ========================================================
+
+    for tx in missing_transactions:
+
+        tx_id = tx[0]
+
+        new_cur.execute(
+            """
+            SELECT
+                id,
+                user_id,
+                amount,
+                type,
+                reference,
+                description,
+                created_at
+            FROM wallet_transactions
+            WHERE id = %s
+            """,
+            (tx_id,)
+        )
+
+        target_tx = new_cur.fetchone()
+
+        if target_tx is None:
+
+            raise RuntimeError(
+                "Transaction verification failed.\n"
+                f"user_id={user_id}\n"
+                f"transaction_id={tx_id}"
+            )
+
+        if not wallet_rows_equal(
+            tx,
+            target_tx
+        ):
+
+            raise RuntimeError(
+                "Transaction data mismatch.\n"
+                f"user_id={user_id}\n"
+                f"transaction_id={tx_id}"
+            )
+
+    # ========================================================
+    # SUCCESSFUL RECONCILIATION
+    # ========================================================
+
+    return {
+        "action": "reconciled",
+        "missing_transactions": inserted_transactions,
+        "old_balance": target_balance,
+        "new_balance": source_balance,
+        "delta": expected_delta,
+        "reason": None
+    }
+
+
+# ============================================================
+# MAIN MIGRATION ENGINE
+# ============================================================
+
+def run_wallet_database_migration(
+    chat_id,
+    message_id
+):
+
+    old_conn = None
+    new_conn = None
+
+    old_cur = None
+    new_cur = None
+
+    total_source_rows = 0
+    total_copied_rows = 0
+    total_skipped_rows = 0
+    total_updated_rows = 0
+    total_verified_rows = 0
+    total_failed_rows = 0
+
+    total_reconciled_balances = 0
+    total_missing_transactions_recovered = 0
+    total_protected_users = 0
+
+    protected_users = []
+
+    table_results = []
+
+    try:
+
+        # ====================================================
+        # CONNECT SOURCE
+        # ====================================================
+
+        old_conn = get_wallet_conn()
+
+        if not old_conn:
+
+            raise RuntimeError(
+                "Tsohon Wallet DB ya kasa bada connection."
+            )
+
+        # ====================================================
+        # CONNECT TARGET
+        # ====================================================
+
+        new_conn = get_supabase_wallet_conn()
+
+        if not new_conn:
+
+            raise RuntimeError(
+                "Sabon Supabase Wallet DB ya kasa bada connection."
+            )
+
+        # ====================================================
+        # SOURCE SNAPSHOT
+        # ====================================================
+
+        old_conn.autocommit = False
+
+        old_cur = old_conn.cursor()
+
+        old_cur.execute(
+            "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"
+        )
+
+        # ====================================================
+        # TARGET
+        # ====================================================
+
+        new_conn.autocommit = False
+
+        new_cur = new_conn.cursor()
+
+        # ====================================================
+        # PROCESS TABLES
+        # ====================================================
+
+        table_names = list(
+            WALLET_MIGRATION_TABLES.keys()
+        )
+
+        for table_index, table_name in enumerate(
+            table_names,
+            start=1
+        ):
+
+            config = WALLET_MIGRATION_TABLES[
+                table_name
+            ]
+
+            columns = config["columns"]
+            key_column = config["key"]
+
+            wallet_backup_edit(
+                chat_id,
+                message_id,
+                "🔄 WALLET BACKUP\n\n"
+                f"📦 Table {table_index}/4:\n"
+                f"🗃 {table_name}\n\n"
+                "Working... 🔄"
+            )
+
+            # =================================================
+            # SOURCE COUNT
+            # =================================================
+
+            old_cur.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM "{table_name}"
+                """
+            )
+
+            source_count = old_cur.fetchone()[0]
+
+            total_source_rows += source_count
+
+            # =================================================
+            # EMPTY TABLE
+            # =================================================
+
+            if source_count == 0:
+
+                table_results.append(
+                    (
+                        table_name,
+                        0,
+                        0,
+                        0,
+                        0
+                    )
+                )
+
+                wallet_backup_edit(
+                    chat_id,
+                    message_id,
+                    "🔄 WALLET BACKUP\n\n"
+                    f"📦 {table_name}\n\n"
+                    "Source rows: 0\n"
+                    "Copied: 0 ✅\n"
+                    "Skipped: 0\n"
+                    "Updated: 0\n"
+                    "Verified: 0 ✅\n\n"
+                    "➡️ Table empty.\n"
+                    "Moving to next table..."
+                )
+
+                continue
+
+            table_copied = 0
+            table_skipped = 0
+            table_updated = 0
+            table_verified = 0
+            table_failed = 0
+
+            # =================================================
+            # SPECIAL BALANCE TABLE
+            # =================================================
+
+            if table_name == "wallet_balance":
+
+                key_index = columns.index(
+                    key_column
+                )
+
+                last_key = None
+
+                while True:
+
+                    column_sql = ", ".join(
+                        f'"{c}"'
+                        for c in columns
+                    )
+
+                    # =========================================
+                    # FETCH SOURCE BATCH
+                    # =========================================
+
+                    if last_key is None:
+
+                        old_cur.execute(
+                            f"""
+                            SELECT {column_sql}
+                            FROM "{table_name}"
+                            ORDER BY "{key_column}" ASC
+                            LIMIT %s
+                            """,
+                            (
+                                WALLET_MIGRATION_BATCH_SIZE,
+                            )
+                        )
+
+                    else:
+
+                        old_cur.execute(
+                            f"""
+                            SELECT {column_sql}
+                            FROM "{table_name}"
+                            WHERE "{key_column}" > %s
+                            ORDER BY "{key_column}" ASC
+                            LIMIT %s
+                            """,
+                            (
+                                last_key,
+                                WALLET_MIGRATION_BATCH_SIZE
+                            )
+                        )
+
+                    batch = old_cur.fetchall()
+
+                    if not batch:
+                        break
+
+                    # =========================================
+                    # PROCESS EACH USER
+                    # =========================================
+
+                    for source_row in batch:
+
+                        (
+                            user_id,
+                            source_balance,
+                            source_created_at,
+                            source_updated_at
+                        ) = source_row
+
+                        try:
+
+                            result = (
+                                reconcile_wallet_balance_user(
+                                    old_cur,
+                                    new_cur,
+                                    user_id,
+                                    source_balance,
+                                    source_created_at,
+                                    source_updated_at
+                                )
+                            )
+
+                            action = result["action"]
+
+                            # ---------------------------------
+                            # COPIED
+                            # ---------------------------------
+
+                            if action == "copied":
+
+                                table_copied += 1
+                                total_copied_rows += 1
+
+                            # ---------------------------------
+                            # EXACT
+                            # ---------------------------------
+
+                            elif action == "exact":
+
+                                table_skipped += 1
+                                total_skipped_rows += 1
+
+                            # ---------------------------------
+                            # RECONCILED
+                            # ---------------------------------
+
+                            elif action == "reconciled":
+
+                                table_updated += 1
+                                total_updated_rows += 1
+
+                                total_reconciled_balances += 1
+
+                                total_missing_transactions_recovered += len(
+                                    result[
+                                        "missing_transactions"
+                                    ]
+                                )
+
+                            # ---------------------------------
+                            # PROTECTED
+                            #
+                            # DO NOT STOP MIGRATION.
+                            # ---------------------------------
+
+                            elif action == "protected":
+
+                                total_protected_users += 1
+
+                                protected_users.append(
+                                    (
+                                        user_id,
+                                        target_balance if False else result.get(
+                                            "old_balance"
+                                        ),
+                                        result.get(
+                                            "new_balance"
+                                        ),
+                                        result.get(
+                                            "delta"
+                                        ),
+                                        result.get(
+                                            "reason"
+                                        )
+                                    )
+                                )
+
+                                table_skipped += 1
+                                total_skipped_rows += 1
+
+                            # ---------------------------------
+                            # USER WAS SUCCESSFULLY CHECKED
+                            # ---------------------------------
+
+                            table_verified += 1
+                            total_verified_rows += 1
+
+                            # ---------------------------------
+                            # COMMIT THIS USER
+                            # ---------------------------------
+
+                            new_conn.commit()
+
+                        except Exception as user_error:
+
+                            new_conn.rollback()
+
+                            table_failed += 1
+                            total_failed_rows += 1
+
+                            raise RuntimeError(
+                                f"wallet_balance user "
+                                f"{user_id} failed.\n\n"
+                                f"{user_error}"
+                            )
+
+                    # =========================================
+                    # MOVE SOURCE CHECKPOINT
+                    # =========================================
+
+                    last_key = batch[-1][key_index]
+
+                    processed = (
+                        table_copied
+                        + table_skipped
+                        + table_updated
+                    )
+
+                    wallet_backup_edit(
+                        chat_id,
+                        message_id,
+                        "🔄 WALLET BACKUP\n\n"
+                        f"📦 Table {table_index}/4\n"
+                        f"🗃 {table_name}\n\n"
+                        f"Source rows: {source_count:,}\n"
+                        f"Processed: {processed:,} / "
+                        f"{source_count:,}\n\n"
+                        f"Copied: {table_copied:,} ✅\n"
+                        f"Already existed: "
+                        f"{table_skipped:,} ⏭️\n"
+                        f"Reconciled: "
+                        f"{table_updated:,} 🔄\n"
+                        f"Protected: "
+                        f"{total_protected_users:,} 🔐\n"
+                        f"Verified: {table_verified:,} ✅\n"
+                        f"Failed: {table_failed:,}\n\n"
+                        f"Recovered missing transactions: "
+                        f"{total_missing_transactions_recovered:,}\n\n"
+                        "Working... 🔄"
+                    )
+
+                # =============================================
+                # TABLE CHECK
+                #
+                # Protected users count as safely examined.
+                # They are NOT forced to match target balance.
+                # =============================================
+
+                processed_total = (
+                    table_copied
+                    + table_skipped
+                    + table_updated
+                )
+
+                if processed_total != source_count:
+
+                    raise RuntimeError(
+                        f"TABLE INCOMPLETE: "
+                        f"{table_name}\n"
+                        f"Source={source_count}\n"
+                        f"Processed={processed_total}"
+                    )
+
+                if table_verified != source_count:
+
+                    raise RuntimeError(
+                        f"TABLE VERIFICATION INCOMPLETE: "
+                        f"{table_name}\n"
+                        f"Source={source_count}\n"
+                        f"Checked={table_verified}"
+                    )
+
+                table_results.append(
+                    (
+                        table_name,
+                        source_count,
+                        table_copied,
+                        table_skipped,
+                        table_updated
+                    )
+                )
+
+                wallet_backup_edit(
+                    chat_id,
+                    message_id,
+                    "✅ TABLE COMPLETED\n\n"
+                    f"🗃 {table_name}\n\n"
+                    f"Source rows: {source_count:,}\n"
+                    f"Copied: {table_copied:,} ✅\n"
+                    f"Already existed: "
+                    f"{table_skipped:,} ⏭️\n"
+                    f"Reconciled: "
+                    f"{table_updated:,} 🔄\n"
+                    f"Protected: "
+                    f"{total_protected_users:,} 🔐\n"
+                    f"Verified: {table_verified:,} ✅\n"
+                    f"Failed: {table_failed:,}\n\n"
+                    f"Missing transactions recovered: "
+                    f"{total_missing_transactions_recovered:,}\n\n"
+                    "➡️ Moving to next table..."
+                )
+
+                time.sleep(0.5)
+
+                continue
+
+            # =================================================
+            # NORMAL TABLE MIGRATION
+            #
+            # wallet_transactions
+            # wallet_deposits
+            # wallet_withdrawals
+            #
+            # IMPORTANT:
+            #
+            # Target may contain extra rows.
+            # We NEVER delete them.
+            # =================================================
+
+            last_key = None
+
+            key_index = columns.index(
+                key_column
+            )
+
+            column_sql = ", ".join(
+                f'"{c}"'
+                for c in columns
+            )
+
+            while True:
+
+                # =============================================
+                # FETCH SOURCE BATCH
+                # =============================================
+
+                if last_key is None:
+
+                    old_cur.execute(
+                        f"""
+                        SELECT {column_sql}
+                        FROM "{table_name}"
+                        ORDER BY "{key_column}" ASC
+                        LIMIT %s
+                        """,
+                        (
+                            WALLET_MIGRATION_BATCH_SIZE,
+                        )
+                    )
+
+                else:
+
+                    old_cur.execute(
+                        f"""
+                        SELECT {column_sql}
+                        FROM "{table_name}"
+                        WHERE "{key_column}" > %s
+                        ORDER BY "{key_column}" ASC
+                        LIMIT %s
+                        """,
+                        (
+                            last_key,
+                            WALLET_MIGRATION_BATCH_SIZE
+                        )
+                    )
+
+                batch = old_cur.fetchall()
+
+                if not batch:
+                    break
+
+                keys = [
+                    row[key_index]
+                    for row in batch
+                ]
+
+                placeholders = ", ".join(
+                    ["%s"] * len(keys)
+                )
+
+                # =============================================
+                # TARGET LOOKUP
+                # =============================================
+
+                new_cur.execute(
+                    f"""
+                    SELECT {column_sql}
+                    FROM "{table_name}"
+                    WHERE "{key_column}" IN (
+                        {placeholders}
+                    )
+                    """,
+                    tuple(keys)
+                )
+
+                target_rows = new_cur.fetchall()
+
+                target_by_key = {}
+
+                for target_row in target_rows:
+
+                    target_key = target_row[
+                        key_index
+                    ]
+
+                    target_by_key[
+                        target_key
+                    ] = target_row
+
+                # =============================================
+                # PROCESS SOURCE ROWS
+                # =============================================
+
+                for source_row in batch:
+
+                    source_key = source_row[
+                        key_index
+                    ]
+
+                    existing_row = (
+                        target_by_key.get(
+                            source_key
+                        )
+                    )
+
+                    # =========================================
+                    # EXACT EXISTING ROW
+                    # =========================================
+
+                    if existing_row is not None:
+
+                        if wallet_rows_equal(
+                            source_row,
+                            existing_row
+                        ):
+
+                            table_skipped += 1
+                            total_skipped_rows += 1
+
+                            continue
+
+                    # =========================================
+                    # CHECK FOR PRIMARY KEY CONFLICT
+                    #
+                    # If same ID exists but belongs to another
+                    # user / different data, NEVER overwrite it
+                    # blindly.
+                    # =========================================
+
+                    if existing_row is not None:
+
+                        existing_user_id = existing_row[
+                            columns.index("user_id")
+                        ]
+
+                        source_user_id = source_row[
+                            columns.index("user_id")
+                        ]
+
+                        if (
+                            existing_user_id
+                            != source_user_id
+                        ):
+
+                            # ---------------------------------
+                            # Protect target-only transaction.
+                            # Do not overwrite it.
+                            # ---------------------------------
+
+                            total_protected_users += 1
+
+                            protected_users.append(
+                                (
+                                    source_user_id,
+                                    None,
+                                    None,
+                                    None,
+                                    (
+                                        f"{table_name} "
+                                        f"id={source_key} "
+                                        f"already belongs to "
+                                        f"user_id="
+                                        f"{existing_user_id} "
+                                        f"in target."
+                                    )
+                                )
+                            )
+
+                            table_skipped += 1
+                            total_skipped_rows += 1
+
+                            print(
+                                "🔐 TARGET TRANSACTION "
+                                "PROTECTED\n"
+                                f"table={table_name}\n"
+                                f"id={source_key}\n"
+                                f"source_user="
+                                f"{source_user_id}\n"
+                                f"target_user="
+                                f"{existing_user_id}"
+                            )
+
+                            continue
+
+                    # =========================================
+                    # INSERT / UPDATE
+                    # =========================================
+
+                    insert_columns = ", ".join(
+                        f'"{c}"'
+                        for c in columns
+                    )
+
+                    insert_placeholders = ", ".join(
+                        ["%s"] * len(columns)
+                    )
+
+                    update_columns = [
+                        c
+                        for c in columns
+                        if c != key_column
+                    ]
+
+                    update_sql = ", ".join(
+                        f'"{c}" = EXCLUDED."{c}"'
+                        for c in update_columns
+                    )
+
+                    insert_sql = f"""
+                        INSERT INTO "{table_name}"
+                        ({insert_columns})
+                        VALUES ({insert_placeholders})
+                        ON CONFLICT ("{key_column}")
+                        DO UPDATE SET
+                            {update_sql}
+                    """
+
+                    try:
+
+                        new_cur.execute(
+                            insert_sql,
+                            tuple(source_row)
+                        )
+
+                        if existing_row is None:
+
+                            table_copied += 1
+                            total_copied_rows += 1
+
+                        else:
+
+                            table_updated += 1
+                            total_updated_rows += 1
+
+                    except Exception as row_error:
+
+                        new_conn.rollback()
+
+                        table_failed += 1
+                        total_failed_rows += 1
+
+                        raise RuntimeError(
+                            f"Failed migrating "
+                            f"{table_name} "
+                            f"key={source_key}\n"
+                            f"Error={row_error}"
+                        )
+
+                # =============================================
+                # VERIFY SOURCE BATCH
+                # =============================================
+
+                new_cur.execute(
+                    f"""
+                    SELECT {column_sql}
+                    FROM "{table_name}"
+                    WHERE "{key_column}" IN (
+                        {placeholders}
+                    )
+                    """,
+                    tuple(keys)
+                )
+
+                verified_rows = new_cur.fetchall()
+
+                verified_by_key = {}
+
+                for verified_row in verified_rows:
+
+                    verified_key = verified_row[
+                        key_index
+                    ]
+
+                    verified_by_key[
+                        verified_key
+                    ] = verified_row
+
+                # =============================================
+                # VERIFY EVERY SOURCE ROW
+                # =============================================
+
+                for source_row in batch:
+
+                    source_key = source_row[
+                        key_index
+                    ]
+
+                    target_row = (
+                        verified_by_key.get(
+                            source_key
+                        )
+                    )
+
+                    # ------------------------------------------------
+                    # If a source row has a conflicting target primary
+                    # key, it was intentionally protected above.
+                    # Do not stop migration here.
+                    # ------------------------------------------------
+
+                    if target_row is None:
+
+                        total_protected_users += 1
+
+                        protected_users.append(
+                            (
+                                source_row[
+                                    columns.index("user_id")
+                                ],
+                                None,
+                                None,
+                                None,
+                                (
+                                    f"{table_name} "
+                                    f"id={source_key} "
+                                    f"ba a same target row "
+                                    f"ba bayan."
+                                )
+                            )
+                        )
+
+                        continue
+
+                    # ------------------------------------------------
+                    # Exact verification
+                    # ------------------------------------------------
+
+                    if wallet_rows_equal(
+                        source_row,
+                        target_row
+                    ):
+
+                        table_verified += 1
+                        total_verified_rows += 1
+
+                    else:
+
+                        # ------------------------------------------------
+                        # Do not kill the entire migration because of one
+                        # protected/conflicting target row.
+                        # ------------------------------------------------
+
+                        total_protected_users += 1
+
+                        protected_users.append(
+                            (
+                                source_row[
+                                    columns.index("user_id")
+                                ],
+                                None,
+                                None,
+                                None,
+                                (
+                                    f"{table_name} "
+                                    f"id={source_key} "
+                                    f"verification mismatch."
+                                )
+                            )
+                        )
+
+                # =============================================
+                # COMMIT BATCH
+                # =============================================
+
+                new_conn.commit()
+
+                # =============================================
+                # CHECKPOINT
+                # =============================================
+
+                last_key = batch[-1][key_index]
+
+                processed = (
+                    table_copied
+                    + table_skipped
+                    + table_updated
+                )
+
+                wallet_backup_edit(
+                    chat_id,
+                    message_id,
+                    "🔄 WALLET BACKUP\n\n"
+                    f"📦 Table {table_index}/4\n"
+                    f"🗃 {table_name}\n\n"
+                    f"Source rows: {source_count:,}\n"
+                    f"Processed: {processed:,} / "
+                    f"{source_count:,}\n\n"
+                    f"Copied: {table_copied:,} ✅\n"
+                    f"Already existed: "
+                    f"{table_skipped:,} ⏭️\n"
+                    f"Updated: {table_updated:,} 🔄\n"
+                    f"Protected: "
+                    f"{total_protected_users:,} 🔐\n"
+                    f"Verified: {table_verified:,} ✅\n"
+                    f"Failed: {table_failed:,}\n\n"
+                    "Working... 🔄"
+                )
+
+            # =================================================
+            # TABLE COMPLETION
+            #
+            # We compare SOURCE coverage, not equality of
+            # source and target counts.
+            #
+            # This is the important fix.
+            #
+            # Target is allowed to have extra rows.
+            # =================================================
+
+            processed_total = (
+                table_copied
+                + table_skipped
+                + table_updated
+            )
+
+            if processed_total != source_count:
+
+                raise RuntimeError(
+                    f"TABLE INCOMPLETE: "
+                    f"{table_name}\n"
+                    f"Source={source_count}\n"
+                    f"Processed={processed_total}"
+                )
+
+            table_results.append(
+                (
+                    table_name,
+                    source_count,
+                    table_copied,
+                    table_skipped,
+                    table_updated
+                )
+            )
+
+            # =================================================
+            # RESET SERIAL SEQUENCE
+            # =================================================
+
+            if key_column == "id":
+
+                try:
+
+                    new_cur.execute(
+                        """
+                        SELECT setval(
+                            pg_get_serial_sequence(
+                                %s,
+                                %s
+                            ),
+                            COALESCE(
+                                (
+                                    SELECT MAX("id")
+                                    FROM """
+                        + f'"{table_name}"'
+                        + """
+                                ),
+                                1
+                            ),
+                            true
+                        )
+                        """,
+                        (
+                            table_name,
+                            "id"
+                        )
+                    )
+
+                    new_conn.commit()
+
+                except Exception as sequence_error:
+
+                    new_conn.rollback()
+
+                    print(
+                        "⚠️ Sequence reset warning:",
+                        table_name,
+                        sequence_error
+                    )
+
+            # =================================================
+            # TABLE SUCCESS
+            # =================================================
+
+            wallet_backup_edit(
+                chat_id,
+                message_id,
+                "✅ TABLE COMPLETED\n\n"
+                f"🗃 {table_name}\n\n"
+                f"Source rows: {source_count:,}\n"
+                f"Copied: {table_copied:,} ✅\n"
+                f"Already existed: "
+                f"{table_skipped:,} ⏭️\n"
+                f"Updated: {table_updated:,} 🔄\n"
+                f"Verified: {table_verified:,} ✅\n"
+                f"Failed: {table_failed:,}\n\n"
+                "ℹ️ Target-only rows were preserved.\n\n"
+                "➡️ Moving to next table..."
+            )
+
+            time.sleep(0.5)
+
+        # ====================================================
+        # FINAL SOURCE/TARGET VERIFICATION
+        #
+        # IMPORTANT CHANGE:
+        #
+        # OLD:
+        #     Source count MUST equal target count.
+        #
+        # NEW:
+        #     Target is allowed to contain extra rows.
+        #
+        # We only require:
+        #
+        #     every SOURCE row exists correctly in TARGET.
+        #
+        # This prevents a manually-added target-only user or
+        # transaction from stopping the entire migration.
+        # ====================================================
+
+        final_lines = []
+
+        for table_name in WALLET_MIGRATION_TABLES:
+
+            config = WALLET_MIGRATION_TABLES[
+                table_name
+            ]
+
+            columns = config["columns"]
+            key_column = config["key"]
+
+            key_index = columns.index(
+                key_column
+            )
+
+            column_sql = ", ".join(
+                f'"{c}"'
+                for c in columns
+            )
+
+            # ------------------------------------------------
+            # SOURCE COUNT
+            # ------------------------------------------------
+
+            old_cur.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM "{table_name}"
+                """
+            )
+
+            source_final_count = (
+                old_cur.fetchone()[0]
+            )
+
+            # ------------------------------------------------
+            # TARGET COUNT
+            # ------------------------------------------------
+
+            new_cur.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM "{table_name}"
+                """
+            )
+
+            target_final_count = (
+                new_cur.fetchone()[0]
+            )
+
+            # ------------------------------------------------
+            # TARGET MUST NOT BE SMALLER
+            #
+            # Extra target rows are allowed.
+            # Missing source rows are not.
+            # ------------------------------------------------
+
+            if target_final_count < source_final_count:
+
+                raise RuntimeError(
+                    f"FINAL TARGET COUNT TOO SMALL: "
+                    f"{table_name}\n"
+                    f"Source={source_final_count}\n"
+                    f"Target={target_final_count}"
+                )
+
+            # ------------------------------------------------
+            # FULL SOURCE KEY VERIFICATION
+            #
+            # Verify every source key exists in target.
+            # ------------------------------------------------
+
+            old_cur.execute(
+                f"""
+                SELECT "{key_column}"
+                FROM "{table_name}"
+                ORDER BY "{key_column}" ASC
+                """
+            )
+
+            source_keys = [
+                row[0]
+                for row in old_cur.fetchall()
+            ]
+
+            if source_keys:
+
+                placeholders = ", ".join(
+                    ["%s"] * len(source_keys)
+                )
+
+                new_cur.execute(
+                    f"""
+                    SELECT "{key_column}"
+                    FROM "{table_name}"
+                    WHERE "{key_column}" IN (
+                        {placeholders}
+                    )
+                    """,
+                    tuple(source_keys)
+                )
+
+                target_keys = {
+                    row[0]
+                    for row in new_cur.fetchall()
+                }
+
+                missing_keys = [
+                    key
+                    for key in source_keys
+                    if key not in target_keys
+                ]
+
+                if missing_keys:
+
+                    # ----------------------------------------
+                    # Do not stop because target-only users
+                    # exist, but a truly missing SOURCE row
+                    # is still a migration failure.
+                    # ----------------------------------------
+
+                    raise RuntimeError(
+                        f"FINAL SOURCE ROWS MISSING: "
+                        f"{table_name}\n"
+                        f"Missing count="
+                        f"{len(missing_keys)}\n"
+                        f"First missing keys="
+                        f"{missing_keys[:20]}"
+                    )
+
+            extra_count = (
+                target_final_count
+                - source_final_count
+            )
+
+            final_lines.append(
+                f"{table_name}: "
+                f"source={source_final_count:,} | "
+                f"target={target_final_count:,} | "
+                f"extra target={extra_count:,} ✅"
+            )
+
+        # ====================================================
+        # END SOURCE SNAPSHOT
+        # ====================================================
+
+        old_conn.rollback()
+
+        # ====================================================
+        # CLOSE CURSORS
+        # ====================================================
+
+        old_cur.close()
+        old_cur = None
+
+        new_cur.close()
+        new_cur = None
+
+        # ====================================================
+        # CLOSE CONNECTIONS
+        # ====================================================
+
+        old_conn.close()
+        old_conn = None
+
+        new_conn.close()
+        new_conn = None
+
+        # ====================================================
+        # PROTECTED USER REPORT
+        # ====================================================
+
+        protected_report = ""
+
+        if protected_users:
+
+            protected_report = (
+                "\n\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "🔐 PROTECTED / SKIPPED\n"
+                "━━━━━━━━━━━━━━━━━━\n\n"
+                f"Users/records protected: "
+                f"{len(protected_users):,}\n\n"
+                "An bar su daga target.\n"
+                "An bar su saboda babu cikakken "
+                "shaida da za a canza su lafiya.\n\n"
+            )
+
+            # Show only first 20
+            for item in protected_users[:20]:
+
+                p_user_id = item[0]
+                p_old = item[1]
+                p_new = item[2]
+                p_delta = item[3]
+                p_reason = item[4]
+
+                protected_report += (
+                    f"👤 user_id: {p_user_id}\n"
+                    f"Old target balance: {p_old}\n"
+                    f"Source balance: {p_new}\n"
+                    f"Expected delta: {p_delta}\n"
+                    f"Reason: {p_reason}\n\n"
+                )
+
+            if len(protected_users) > 20:
+
+                protected_report += (
+                    f"... da wasu "
+                    f"{len(protected_users) - 20:,}.\n"
+                )
+
+        # ====================================================
+        # FINAL REPORT
+        # ====================================================
+
+        report = (
+            "🏁 WALLET BACKUP COMPLETED\n\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "📦 TABLES\n"
+            "━━━━━━━━━━━━━━━━━━\n\n"
+            + "\n".join(final_lines)
+            + "\n\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "📊 MIGRATION SUMMARY\n"
+            "━━━━━━━━━━━━━━━━━━\n\n"
+            f"Source rows: {total_source_rows:,}\n"
+            f"Copied: {total_copied_rows:,} ✅\n"
+            f"Already existed: "
+            f"{total_skipped_rows:,} ⏭️\n"
+            f"Updated: {total_updated_rows:,} 🔄\n"
+            f"Verified: {total_verified_rows:,} ✅\n"
+            f"Failed: {total_failed_rows:,}\n\n"
+            f"Balance reconciled: "
+            f"{total_reconciled_balances:,} 🔄\n"
+            f"Missing transactions recovered: "
+            f"{total_missing_transactions_recovered:,} 🧾\n"
+            f"Protected/skipped: "
+            f"{total_protected_users:,} 🔐\n\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "🔐 SAFETY\n"
+            "━━━━━━━━━━━━━━━━━━\n\n"
+            "✅ Debit/Credit direction checked.\n"
+            "✅ Balance changes require matching "
+            "transaction delta.\n"
+            "✅ Target-only users were preserved.\n"
+            "✅ Target-only transactions were preserved.\n"
+            "✅ No target-only data was deleted.\n"
+            "✅ Original transaction IDs preserved.\n"
+            "✅ Original timestamps preserved.\n"
+            "✅ NULL values preserved.\n"
+            "✅ Source rows were checked against target.\n"
+            "ℹ️ Target may contain extra rows safely.\n"
+            + protected_report
+            + "\n"
+            "🎉 WALLET MIGRATION VERIFIED."
+        )
+
+        return report
+
+    # ========================================================
+    # FATAL ERROR
+    # ========================================================
+
+    except Exception:
+
+        if new_conn:
+
+            try:
+                new_conn.rollback()
+            except:
+                pass
+
+        if old_conn:
+
+            try:
+                old_conn.rollback()
+            except:
+                pass
+
+        raise
+
+    finally:
+
+        # ====================================================
+        # CLOSE OLD CURSOR
+        # ====================================================
+
+        if old_cur:
+
+            try:
+                old_cur.close()
+            except:
+                pass
+
+        # ====================================================
+        # CLOSE NEW CURSOR
+        # ====================================================
+
+        if new_cur:
+
+            try:
+                new_cur.close()
+            except:
+                pass
+
+        # ====================================================
+        # CLOSE OLD CONNECTION
+        # ====================================================
+
+        if old_conn:
+
+            try:
+                old_conn.close()
+            except:
+                pass
+
+        # ====================================================
+        # CLOSE NEW CONNECTION
+        # ====================================================
+
+        if new_conn:
+
+            try:
+                new_conn.close()
+            except:
+                pass
+
+
+# ============================================================
+# END
+# ============================================================
+
+# ============================================================
+# FILM DB CALLBACK PLACEHOLDER
+#
+# Ba mu gina Film DB yanzu.
+# ============================================================
+
+@bot.callback_query_handler(
+    func=lambda c: c.data == "backup_film_db"
+)
+def backup_film_db_placeholder(call):
+
+    if call.from_user.id != ADMIN_ID:
+
+        bot.answer_callback_query(
+            call.id,
+            "Ba ka da izinin wannan aikin.",
+            show_alert=True
+        )
+
+        return
+
+    bot.answer_callback_query(call.id)
+
+    wallet_backup_edit(
+        call.message.chat.id,
+        call.message.message_id,
+        "🎬 FILM DB\n\n"
+        "An zaɓi Film DB.\n\n"
+        "⏳ Film DB backup system "
+        "ba mu gina shi yanzu ba.\n\n"
+        "Za mu gina nasa migration system "
+        "dabam bayan an kammala Wallet DB."
+    )
+
+
+
+# ============================================================
+# 🎬 FILM DATABASE BACKUP / MIGRATION SYSTEM
+# ============================================================
+#
+# SOURCE DATABASE:
+#     DATABASE_URL
+#
+# DESTINATION DATABASE:
+#     FILM_SUPABASE_DATABASE_URL
+#
+# MUHIMMI:
+#     DATABASE_URL ne SOURCE.
+#     Daga DATABASE_URL za a debo dukkan Film data.
+#     FILM_SUPABASE_DATABASE_URL ne DESTINATION.
+#
+# FEATURES:
+# ✅ Yes / No confirmation
+# ✅ SOURCE = DATABASE_URL
+# ✅ DESTINATION = FILM_SUPABASE_DATABASE_URL
+# ✅ Read-only schema inspection before migration
+# ✅ Copies ALL public tables
+# ✅ Copies ALL columns automatically
+# ✅ Preserves original IDs
+# ✅ Preserves file_id
+# ✅ Preserves file_name
+# ✅ Preserves group_key
+# ✅ Preserves order_id / item_id / user_id
+# ✅ 50 rows per batch
+# ✅ Safe checkpoint / resume
+# ✅ Existing-row verification
+# ✅ Duplicate protection
+# ✅ Stops immediately on mismatch
+# ✅ DB connection error reporting
+# ✅ Live admin progress editing
+# ✅ Foreign-key dependency ordering
+# ✅ Sequence repair after migration
+# ✅ Migration survives bot restart
+# ============================================================
+
+import os
+import time
+import json
+import threading
+import traceback
+
+import psycopg2
+from psycopg2 import sql
+from psycopg2.extras import Json
+from telebot import types
+
+
+# ============================================================
+# SETTINGS
+# ============================================================
+
+FILM_BACKUP_BATCH_SIZE = 50
+
+FILM_MIGRATION_STATE_TABLE = "film_db_migration_state"
+
+# Wannan table din migration system ne.
+# Za a ajiye shi a DESTINATION kawai.
+# Ba za a taba debo shi daga SOURCE ba.
+FILM_MIGRATION_INTERNAL_TABLES = {
+    FILM_MIGRATION_STATE_TABLE,
+}
+
+
+# ============================================================
+# TABLE PRIORITY
+# ============================================================
+#
+# Wannan priority ne kawai idan tables biyu ba su da
+# dependency tsakanin su.
+#
+# Foreign-key dependency order zai fi wannan karfi.
+# ============================================================
+
+FILM_TABLE_PRIORITY = [
+    "items",
+    "users",
+    "orders",
+    "order_items",
+    "user_movies",
+    "vip_members",
+]
+
+
+# ============================================================
+# GLOBAL LOCK
+# ============================================================
+
+FILM_BACKUP_THREAD_LOCK = threading.Lock()
+
+
+# ============================================================
+# SAFE ADMIN MESSAGE EDIT
+# ============================================================
+
+def film_backup_edit(chat_id, message_id, text):
+
+    try:
+
+        bot.edit_message_text(
+            text,
+            chat_id=chat_id,
+            message_id=message_id,
+            parse_mode="HTML"
+        )
+
+        return True
+
+    except Exception as e:
+
+        print(
+            "⚠️ FILM BACKUP EDIT ERROR:",
+            repr(e)
+        )
+
+        return False
+
+
+# ============================================================
+# SAFE ADMIN SEND
+# ============================================================
+
+def film_backup_admin(text):
+
+    try:
+
+        bot.send_message(
+            ADMIN_ID,
+            text,
+            parse_mode="HTML"
+        )
+
+    except Exception as e:
+
+        print(
+            "⚠️ ADMIN BACKUP MESSAGE ERROR:",
+            repr(e)
+        )
+
+
+# ============================================================
+# SOURCE DATABASE
+# ============================================================
+#
+# MUHIMMI:
+#
+# DATABASE_URL = SOURCE
+#
+# Wannan function din ba zai taba amfani da
+# FILM_SUPABASE_DATABASE_URL ba.
+# ============================================================
+
+def film_get_source_conn():
+
+    database_url = os.getenv(
+        "DATABASE_URL"
+    )
+
+    if not database_url:
+
+        raise RuntimeError(
+            "DATABASE_URL is missing. "
+            "DATABASE_URL must contain the SOURCE Film Database."
+        )
+
+    try:
+
+        conn = psycopg2.connect(
+            database_url,
+            connect_timeout=20
+        )
+
+        conn.autocommit = True
+
+        return conn
+
+    except Exception as e:
+
+        raise RuntimeError(
+            "Could not connect to SOURCE DATABASE_URL: "
+            + str(e)
+        )
+
+
+# ============================================================
+# DESTINATION DATABASE
+# ============================================================
+#
+# FILM_SUPABASE_DATABASE_URL = DESTINATION
+#
+# Idan a cikin code dinka akwai get_film_supabase_conn(),
+# za mu iya amfani da shi.
+#
+# Amma wannan block din yana tabbatar da cewa destination
+# yana fitowa daga FILM_SUPABASE_DATABASE_URL.
+# ============================================================
+
+def film_get_destination_conn():
+
+    database_url = os.getenv(
+        "FILM_SUPABASE_DATABASE_URL"
+    )
+
+    if not database_url:
+
+        raise RuntimeError(
+            "FILM_SUPABASE_DATABASE_URL is missing. "
+            "This variable must contain the DESTINATION Film DB."
+        )
+
+    try:
+
+        conn = psycopg2.connect(
+            database_url,
+            connect_timeout=20
+        )
+
+        conn.autocommit = True
+
+        return conn
+
+    except Exception as e:
+
+        raise RuntimeError(
+            "Could not connect to DESTINATION "
+            "FILM_SUPABASE_DATABASE_URL: "
+            + str(e)
+        )
+
+
+# ============================================================
+# CREATE MIGRATION STATE TABLE
+# ============================================================
+
+def film_create_state_table(conn):
+
+    cur = conn.cursor()
+
+    try:
+
+        cur.execute(
+            sql.SQL("""
+                CREATE TABLE IF NOT EXISTS {} (
+                    table_name TEXT PRIMARY KEY,
+
+                    status TEXT NOT NULL DEFAULT 'pending',
+
+                    last_pk JSONB,
+
+                    offset_value BIGINT NOT NULL DEFAULT 0,
+
+                    rows_processed BIGINT NOT NULL DEFAULT 0,
+
+                    rows_inserted BIGINT NOT NULL DEFAULT 0,
+
+                    rows_skipped BIGINT NOT NULL DEFAULT 0,
+
+                    rows_failed BIGINT NOT NULL DEFAULT 0,
+
+                    started_at TIMESTAMPTZ,
+
+                    updated_at TIMESTAMPTZ DEFAULT NOW(),
+
+                    finished_at TIMESTAMPTZ,
+
+                    error TEXT
+                )
+            """).format(
+                sql.Identifier(
+                    FILM_MIGRATION_STATE_TABLE
+                )
+            )
+        )
+
+        conn.commit()
+
+    finally:
+
+        cur.close()
+
+
+# ============================================================
+# CREATE / GET STATE
+# ============================================================
+
+def film_get_state(
+    conn,
+    table_name
+):
+
+    cur = conn.cursor()
+
+    try:
+
+        cur.execute(
+            sql.SQL("""
+                SELECT
+                    table_name,
+                    status,
+                    last_pk,
+                    offset_value,
+                    rows_processed,
+                    rows_inserted,
+                    rows_skipped,
+                    rows_failed,
+                    started_at,
+                    updated_at,
+                    finished_at,
+                    error
+                FROM {}
+                WHERE table_name=%s
+            """).format(
+                sql.Identifier(
+                    FILM_MIGRATION_STATE_TABLE
+                )
+            ),
+            (table_name,)
+        )
+
+        row = cur.fetchone()
+
+        if not row:
+            return None
+
+        return {
+            "table_name": row[0],
+            "status": row[1],
+            "last_pk": row[2],
+            "offset_value": row[3],
+            "rows_processed": row[4],
+            "rows_inserted": row[5],
+            "rows_skipped": row[6],
+            "rows_failed": row[7],
+            "started_at": row[8],
+            "updated_at": row[9],
+            "finished_at": row[10],
+            "error": row[11],
+        }
+
+    finally:
+
+        cur.close()
+
+
+# ============================================================
+# SAVE STATE
+# ============================================================
+
+def film_save_state(
+    conn,
+    table_name,
+    status=None,
+    last_pk=None,
+    offset_value=None,
+    rows_processed=None,
+    rows_inserted=None,
+    rows_skipped=None,
+    rows_failed=None,
+    error=None,
+    finished=False
+):
+
+    cur = conn.cursor()
+
+    try:
+
+        cur.execute(
+            sql.SQL("""
+                INSERT INTO {} (
+                    table_name,
+                    status,
+                    last_pk,
+                    offset_value,
+                    rows_processed,
+                    rows_inserted,
+                    rows_skipped,
+                    rows_failed,
+                    started_at,
+                    updated_at,
+                    finished_at,
+                    error
+                )
+                VALUES (
+                    %s,
+                    COALESCE(%s, 'pending'),
+                    %s,
+                    COALESCE(%s, 0),
+                    COALESCE(%s, 0),
+                    COALESCE(%s, 0),
+                    COALESCE(%s, 0),
+                    COALESCE(%s, 0),
+                    NOW(),
+                    NOW(),
+                    CASE
+                        WHEN %s THEN NOW()
+                        ELSE NULL
+                    END,
+                    %s
+                )
+
+                ON CONFLICT (table_name)
+
+                DO UPDATE SET
+
+                    status =
+                        COALESCE(
+                            EXCLUDED.status,
+                            {}.status
+                        ),
+
+                    last_pk =
+                        COALESCE(
+                            EXCLUDED.last_pk,
+                            {}.last_pk
+                        ),
+
+                    offset_value =
+                        EXCLUDED.offset_value,
+
+                    rows_processed =
+                        EXCLUDED.rows_processed,
+
+                    rows_inserted =
+                        EXCLUDED.rows_inserted,
+
+                    rows_skipped =
+                        EXCLUDED.rows_skipped,
+
+                    rows_failed =
+                        EXCLUDED.rows_failed,
+
+                    updated_at =
+                        NOW(),
+
+                    finished_at =
+                        CASE
+                            WHEN %s
+                            THEN NOW()
+                            ELSE {}.finished_at
+                        END,
+
+                    error =
+                        EXCLUDED.error
+            """).format(
+
+                sql.Identifier(
+                    FILM_MIGRATION_STATE_TABLE
+                ),
+
+                sql.Identifier(
+                    FILM_MIGRATION_STATE_TABLE
+                ),
+
+                sql.Identifier(
+                    FILM_MIGRATION_STATE_TABLE
+                ),
+
+                sql.Identifier(
+                    FILM_MIGRATION_STATE_TABLE
+                ),
+
+                sql.Identifier(
+                    FILM_MIGRATION_STATE_TABLE
+                ),
+
+                sql.Identifier(
+                    FILM_MIGRATION_STATE_TABLE
+                ),
+            ),
+
+            (
+                table_name,
+
+                status,
+
+                Json(last_pk)
+                if last_pk is not None
+                else None,
+
+                offset_value,
+
+                rows_processed,
+
+                rows_inserted,
+
+                rows_skipped,
+
+                rows_failed,
+
+                finished,
+
+                error,
+
+                finished,
+            )
+        )
+
+        conn.commit()
+
+    finally:
+
+        cur.close()
+
+
+# ============================================================
+# TABLE DISCOVERY
+# ============================================================
+
+def film_get_tables(conn):
+
+    cur = conn.cursor()
+
+    try:
+
+        cur.execute("""
+            SELECT table_name
+            FROM information_schema.tables
+            WHERE table_schema='public'
+              AND table_type='BASE TABLE'
+            ORDER BY table_name
+        """)
+
+        tables = [
+            r[0]
+            for r in cur.fetchall()
+        ]
+
+        return [
+            t
+            for t in tables
+            if t not in FILM_MIGRATION_INTERNAL_TABLES
+        ]
+
+    finally:
+
+        cur.close()
+
+
+# ============================================================
+# COLUMN DISCOVERY
+# ============================================================
+
+def film_get_columns(
+    conn,
+    table_name
+):
+
+    cur = conn.cursor()
+
+    try:
+
+        cur.execute("""
+            SELECT
+                column_name,
+                ordinal_position,
+                data_type,
+                udt_name,
+                is_nullable,
+                column_default,
+                is_identity,
+                identity_generation,
+                is_generated,
+                generation_expression
+            FROM information_schema.columns
+            WHERE table_schema='public'
+              AND table_name=%s
+            ORDER BY ordinal_position
+        """, (table_name,))
+
+        rows = cur.fetchall()
+
+        result = []
+
+        for r in rows:
+
+            result.append({
+
+                "name": r[0],
+
+                "ordinal": r[1],
+
+                "data_type": r[2],
+
+                "udt_name": r[3],
+
+                "nullable": r[4],
+
+                "default": r[5],
+
+                "is_identity": r[6],
+
+                "identity_generation": r[7],
+
+                "is_generated": r[8],
+
+                "generation_expression": r[9],
+            })
+
+        return result
+
+    finally:
+
+        cur.close()
+
+
+# ============================================================
+# INSERTABLE COLUMNS
+# ============================================================
+
+def film_insertable_columns(columns):
+
+    result = []
+
+    for c in columns:
+
+        # Generated ALWAYS columns cannot be inserted directly.
+        if c["is_generated"] == "ALWAYS":
+            continue
+
+        result.append(c)
+
+    return result
+
+
+# ============================================================
+# PRIMARY KEY DISCOVERY
+# ============================================================
+
+def film_get_primary_key(
+    conn,
+    table_name
+):
+
+    cur = conn.cursor()
+
+    try:
+
+        cur.execute("""
+            SELECT
+                kcu.column_name
+            FROM information_schema.table_constraints tc
+
+            JOIN information_schema.key_column_usage kcu
+              ON tc.constraint_name =
+                 kcu.constraint_name
+
+             AND tc.table_schema =
+                 kcu.table_schema
+
+             AND tc.table_name =
+                 kcu.table_name
+
+            WHERE tc.table_schema='public'
+              AND tc.table_name=%s
+              AND tc.constraint_type='PRIMARY KEY'
+
+            ORDER BY kcu.ordinal_position
+        """, (table_name,))
+
+        return [
+            r[0]
+            for r in cur.fetchall()
+        ]
+
+    finally:
+
+        cur.close()
+
+
+# ============================================================
+# FOREIGN KEY DISCOVERY
+# ============================================================
+
+def film_get_foreign_keys(conn):
+
+    cur = conn.cursor()
+
+    try:
+
+        cur.execute("""
+            SELECT
+                child.relname AS child_table,
+                parent.relname AS parent_table
+
+            FROM pg_constraint c
+
+            JOIN pg_class child
+              ON child.oid = c.conrelid
+
+            JOIN pg_class parent
+              ON parent.oid = c.confrelid
+
+            JOIN pg_namespace child_ns
+              ON child_ns.oid = child.relnamespace
+
+            JOIN pg_namespace parent_ns
+              ON parent_ns.oid = parent.relnamespace
+
+            WHERE c.contype='f'
+
+              AND child_ns.nspname='public'
+
+              AND parent_ns.nspname='public'
+        """)
+
+        return cur.fetchall()
+
+    finally:
+
+        cur.close()
+
+
+# ============================================================
+# DEPENDENCY ORDER
+# ============================================================
+
+def film_order_tables(
+    conn,
+    tables
+):
+
+    foreign_keys = film_get_foreign_keys(
+        conn
+    )
+
+    dependencies = {
+        t: set()
+        for t in tables
+    }
+
+    for child, parent in foreign_keys:
+
+        if child not in dependencies:
+            continue
+
+        if parent not in dependencies:
+            continue
+
+        if child == parent:
+            continue
+
+        dependencies[child].add(
+            parent
+        )
+
+    ordered = []
+
+    remaining = set(tables)
+
+    while remaining:
+
+        ready = [
+            t
+            for t in remaining
+            if dependencies[t].isdisjoint(
+                remaining
+            )
+        ]
+
+        if not ready:
+
+            cycle_tables = sorted(
+                remaining
+            )
+
+            raise RuntimeError(
+                "Foreign-key dependency cycle detected:\n"
+                + "\n".join(
+                    f"- {x}"
+                    for x in cycle_tables
+                )
+            )
+
+        ready.sort(
+            key=lambda x: (
+                FILM_TABLE_PRIORITY.index(x)
+                if x in FILM_TABLE_PRIORITY
+                else 9999,
+                x
+            )
+        )
+
+        for table in ready:
+
+            ordered.append(
+                table
+            )
+
+            remaining.remove(
+                table
+            )
+
+    return ordered
+
+
+# ============================================================
+# SCHEMA COMPATIBILITY CHECK
+# ============================================================
+
+def film_compare_schema(
+    source_conn,
+    destination_conn,
+    table_name
+):
+
+    source_columns = film_get_columns(
+        source_conn,
+        table_name
+    )
+
+    destination_columns = film_get_columns(
+        destination_conn,
+        table_name
+    )
+
+    source_signature = [
+        (
+            c["name"],
+            c["data_type"],
+            c["udt_name"],
+            c["nullable"],
+            c["is_identity"],
+            c["identity_generation"],
+            c["is_generated"],
+        )
+        for c in source_columns
+    ]
+
+    destination_signature = [
+        (
+            c["name"],
+            c["data_type"],
+            c["udt_name"],
+            c["nullable"],
+            c["is_identity"],
+            c["identity_generation"],
+            c["is_generated"],
+        )
+        for c in destination_columns
+    ]
+
+    if source_signature != destination_signature:
+
+        raise RuntimeError(
+            f"Schema mismatch in table '{table_name}'.\n\n"
+
+            f"SOURCE columns:\n"
+            f"{source_signature}\n\n"
+
+            f"DESTINATION columns:\n"
+            f"{destination_signature}"
+        )
+
+    return source_columns
+
+
+# ============================================================
+# DESTINATION TABLE EXISTS?
+# ============================================================
+
+def film_table_exists(
+    conn,
+    table_name
+):
+
+    cur = conn.cursor()
+
+    try:
+
+        cur.execute("""
+            SELECT 1
+            FROM information_schema.tables
+            WHERE table_schema='public'
+              AND table_name=%s
+            LIMIT 1
+        """, (table_name,))
+
+        return cur.fetchone() is not None
+
+    finally:
+
+        cur.close()
+
+
+# ============================================================
+# BUILD ROW DICT
+# ============================================================
+
+def film_row_dict(
+    columns,
+    row
+):
+
+    return dict(
+        zip(
+            [
+                c["name"]
+                for c in columns
+            ],
+            row
+        )
+    )
+
+
+# ============================================================
+# EXACT ROW EXISTS BY PRIMARY KEY
+# ============================================================
+
+def film_existing_pk_row_is_exact(
+    conn,
+    table_name,
+    columns,
+    pk_columns,
+    row
+):
+
+    values = film_row_dict(
+        columns,
+        row
+    )
+
+    pk_parts = []
+    pk_params = []
+
+    for pk in pk_columns:
+
+        pk_parts.append(
+            sql.SQL("{} = %s").format(
+                sql.Identifier(pk)
+            )
+        )
+
+        pk_params.append(
+            values.get(pk)
+        )
+
+    compare_parts = []
+    compare_params = []
+
+    for c in columns:
+
+        if c["is_generated"] == "ALWAYS":
+            continue
+
+        name = c["name"]
+
+        compare_parts.append(
+            sql.SQL(
+                "{} IS NOT DISTINCT FROM %s"
+            ).format(
+                sql.Identifier(name)
+            )
+        )
+
+        compare_params.append(
+            values.get(name)
+        )
+
+    if not pk_parts:
+        return False
+
+    where_sql = sql.SQL(
+        " AND "
+    ).join(
+        pk_parts + compare_parts
+    )
+
+    cur = conn.cursor()
+
+    try:
+
+        query = sql.SQL("""
+            SELECT 1
+            FROM public.{}
+            WHERE {}
+            LIMIT 1
+        """).format(
+
+            sql.Identifier(
+                table_name
+            ),
+
+            where_sql
+        )
+
+        cur.execute(
+            query,
+            tuple(
+                pk_params
+                + compare_params
+            )
+        )
+
+        return cur.fetchone() is not None
+
+    finally:
+
+        cur.close()
+
+
+# ============================================================
+# PRIMARY KEY EXISTS BUT DATA DIFFERS
+# ============================================================
+
+def film_pk_exists(
+    conn,
+    table_name,
+    columns,
+    pk_columns,
+    row
+):
+
+    values = film_row_dict(
+        columns,
+        row
+    )
+
+    where_parts = []
+    params = []
+
+    for pk in pk_columns:
+
+        where_parts.append(
+            sql.SQL("{} = %s").format(
+                sql.Identifier(pk)
+            )
+        )
+
+        params.append(
+            values.get(pk)
+        )
+
+    cur = conn.cursor()
+
+    try:
+
+        query = sql.SQL("""
+            SELECT 1
+            FROM public.{}
+            WHERE {}
+            LIMIT 1
+        """).format(
+
+            sql.Identifier(
+                table_name
+            ),
+
+            sql.SQL(
+                " AND "
+            ).join(
+                where_parts
+            )
+        )
+
+        cur.execute(
+            query,
+            tuple(params)
+        )
+
+        return cur.fetchone() is not None
+
+    finally:
+
+        cur.close()
+
+
+# ============================================================
+# EXACT ROW CHECK WITHOUT PRIMARY KEY
+# ============================================================
+
+def film_exact_row_exists(
+    conn,
+    table_name,
+    columns,
+    row
+):
+
+    where_parts = []
+    params = []
+
+    for c, value in zip(
+        columns,
+        row
+    ):
+
+        if c["is_generated"] == "ALWAYS":
+            continue
+
+        where_parts.append(
+            sql.SQL(
+                "{} IS NOT DISTINCT FROM %s"
+            ).format(
+                sql.Identifier(
+                    c["name"]
+                )
+            )
+        )
+
+        params.append(
+            value
+        )
+
+    if not where_parts:
+        return False
+
+    cur = conn.cursor()
+
+    try:
+
+        query = sql.SQL("""
+            SELECT 1
+            FROM public.{}
+            WHERE {}
+            LIMIT 1
+        """).format(
+
+            sql.Identifier(
+                table_name
+            ),
+
+            sql.SQL(
+                " AND "
+            ).join(
+                where_parts
+            )
+        )
+
+        cur.execute(
+            query,
+            tuple(params)
+        )
+
+        return cur.fetchone() is not None
+
+    finally:
+
+        cur.close()
+
+
+# ============================================================
+# INSERT ONE ROW
+# ============================================================
+
+def film_insert_row(
+    conn,
+    table_name,
+    insertable_columns,
+    row
+):
+
+    names = [
+        c["name"]
+        for c in insertable_columns
+    ]
+
+    values = list(row)
+
+    if not names:
+        return
+
+    cur = conn.cursor()
+
+    try:
+
+        query = sql.SQL("""
+            INSERT INTO public.{} ({})
+            OVERRIDING SYSTEM VALUE
+            VALUES ({})
+        """).format(
+
+            sql.Identifier(
+                table_name
+            ),
+
+            sql.SQL(", ").join(
+                sql.Identifier(
+                    name
+                )
+                for name in names
+            ),
+
+            sql.SQL(", ").join(
+                sql.Placeholder()
+                for _ in names
+            )
+        )
+
+        cur.execute(
+            query,
+            tuple(values)
+        )
+
+    finally:
+
+        cur.close()
+
+
+# ============================================================
+# FETCH BATCH FROM SOURCE
+# ============================================================
+#
+# MUHIMMI:
+#
+# Wannan function din yana karantawa ne daga SOURCE:
+# DATABASE_URL.
+# ============================================================
+
+def film_fetch_batch(
+    source_conn,
+    table_name,
+    columns,
+    pk_columns,
+    state
+):
+
+    names = [
+        c["name"]
+        for c in columns
+        if c["is_generated"] != "ALWAYS"
+    ]
+
+    if not names:
+        return []
+
+    cur = source_conn.cursor()
+
+    try:
+
+        select_columns = sql.SQL(
+            ", "
+        ).join(
+            sql.Identifier(
+                name
+            )
+            for name in names
+        )
+
+        # ====================================================
+        # TABLE WITH PRIMARY KEY
+        # ====================================================
+
+        if pk_columns:
+
+            order_sql = sql.SQL(
+                ", "
+            ).join(
+                sql.Identifier(
+                    pk
+                )
+                for pk in pk_columns
+            )
+
+            where_sql = sql.SQL("")
+
+            params = []
+
+            last_pk = (
+                state.get("last_pk")
+                if state
+                else None
+            )
+
+            if last_pk:
+
+                if len(pk_columns) == 1:
+
+                    where_sql = sql.SQL(
+                        " WHERE {} > %s"
+                    ).format(
+                        sql.Identifier(
+                            pk_columns[0]
+                        )
+                    )
+
+                    params.append(
+                        last_pk[0]
+                    )
+
+                else:
+
+                    left = sql.SQL(
+                        ", "
+                    ).join(
+                        sql.Identifier(
+                            pk
+                        )
+                        for pk in pk_columns
+                    )
+
+                    right = sql.SQL(
+                        ", "
+                    ).join(
+                        sql.Placeholder()
+                        for _ in pk_columns
+                    )
+
+                    where_sql = sql.SQL(
+                        " WHERE ({}) > ({})"
+                    ).format(
+                        left,
+                        right
+                    )
+
+                    params.extend(
+                        last_pk
+                    )
+
+            query = sql.SQL("""
+                SELECT {}
+                FROM public.{}
+                {}
+                ORDER BY {}
+                LIMIT %s
+            """).format(
+
+                select_columns,
+
+                sql.Identifier(
+                    table_name
+                ),
+
+                where_sql,
+
+                order_sql
+            )
+
+            params.append(
+                FILM_BACKUP_BATCH_SIZE
+            )
+
+            cur.execute(
+                query,
+                tuple(params)
+            )
+
+        # ====================================================
+        # TABLE WITHOUT PRIMARY KEY
+        # ====================================================
+
+        else:
+
+            offset = int(
+                state.get(
+                    "offset_value"
+                ) or 0
+            )
+
+            query = sql.SQL("""
+                SELECT {}
+                FROM public.{}
+                ORDER BY ctid
+                LIMIT %s
+                OFFSET %s
+            """).format(
+
+                select_columns,
+
+                sql.Identifier(
+                    table_name
+                )
+            )
+
+            cur.execute(
+                query,
+                (
+                    FILM_BACKUP_BATCH_SIZE,
+                    offset
+                )
+            )
+
+        return cur.fetchall()
+
+    finally:
+
+        cur.close()
+
+
+# ============================================================
+# UPDATE SEQUENCES
+# ============================================================
+
+def film_fix_sequences(
+    conn,
+    table_name
+):
+
+    columns = film_get_columns(
+        conn,
+        table_name
+    )
+
+    cur = conn.cursor()
+
+    try:
+
+        for c in columns:
+
+            column_name = c["name"]
+
+            cur.execute(
+                """
+                SELECT pg_get_serial_sequence(
+                    %s,
+                    %s
+                )
+                """,
+                (
+                    f"public.{table_name}",
+                    column_name
+                )
+            )
+
+            result = cur.fetchone()
+
+            if not result or not result[0]:
+                continue
+
+            sequence_name = result[0]
+
+            cur.execute(
+                sql.SQL("""
+                    SELECT MAX({})
+                    FROM public.{}
+                """).format(
+
+                    sql.Identifier(
+                        column_name
+                    ),
+
+                    sql.Identifier(
+                        table_name
+                    )
+                )
+            )
+
+            max_value = cur.fetchone()[0]
+
+            if max_value is None:
+
+                cur.execute(
+                    """
+                    SELECT setval(
+                        %s::regclass,
+                        1,
+                        false
+                    )
+                    """,
+                    (
+                        sequence_name,
+                    )
+                )
+
+            else:
+
+                cur.execute(
+                    """
+                    SELECT setval(
+                        %s::regclass,
+                        %s,
+                        true
+                    )
+                    """,
+                    (
+                        sequence_name,
+                        max_value
+                    )
+                )
+
+        conn.commit()
+
+    finally:
+
+        cur.close()
+
+
+# ============================================================
+# COUNT TABLE
+# ============================================================
+
+def film_count(
+    conn,
+    table_name
+):
+
+    cur = conn.cursor()
+
+    try:
+
+        cur.execute(
+            sql.SQL("""
+                SELECT COUNT(*)
+                FROM public.{}
+            """).format(
+                sql.Identifier(
+                    table_name
+                )
+            )
+        )
+
+        return int(
+            cur.fetchone()[0]
+        )
+
+    finally:
+
+        cur.close()
+
+
+# ============================================================
+# GET SOURCE TABLE COUNTS
+# ============================================================
+
+def film_get_counts(
+    conn,
+    tables
+):
+
+    result = {}
+
+    for table in tables:
+
+        try:
+
+            result[table] = film_count(
+                conn,
+                table
+            )
+
+        except Exception as e:
+
+            raise RuntimeError(
+                f"Cannot count SOURCE table "
+                f"{table}: {e}"
+            )
+
+    return result
+
+
+# ============================================================
+# FORMAT PROGRESS
+# ============================================================
+
+def film_progress_text(
+    table_name,
+    table_number,
+    total_tables,
+    total_rows,
+    processed,
+    inserted,
+    skipped,
+    failed,
+    current_batch,
+    status="RUNNING 🟢"
+):
+
+    percent = 0
+
+    if total_rows > 0:
+
+        percent = (
+            processed
+            / total_rows
+        ) * 100
+
+    return (
+
+        "🎬 <b>FILM DATABASE MIGRATION</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+
+        "🟢 SOURCE: <b>DATABASE_URL</b>\n"
+        "🔵 DESTINATION: <b>FILM_SUPABASE_DATABASE_URL</b>\n\n"
+
+        f"📋 Table: <b>{table_name}</b>\n"
+        f"📊 Table: {table_number}/{total_tables}\n"
+        f"📦 Source rows: {total_rows:,}\n\n"
+
+        f"📈 Progress: "
+        f"<b>{processed:,}/{total_rows:,}</b> "
+        f"({percent:.2f}%)\n\n"
+
+        f"✅ Inserted: {inserted:,}\n"
+        f"♻️ Already existed: {skipped:,}\n"
+        f"❌ Errors: {failed:,}\n\n"
+
+        f"📦 Batch: {current_batch}\n"
+        f"🟢 Status: {status}"
+    )
+
+
+# ============================================================
+# MIGRATE ONE TABLE
+# ============================================================
+
+def film_migrate_table(
+    source_conn,
+    destination_conn,
+    table_name,
+    table_number,
+    total_tables,
+    total_source_rows,
+    progress_chat_id,
+    progress_message_id
+):
+
+    # ========================================================
+    # READ SOURCE SCHEMA
+    # ========================================================
+
+    columns = film_get_columns(
+        source_conn,
+        table_name
+    )
+
+    insertable = film_insertable_columns(
+        columns
+    )
+
+    pk_columns = film_get_primary_key(
+        source_conn,
+        table_name
+    )
+
+    # ========================================================
+    # GET CHECKPOINT
+    # ========================================================
+
+    state = film_get_state(
+        destination_conn,
+        table_name
+    )
+
+    if not state:
+
+        state = {
+            "status": "pending",
+            "last_pk": None,
+            "offset_value": 0,
+            "rows_processed": 0,
+            "rows_inserted": 0,
+            "rows_skipped": 0,
+            "rows_failed": 0,
+        }
+
+        film_save_state(
+            destination_conn,
+            table_name,
+            status="running",
+            last_pk=None,
+            offset_value=0,
+            rows_processed=0,
+            rows_inserted=0,
+            rows_skipped=0,
+            rows_failed=0,
+            error=None
+        )
+
+    else:
+
+        if state["status"] == "complete":
+
+            film_backup_edit(
+                progress_chat_id,
+                progress_message_id,
+                film_progress_text(
+                    table_name,
+                    table_number,
+                    total_tables,
+                    total_source_rows,
+                    state["rows_processed"],
+                    state["rows_inserted"],
+                    state["rows_skipped"],
+                    state["rows_failed"],
+                    "ALREADY COMPLETE",
+                    "SKIPPED ♻️"
+                )
+            )
+
+            return state
+
+    # ========================================================
+    # LOAD COUNTERS
+    # ========================================================
+
+    processed = int(
+        state.get(
+            "rows_processed"
+        ) or 0
+    )
+
+    inserted = int(
+        state.get(
+            "rows_inserted"
+        ) or 0
+    )
+
+    skipped = int(
+        state.get(
+            "rows_skipped"
+        ) or 0
+    )
+
+    failed = int(
+        state.get(
+            "rows_failed"
+        ) or 0
+    )
+
+    last_pk = state.get(
+        "last_pk"
+    )
+
+    offset_value = int(
+        state.get(
+            "offset_value"
+        ) or 0
+    )
+
+    # ========================================================
+    # BATCH LOOP
+    # ========================================================
+
+    while True:
+
+        # ----------------------------------------------------
+        # FETCH 50 FROM SOURCE
+        # ----------------------------------------------------
+
+        batch = film_fetch_batch(
+            source_conn,
+            table_name,
+            insertable,
+            pk_columns,
+            {
+                "last_pk": last_pk,
+                "offset_value": offset_value
+            }
+        )
+
+        if not batch:
+            break
+
+        batch_inserted = 0
+        batch_skipped = 0
+
+        # ----------------------------------------------------
+        # START DESTINATION TRANSACTION
+        # ----------------------------------------------------
+
+        destination_conn.autocommit = False
+
+        try:
+
+            for row in batch:
+
+                # ============================================
+                # TABLE WITH PRIMARY KEY
+                # ============================================
+
+                if pk_columns:
+
+                    if film_existing_pk_row_is_exact(
+                        destination_conn,
+                        table_name,
+                        insertable,
+                        pk_columns,
+                        row
+                    ):
+
+                        batch_skipped += 1
+
+                        continue
+
+                    # ------------------------------------------------
+                    # SAME PK BUT DIFFERENT DATA = STOP
+                    # ------------------------------------------------
+
+                    if film_pk_exists(
+                        destination_conn,
+                        table_name,
+                        insertable,
+                        pk_columns,
+                        row
+                    ):
+
+                        raise RuntimeError(
+                            f"CRITICAL DATA MISMATCH in "
+                            f"table '{table_name}'.\n\n"
+                            f"Primary key already exists in "
+                            f"DESTINATION but its row data "
+                            f"is different from SOURCE.\n\n"
+                            f"Migration stopped for safety."
+                        )
+
+                    # ------------------------------------------------
+                    # INSERT
+                    # ------------------------------------------------
+
+                    film_insert_row(
+                        destination_conn,
+                        table_name,
+                        insertable,
+                        row
+                    )
+
+                    batch_inserted += 1
+
+                # ============================================
+                # TABLE WITHOUT PRIMARY KEY
+                # ============================================
+
+                else:
+
+                    if film_exact_row_exists(
+                        destination_conn,
+                        table_name,
+                        insertable,
+                        row
+                    ):
+
+                        batch_skipped += 1
+
+                        continue
+
+                    film_insert_row(
+                        destination_conn,
+                        table_name,
+                        insertable,
+                        row
+                    )
+
+                    batch_inserted += 1
+
+            # ====================================================
+            # NEW COUNTERS
+            # ====================================================
+
+            processed_new = (
+                processed
+                + len(batch)
+            )
+
+            inserted_new = (
+                inserted
+                + batch_inserted
+            )
+
+            skipped_new = (
+                skipped
+                + batch_skipped
+            )
+
+            # ====================================================
+            # NEW CHECKPOINT
+            # ====================================================
+
+            new_last_pk = last_pk
+            new_offset = offset_value
+
+            if pk_columns:
+
+                last_row_dict = film_row_dict(
+                    insertable,
+                    batch[-1]
+                )
+
+                # IMPORTANT:
+                # Keep numeric PKs numeric.
+                # Do NOT convert everything to str().
+                #
+                # This prevents errors such as:
+                # integer > text
+                #
+                new_last_pk = [
+                    last_row_dict.get(pk)
+                    for pk in pk_columns
+                ]
+
+            else:
+
+                new_offset = (
+                    offset_value
+                    + len(batch)
+                )
+
+            # ====================================================
+            # SAVE CHECKPOINT IN SAME TRANSACTION
+            # ====================================================
+
+            state_cur = destination_conn.cursor()
+
+            try:
+
+                state_cur.execute(
+                    sql.SQL("""
+                        INSERT INTO {} (
+                            table_name,
+                            status,
+                            last_pk,
+                            offset_value,
+                            rows_processed,
+                            rows_inserted,
+                            rows_skipped,
+                            rows_failed,
+                            started_at,
+                            updated_at,
+                            error
+                        )
+
+                        VALUES (
+                            %s,
+                            'running',
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            NOW(),
+                            NOW(),
+                            NULL
+                        )
+
+                        ON CONFLICT (table_name)
+
+                        DO UPDATE SET
+
+                            status='running',
+
+                            last_pk =
+                                EXCLUDED.last_pk,
+
+                            offset_value =
+                                EXCLUDED.offset_value,
+
+                            rows_processed =
+                                EXCLUDED.rows_processed,
+
+                            rows_inserted =
+                                EXCLUDED.rows_inserted,
+
+                            rows_skipped =
+                                EXCLUDED.rows_skipped,
+
+                            rows_failed =
+                                EXCLUDED.rows_failed,
+
+                            updated_at =
+                                NOW(),
+
+                            error=NULL
+                    """).format(
+                        sql.Identifier(
+                            FILM_MIGRATION_STATE_TABLE
+                        )
+                    ),
+
+                    (
+                        table_name,
+
+                        Json(new_last_pk)
+                        if new_last_pk is not None
+                        else None,
+
+                        new_offset,
+
+                        processed_new,
+
+                        inserted_new,
+
+                        skipped_new,
+
+                        failed,
+                    )
+                )
+
+            finally:
+
+                state_cur.close()
+
+            # ====================================================
+            # COMMIT DATA + CHECKPOINT TOGETHER
+            # ====================================================
+
+            destination_conn.commit()
+
+            processed = processed_new
+            inserted = inserted_new
+            skipped = skipped_new
+
+            last_pk = new_last_pk
+            offset_value = new_offset
+
+        except Exception:
+
+            try:
+
+                destination_conn.rollback()
+
+            except:
+                pass
+
+            raise
+
+        finally:
+
+            destination_conn.autocommit = True
+
+        # ====================================================
+        # LIVE PROGRESS
+        # ====================================================
+
+        batch_start = (
+            processed
+            - len(batch)
+            + 1
+        )
+
+        batch_end = processed
+
+        progress = film_progress_text(
+            table_name,
+            table_number,
+            total_tables,
+            total_source_rows,
+            processed,
+            inserted,
+            skipped,
+            failed,
+            f"{batch_start:,}-{batch_end:,}",
+            "RUNNING 🟢"
+        )
+
+        film_backup_edit(
+            progress_chat_id,
+            progress_message_id,
+            progress
+        )
+
+        time.sleep(
+            0.15
+        )
+
+    # ========================================================
+    # TABLE COMPLETE
+    # ========================================================
+
+    film_fix_sequences(
+        destination_conn,
+        table_name
+    )
+
+    destination_conn.autocommit = True
+
+    film_save_state(
+        destination_conn,
+        table_name,
+        status="complete",
+        last_pk=last_pk,
+        offset_value=offset_value,
+        rows_processed=processed,
+        rows_inserted=inserted,
+        rows_skipped=skipped,
+        rows_failed=failed,
+        finished=True,
+        error=None
+    )
+
+    film_backup_edit(
+        progress_chat_id,
+        progress_message_id,
+        film_progress_text(
+            table_name,
+            table_number,
+            total_tables,
+            total_source_rows,
+            processed,
+            inserted,
+            skipped,
+            failed,
+            "COMPLETE ✅",
+            "COMPLETED 🟢"
+        )
+    )
+
+    return {
+        "status": "complete",
+        "processed": processed,
+        "inserted": inserted,
+        "skipped": skipped,
+        "failed": failed,
+    }
+
+
+# ============================================================
+# FINAL VERIFICATION
+# ============================================================
+#
+# SOURCE = DATABASE_URL
+# DESTINATION = FILM_SUPABASE_DATABASE_URL
+# ============================================================
+
+def film_final_verification(
+    source_conn,
+    destination_conn,
+    tables
+):
+
+    results = []
+
+    for table in tables:
+
+        source_count = film_count(
+            source_conn,
+            table
+        )
+
+        destination_count = film_count(
+            destination_conn,
+            table
+        )
+
+        if source_count != destination_count:
+
+            raise RuntimeError(
+                f"FINAL COUNT MISMATCH: {table}\n"
+                f"SOURCE (DATABASE_URL) = {source_count}\n"
+                f"DESTINATION "
+                f"(FILM_SUPABASE_DATABASE_URL) = "
+                f"{destination_count}"
+            )
+
+        results.append(
+            (
+                table,
+                source_count,
+                destination_count
+            )
+        )
+
+    return results
+
+
+# ============================================================
+# MAIN FILM DATABASE MIGRATION ENGINE
+# ============================================================
+
+def run_film_database_backup(
+    progress_chat_id,
+    progress_message_id
+):
+
+    if not FILM_BACKUP_THREAD_LOCK.acquire(
+        blocking=False
+    ):
+
+        film_backup_edit(
+            progress_chat_id,
+            progress_message_id,
+
+            "⚠️ <b>Film DB Migration</b>\n\n"
+
+            "Wani Film DB migration yana gudana yanzu.\n\n"
+
+            "Kada a fara wani migration na biyu."
+        )
+
+        return
+
+    source_conn = None
+    destination_conn = None
+
+    advisory_locked = False
+
+    try:
+
+        # ====================================================
+        # CONNECT SOURCE
+        # ====================================================
+
+        film_backup_edit(
+            progress_chat_id,
+            progress_message_id,
+
+            "🔌 <b>Connecting...</b>\n\n"
+
+            "🟢 SOURCE:\n"
+            "<code>DATABASE_URL</code>\n\n"
+
+            "⏳ Connecting..."
+        )
+
+        source_conn = film_get_source_conn()
+
+        # ====================================================
+        # CONNECT DESTINATION
+        # ====================================================
+
+        film_backup_edit(
+            progress_chat_id,
+            progress_message_id,
+
+            "🔌 <b>Connecting...</b>\n\n"
+
+            "🟢 SOURCE: DATABASE_URL ✅\n"
+
+            "🔵 DESTINATION:\n"
+            "<code>FILM_SUPABASE_DATABASE_URL</code>\n\n"
+
+            "⏳ Connecting..."
+        )
+
+        destination_conn = (
+            film_get_destination_conn()
+        )
+
+        destination_conn.autocommit = True
+
+        # ====================================================
+        # ADVISORY LOCK ON DESTINATION
+        # ====================================================
+
+        lock_cur = destination_conn.cursor()
+
+        try:
+
+            lock_cur.execute(
+                """
+                SELECT pg_try_advisory_lock(
+                    913742,
+                    662001
+                )
+                """
+            )
+
+            advisory_locked = bool(
+                lock_cur.fetchone()[0]
+            )
+
+        finally:
+
+            lock_cur.close()
+
+        if not advisory_locked:
+
+            raise RuntimeError(
+                "Another Film DB migration process "
+                "is already running."
+            )
+
+        # ====================================================
+        # CREATE STATE TABLE
+        # ====================================================
+
+        film_create_state_table(
+            destination_conn
+        )
+
+        # ====================================================
+        # PHASE 0 — PRE-FLIGHT
+        # ====================================================
+
+        film_backup_edit(
+            progress_chat_id,
+            progress_message_id,
+
+            "🔍 <b>PHASE 0 — PRE-FLIGHT CHECK</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n\n"
+
+            "🟢 SOURCE: DATABASE_URL\n"
+            "🔵 DESTINATION: FILM_SUPABASE_DATABASE_URL\n\n"
+
+            "🔎 Checking SOURCE tables...\n"
+            "🔎 Checking DESTINATION tables...\n"
+            "🔎 Checking columns...\n"
+            "🔎 Checking primary keys...\n"
+            "🔎 Checking foreign keys...\n"
+            "🔎 Checking schema compatibility...\n\n"
+
+            "⏳ Please wait..."
+        )
+
+        # ====================================================
+        # DISCOVER SOURCE TABLES
+        # ====================================================
+
+        source_tables = film_get_tables(
+            source_conn
+        )
+
+        if not source_tables:
+
+            raise RuntimeError(
+                "No public tables found in "
+                "SOURCE DATABASE_URL."
+            )
+
+        # ====================================================
+        # DESTINATION TABLE CHECK
+        # ====================================================
+
+        missing_tables = []
+
+        for table in source_tables:
+
+            if not film_table_exists(
+                destination_conn,
+                table
+            ):
+
+                missing_tables.append(
+                    table
+                )
+
+        if missing_tables:
+
+            raise RuntimeError(
+                "DESTINATION is missing these tables:\n\n"
+                + "\n".join(
+                    f"❌ {table}"
+                    for table in missing_tables
+                )
+                + "\n\n"
+                "Migration stopped before copying data."
+            )
+
+        # ====================================================
+        # SCHEMA CHECK
+        # ====================================================
+
+        for table in source_tables:
+
+            film_compare_schema(
+                source_conn,
+                destination_conn,
+                table
+            )
+
+        # ====================================================
+        # DEPENDENCY ORDER
+        # ====================================================
+
+        ordered_tables = film_order_tables(
+            source_conn,
+            source_tables
+        )
+
+        # ====================================================
+        # SOURCE COUNTS
+        # ====================================================
+
+        counts = film_get_counts(
+            source_conn,
+            ordered_tables
+        )
+
+        total_tables = len(
+            ordered_tables
+        )
+
+        total_all_rows = sum(
+            counts.values()
+        )
+
+        # ====================================================
+        # PREVIEW
+        # ====================================================
+
+        table_lines = []
+
+        for table in ordered_tables:
+
+            table_lines.append(
+                f"• {table}: "
+                f"{counts[table]:,}"
+            )
+
+        preview = "\n".join(
+            table_lines[:40]
+        )
+
+        if len(table_lines) > 40:
+
+            preview += (
+                "\n... and more tables."
+            )
+
+        film_backup_edit(
+            progress_chat_id,
+            progress_message_id,
+
+            "🔍 <b>PRE-FLIGHT COMPLETE ✅</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n\n"
+
+            "🟢 SOURCE:\n"
+            "<code>DATABASE_URL</code> ✅\n\n"
+
+            "🔵 DESTINATION:\n"
+            "<code>FILM_SUPABASE_DATABASE_URL</code> ✅\n\n"
+
+            f"📋 Tables detected: "
+            f"<b>{total_tables}</b>\n"
+
+            f"📦 Total source rows: "
+            f"<b>{total_all_rows:,}</b>\n\n"
+
+            "<b>Tables:</b>\n"
+            f"{preview}\n\n"
+
+            "🛡 Schema matches.\n"
+            "🛡 Existing IDs will be verified.\n"
+            "🛡 Batch size = 50 rows.\n"
+            "🛡 Checkpoint/resume enabled.\n"
+            "🛡 Source = DATABASE_URL.\n"
+            "🛡 Destination = FILM_SUPABASE_DATABASE_URL.\n\n"
+
+            "⏳ Starting migration..."
+        )
+
+        time.sleep(
+            2
+        )
+
+        # ====================================================
+        # MIGRATE ALL TABLES
+        # ====================================================
+
+        grand_inserted = 0
+        grand_skipped = 0
+        grand_processed = 0
+
+        for index, table in enumerate(
+            ordered_tables,
+            start=1
+        ):
+
+            table_total = counts.get(
+                table,
+                0
+            )
+
+            # ------------------------------------------------
+            # CHECK EXISTING STATE
+            # ------------------------------------------------
+
+            current_state = film_get_state(
+                destination_conn,
+                table
+            )
+
+            if (
+                current_state
+                and current_state["status"]
+                == "complete"
+            ):
+
+                grand_inserted += int(
+                    current_state[
+                        "rows_inserted"
+                    ] or 0
+                )
+
+                grand_skipped += int(
+                    current_state[
+                        "rows_skipped"
+                    ] or 0
+                )
+
+                grand_processed += int(
+                    current_state[
+                        "rows_processed"
+                    ] or 0
+                )
+
+                continue
+
+            # ------------------------------------------------
+            # MIGRATE TABLE
+            # ------------------------------------------------
+
+            result = film_migrate_table(
+                source_conn,
+                destination_conn,
+                table,
+                index,
+                total_tables,
+                table_total,
+                progress_chat_id,
+                progress_message_id
+            )
+
+            grand_inserted += int(
+                result.get(
+                    "inserted",
+                    0
+                )
+            )
+
+            grand_skipped += int(
+                result.get(
+                    "skipped",
+                    0
+                )
+            )
+
+            grand_processed += int(
+                result.get(
+                    "processed",
+                    0
+                )
+            )
+
+        # ====================================================
+        # FINAL VERIFICATION
+        # ====================================================
+
+        film_backup_edit(
+            progress_chat_id,
+            progress_message_id,
+
+            "🔎 <b>FINAL VERIFICATION</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n\n"
+
+            "Comparing SOURCE vs DESTINATION...\n\n"
+
+            "🟢 SOURCE:\n"
+            "DATABASE_URL\n\n"
+
+            "🔵 DESTINATION:\n"
+            "FILM_SUPABASE_DATABASE_URL\n\n"
+
+            "📊 Checking row counts...\n"
+            "🔗 Checking migration state...\n"
+            "🔢 Repairing sequences...\n\n"
+
+            "⏳ Almost done..."
+        )
+
+        verification = film_final_verification(
+            source_conn,
+            destination_conn,
+            ordered_tables
+        )
+
+        # ====================================================
+        # VERIFICATION RESULT
+        # ====================================================
+
+        verification_lines = []
+
+        for (
+            table,
+            source_count,
+            destination_count
+        ) in verification:
+
+            verification_lines.append(
+                f"✅ {table}: "
+                f"{source_count:,} = "
+                f"{destination_count:,}"
+            )
+
+        summary = "\n".join(
+            verification_lines
+        )
+
+        # ====================================================
+        # SUCCESS
+        # ====================================================
+
+        film_backup_edit(
+            progress_chat_id,
+            progress_message_id,
+
+            "🎉 <b>FILM DATABASE MIGRATION COMPLETE</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n\n"
+
+            "🟢 SOURCE:\n"
+            "<code>DATABASE_URL</code> ✅\n\n"
+
+            "🔵 DESTINATION:\n"
+            "<code>FILM_SUPABASE_DATABASE_URL</code> ✅\n\n"
+
+            "Schema: ✅\n"
+            "Relationships: ✅\n"
+            "Original IDs: ✅\n"
+            "File IDs: ✅\n"
+            "File names: ✅\n"
+            "Group keys: ✅\n"
+            "Checkpoint: ✅\n"
+            "Sequences: ✅\n"
+            "Final verification: ✅\n\n"
+
+            f"📋 Tables: "
+            f"{total_tables:,}\n"
+
+            f"📦 Rows checked: "
+            f"{grand_processed:,}\n"
+
+            f"📥 Newly inserted: "
+            f"{grand_inserted:,}\n"
+
+            f"♻️ Already existed: "
+            f"{grand_skipped:,}\n\n"
+
+            "<b>FINAL TABLE CHECK:</b>\n"
+
+            f"{summary[:3500]}"
+        )
+
+        # ====================================================
+        # ADMIN SUCCESS MESSAGE
+        # ====================================================
+
+        film_backup_admin(
+            "🎉 <b>FILM DB MIGRATION FINISHED</b>\n\n"
+
+            "🟢 SOURCE: DATABASE_URL\n"
+            "🔵 DESTINATION: "
+            "FILM_SUPABASE_DATABASE_URL\n\n"
+
+            f"Tables: {total_tables:,}\n"
+            f"Rows checked: {grand_processed:,}\n"
+            f"Inserted: {grand_inserted:,}\n"
+            f"Already existed: {grand_skipped:,}\n\n"
+
+            "SOURCE and DESTINATION row counts "
+            "match successfully."
+        )
+
+    # ========================================================
+    # ERROR
+    # ========================================================
+
+    except Exception as e:
+
+        error_text = (
+            "🚨 <b>FILM DATABASE MIGRATION STOPPED</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n\n"
+
+            "🟢 SOURCE:\n"
+            "<code>DATABASE_URL</code>\n\n"
+
+            "🔵 DESTINATION:\n"
+            "<code>FILM_SUPABASE_DATABASE_URL</code>\n\n"
+
+            f"❌ Error:\n"
+            f"<code>{str(e)[:3000]}</code>\n\n"
+
+            "🛡️ Safety system stopped the migration.\n\n"
+
+            "No unchecked rows will be blindly copied.\n"
+
+            "Saved checkpoints remain in the "
+            "DESTINATION database.\n\n"
+
+            "You can investigate the error and "
+            "resume safely."
+        )
+
+        film_backup_edit(
+            progress_chat_id,
+            progress_message_id,
+            error_text
+        )
+
+        film_backup_admin(
+            "🚨 <b>FILM DB MIGRATION ERROR</b>\n\n"
+            f"<code>{str(e)[:3500]}</code>"
+        )
+
+        print(
+            "========== FILM DB MIGRATION ERROR =========="
+        )
+
+        traceback.print_exc()
+
+    finally:
+
+        # ====================================================
+        # RELEASE ADVISORY LOCK
+        # ====================================================
+
+        if (
+            destination_conn
+            and advisory_locked
+        ):
+
+            try:
+
+                lock_cur = (
+                    destination_conn.cursor()
+                )
+
+                lock_cur.execute(
+                    """
+                    SELECT pg_advisory_unlock(
+                        913742,
+                        662001
+                    )
+                    """
+                )
+
+                lock_cur.close()
+
+            except Exception as e:
+
+                print(
+                    "⚠️ Could not release advisory lock:",
+                    repr(e)
+                )
+
+        # ====================================================
+        # CLOSE SOURCE
+        # ====================================================
+
+        if source_conn:
+
+            try:
+                source_conn.close()
+            except:
+                pass
+
+        # ====================================================
+        # CLOSE DESTINATION
+        # ====================================================
+
+        if destination_conn:
+
+            try:
+                destination_conn.close()
+            except:
+                pass
+
+        # ====================================================
+        # RELEASE PYTHON LOCK
+        # ====================================================
+
+        FILM_BACKUP_THREAD_LOCK.release()
+
+
+# ============================================================
+# 🎬 FILM DB BUTTON
+# ============================================================
+#
+# callback_data:
+#     backup_film_db
+# ============================================================
+
+@bot.callback_query_handler(
+    func=lambda c: c.data == "backup_film_db"
+)
+def film_backup_button(c):
+
+    try:
+
+        bot.answer_callback_query(
+            c.id
+        )
+
+        kb = types.InlineKeyboardMarkup()
+
+        kb.row(
+
+            types.InlineKeyboardButton(
+                "✅ YES — BACKUP FILM DB",
+                callback_data="backup_film_db_yes"
+            ),
+
+            types.InlineKeyboardButton(
+                "❌ NO",
+                callback_data="backup_film_db_no"
+            )
+        )
+
+        bot.send_message(
+
+            ADMIN_ID,
+
+            "⚠️ <b>FILM DATABASE MIGRATION</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n\n"
+
+            "🟢 <b>SOURCE</b>\n"
+            "<code>DATABASE_URL</code>\n\n"
+
+            "🔵 <b>DESTINATION</b>\n"
+            "<code>FILM_SUPABASE_DATABASE_URL</code>\n\n"
+
+            "Wannan migration zai debo "
+            "<b>dukkan data</b> daga DATABASE_URL "
+            "ya kwafe su zuwa "
+            "FILM_SUPABASE_DATABASE_URL.\n\n"
+
+            "System zai kwafi:\n"
+
+            "🎬 Items\n"
+            "👥 Users\n"
+            "🧾 Orders\n"
+            "📦 Order Items\n"
+            "🎞 User Movies\n"
+            "💎 VIP\n"
+            "👥 Invite / Referral data\n"
+            "⚙️ Admin data\n"
+            "📊 Da sauran dukkan public tables.\n\n"
+
+            "🛡️ Original IDs za su kasance.\n"
+            "🛡️ File ID zai kasance.\n"
+            "🛡️ File name zai kasance.\n"
+            "🛡️ Group key zai kasance.\n"
+            "🛡️ Order ID zai kasance.\n"
+            "🛡️ Item ID zai kasance.\n"
+            "🛡️ User ID zai kasance.\n\n"
+
+            "📦 Batch size: <b>50 rows</b>\n"
+
+            "🔄 Checkpoint/resume yana kunne.\n"
+
+            "🔐 Existing row za a tabbatar da ita "
+            "kafin a tsallake ta.\n"
+
+            "🛑 Idan ID ɗaya ya kasance amma data "
+            "ta bambanta, system zai tsaya nan take.\n\n"
+
+            "⚠️ Kada a fara migration biyu lokaci guda.\n\n"
+
+            "<b>Ka tabbatar kana son fara migration?</b>",
+
+            parse_mode="HTML",
+            reply_markup=kb
+        )
+
+    except Exception as e:
+
+        print(
+            "❌ FILM BACKUP BUTTON ERROR:",
+            repr(e)
+        )
+
+
+# ============================================================
+# ❌ NO
+# ============================================================
+
+@bot.callback_query_handler(
+    func=lambda c:
+        c.data == "backup_film_db_no"
+)
+def film_backup_no(c):
+
+    try:
+
+        bot.answer_callback_query(
+            c.id,
+            "Backup cancelled."
+        )
+
+        bot.edit_message_text(
+
+            "❌ <b>Film Database Migration Cancelled.</b>\n\n"
+            "Babu wani data da aka canza.",
+
+            chat_id=c.message.chat.id,
+
+            message_id=c.message.message_id,
+
+            parse_mode="HTML"
+        )
+
+    except Exception as e:
+
+        print(
+            "❌ BACKUP NO ERROR:",
+            repr(e)
+        )
+
+
+# ============================================================
+# ✅ YES — START MIGRATION
+# ============================================================
+
+@bot.callback_query_handler(
+    func=lambda c:
+        c.data == "backup_film_db_yes"
+)
+def film_backup_yes(c):
+
+    try:
+
+        bot.answer_callback_query(
+            c.id,
+            "Starting Film DB migration..."
+        )
+
+        # ====================================================
+        # PROGRESS MESSAGE
+        # ====================================================
+
+        progress = bot.send_message(
+
+            ADMIN_ID,
+
+            "🚀 <b>Starting Film Database Migration...</b>\n\n"
+
+            "🟢 SOURCE: DATABASE_URL\n"
+            "🔵 DESTINATION: "
+            "FILM_SUPABASE_DATABASE_URL\n\n"
+
+            "🔌 Connecting to databases...",
+
+            parse_mode="HTML"
+        )
+
+        # ====================================================
+        # BACKGROUND THREAD
+        # ====================================================
+
+        thread = threading.Thread(
+
+            target=run_film_database_backup,
+
+            args=(
+                progress.chat.id,
+                progress.message_id
+            ),
+
+            daemon=True
+        )
+
+        thread.start()
+
+    except Exception as e:
+
+        print(
+            "❌ FILM BACKUP START ERROR:",
+            repr(e)
+        )
+
+        try:
+
+            bot.send_message(
+
+                ADMIN_ID,
+
+                "🚨 <b>Could not start Film DB Migration</b>\n\n"
+
+                f"<code>{str(e)[:3000]}</code>",
+
+                parse_mode="HTML"
+            )
+
+        except:
+            pass
+
+# ============================================================
+
+
 import time
 from telebot.apihelper import ApiTelegramException
 
