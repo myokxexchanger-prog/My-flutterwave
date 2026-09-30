@@ -3857,17 +3857,6 @@ def register_film_db_backup(bot, admin_id):
     print("✅ FILM DB BACKUP CALLBACKS REGISTERED")
 
 
-# ============================================================
-# OPTIONAL SELF TEST
-# ============================================================
-
-if __name__ == "__main__":
-    print("Film DB Backup System loaded.")
-    print("Tables:", len(FILM_TABLES))
-    print("Batch size:", BATCH_SIZE)
-    print("No migration is started automatically.")
-
-
 
 # ============================================================
 # WALLET DB BACKUP / MIGRATION SYSTEM
