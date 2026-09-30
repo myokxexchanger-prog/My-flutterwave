@@ -2535,73 +2535,18 @@ def deliver_items(call):
 # ============================================================
 # /newbutton — FILM DB BACKUP BUTTON
 # ============================================================
-
-@bot.message_handler(commands=["newbutton"])
-def newbutton_film_db(message):
-
-    # ADMIN KAWAI
-    if message.from_user.id != ADMIN_ID:
-        bot.reply_to(
-            message,
-            "❌ Ba ka da izinin amfani da wannan."
-        )
-        return
-
-    kb = types.InlineKeyboardMarkup()
-
-    kb.add(
-        types.InlineKeyboardButton(
-            "🎬 Film DB",
-            callback_data="backup_film_db"
-        )
-    )
-
-    bot.send_message(
-        message.chat.id,
-        "👇 Danna nan domin fara aikin Film DB:",
-        reply_markup=kb
-    )
-
-
-print("✅ /newbutton FILM DB READY")
-
-
-# -*- coding: utf-8 -*-
-"""
-FILM DB BACKUP / MIGRATION SYSTEM
-=================================
-Copies the complete Film database from DATABASE_URL to
-FILM_SUPABASE_DATABASE_URL.
-
-Design goals:
-- Source DATABASE_URL is the authority.
-- Destination is made an exact mirror of the 24 Film tables.
-- Rows are processed in batches of 50.
-- Source rows are never deleted or modified.
-- IDs, titles, prices, group_key, file_id, timestamps and every other
-  column value are copied exactly as stored.
-- Matching is NEVER based on title/price/group_key. Primary keys are used.
-  Therefore:
-      series:       title="Garkuwa", group_key="abc23" (example)
-      items:        title="Hasashe", group_key="abc23" (example)
-  are copied independently without trying to "understand" or merge them.
-- If destination already has a row with the same primary key but different
-  values, it is updated to exactly match the source.
-- If destination contains an extra row which does not exist in source,
-  it is removed from the destination during the final exact-mirror step.
-- A batch is verified before the migration moves forward.
-- After every table, the complete table is verified.
-- SERIAL sequences are reset to at least the source maximum ID.
-- If the process stops/crashes, running it again is safe: existing rows are
-  repaired, already-correct rows are left correct, and progress continues.
-- Only 50 source rows are held in Python at a time.
-
-Integration:
-    from film_db_backup import register_film_db_backup
-    register_film_db_backup(bot, ADMIN_ID)
-
-The source and destination tables must already exist with compatible schemas.
-"""
+#
+# KA MANNA WANNAN BLOCK DIN KUSA DA HANDLER DIN /POSTERS
+# KO WANI WURI A CIKIN BOT DIN KA.
+#
+# BA SABON BOT BA NE.
+# YANA AMFANI DA:
+#     bot
+#     ADMIN_ID
+#     DATABASE_URL
+#     FILM_SUPABASE_DATABASE_URL
+#
+# ============================================================
 
 import os
 import threading
@@ -2610,6 +2555,7 @@ from datetime import datetime
 
 import psycopg2
 from psycopg2 import sql
+from telebot import types
 
 
 # ============================================================
@@ -2617,6 +2563,7 @@ from psycopg2 import sql
 # ============================================================
 
 BATCH_SIZE = 50
+
 TABLE_COUNT_EXPECTED = 24
 
 FILM_TABLES = [
@@ -2651,17 +2598,20 @@ FILM_TABLES = [
 # GLOBAL BACKUP STATE
 # ============================================================
 
-_backup_lock = threading.Lock()
-_backup_running = False
+_film_backup_lock = threading.Lock()
+_film_backup_running = False
 
 
 # ============================================================
-# CONNECTIONS
+# DATABASE CONNECTION
 # ============================================================
 
-def _connect(url, name):
+def _film_backup_connect(url, name):
+
     if not url:
-        raise RuntimeError(f"{name} is not set")
+        raise RuntimeError(
+            f"{name} is not set"
+        )
 
     conn = psycopg2.connect(
         url,
@@ -2669,7 +2619,9 @@ def _connect(url, name):
         sslmode="require",
         application_name="telegram_film_db_backup",
     )
+
     conn.autocommit = False
+
     return conn
 
 
@@ -2677,42 +2629,85 @@ def _connect(url, name):
 # TELEGRAM SAFE HELPERS
 # ============================================================
 
-def _send_admin(bot, admin_id, text):
+def _film_backup_send_admin(bot, admin_id, text):
+
     try:
-        return bot.send_message(admin_id, text)
+        return bot.send_message(
+            admin_id,
+            text,
+            parse_mode="HTML",
+        )
+
     except Exception as e:
-        print("❌ Telegram send error:", repr(e))
+
+        print(
+            "❌ Telegram send error:",
+            repr(e)
+        )
+
         return None
 
 
-def _edit_admin(bot, admin_id, message_id, text):
+def _film_backup_edit_admin(
+    bot,
+    admin_id,
+    message_id,
+    text,
+):
+
     try:
+
         bot.edit_message_text(
             text,
             chat_id=admin_id,
             message_id=message_id,
+            parse_mode="HTML",
         )
+
         return True
+
     except Exception as e:
-        # Telegram may return "message is not modified". It is harmless.
-        print("⚠️ Telegram edit error:", repr(e))
+
+        print(
+            "⚠️ Telegram edit error:",
+            repr(e)
+        )
+
         return False
 
 
-def _safe_progress(bot, admin_id, progress_message, text, force=False):
-    """
-    Avoid hammering Telegram with edits while still giving live progress.
-    The first update and important updates are always sent.
-    """
+def _film_backup_progress(
+    bot,
+    admin_id,
+    progress_message,
+    text,
+    force=False,
+):
+
     if progress_message is None:
         return None
 
     now = time.monotonic()
-    last = getattr(progress_message, "_film_backup_last_edit", 0.0)
+
+    last = getattr(
+        progress_message,
+        "_film_backup_last_edit",
+        0.0,
+    )
 
     if force or (now - last >= 0.8):
-        if _edit_admin(bot, admin_id, progress_message.message_id, text):
-            progress_message._film_backup_last_edit = now
+
+        if _film_backup_edit_admin(
+            bot,
+            admin_id,
+            progress_message.message_id,
+            text,
+        ):
+
+            try:
+                progress_message._film_backup_last_edit = now
+            except Exception:
+                pass
 
     return progress_message
 
@@ -2721,8 +2716,10 @@ def _safe_progress(bot, admin_id, progress_message, text, force=False):
 # SCHEMA INTROSPECTION
 # ============================================================
 
-def _get_tables(conn):
+def _film_backup_get_tables(conn):
+
     with conn.cursor() as cur:
+
         cur.execute("""
             SELECT table_name
             FROM information_schema.tables
@@ -2730,11 +2727,20 @@ def _get_tables(conn):
               AND table_type = 'BASE TABLE'
             ORDER BY table_name
         """)
-        return [r[0] for r in cur.fetchall()]
+
+        return [
+            r[0]
+            for r in cur.fetchall()
+        ]
 
 
-def _get_columns(conn, table):
+def _film_backup_get_columns(
+    conn,
+    table,
+):
+
     with conn.cursor() as cur:
+
         cur.execute("""
             SELECT column_name
             FROM information_schema.columns
@@ -2742,225 +2748,340 @@ def _get_columns(conn, table):
               AND table_name = %s
             ORDER BY ordinal_position
         """, (table,))
-        return [r[0] for r in cur.fetchall()]
+
+        return [
+            r[0]
+            for r in cur.fetchall()
+        ]
 
 
-def _get_primary_key(conn, table):
+def _film_backup_get_primary_key(
+    conn,
+    table,
+):
+
     with conn.cursor() as cur:
+
         cur.execute("""
             SELECT kcu.column_name
             FROM information_schema.table_constraints tc
+
             JOIN information_schema.key_column_usage kcu
               ON tc.constraint_name = kcu.constraint_name
              AND tc.table_schema = kcu.table_schema
              AND tc.table_name = kcu.table_name
+
             WHERE tc.table_schema = 'public'
               AND tc.table_name = %s
               AND tc.constraint_type = 'PRIMARY KEY'
+
             ORDER BY kcu.ordinal_position
         """, (table,))
-        return [r[0] for r in cur.fetchall()]
+
+        return [
+            r[0]
+            for r in cur.fetchall()
+        ]
 
 
-def _get_sequence_columns(conn, table):
-    """
-    Finds columns backed by a PostgreSQL sequence, including SERIAL columns.
-    """
+def _film_backup_get_sequence_columns(
+    conn,
+    table,
+):
+
     with conn.cursor() as cur:
+
         cur.execute("""
             SELECT c.column_name
             FROM information_schema.columns c
+
             WHERE c.table_schema = 'public'
               AND c.table_name = %s
+
               AND pg_get_serial_sequence(
-                    format('%I.%I', c.table_schema, c.table_name),
+                    format('%I.%I',
+                           c.table_schema,
+                           c.table_name),
                     c.column_name
                   ) IS NOT NULL
+
             ORDER BY c.ordinal_position
         """, (table,))
-        return [r[0] for r in cur.fetchall()]
+
+        return [
+            r[0]
+            for r in cur.fetchall()
+        ]
 
 
-def _validate_schema(source_conn, dest_conn):
-    """
-    Validate every expected table and every column before touching destination.
-    This prevents a partial migration caused by a schema mismatch.
-    """
+# ============================================================
+# SCHEMA VALIDATION
+# ============================================================
+
+def _film_backup_validate_schema(
+    source_conn,
+    dest_conn,
+):
+
     errors = []
 
-    source_tables = set(_get_tables(source_conn))
-    dest_tables = set(_get_tables(dest_conn))
+    source_tables = set(
+        _film_backup_get_tables(
+            source_conn
+        )
+    )
 
-    missing_source = [t for t in FILM_TABLES if t not in source_tables]
-    missing_dest = [t for t in FILM_TABLES if t not in dest_tables]
+    dest_tables = set(
+        _film_backup_get_tables(
+            dest_conn
+        )
+    )
+
+    missing_source = [
+        t
+        for t in FILM_TABLES
+        if t not in source_tables
+    ]
+
+    missing_dest = [
+        t
+        for t in FILM_TABLES
+        if t not in dest_tables
+    ]
 
     if missing_source:
+
         errors.append(
-            "Source missing tables: " + ", ".join(missing_source)
+            "Source missing tables: "
+            + ", ".join(missing_source)
         )
 
     if missing_dest:
+
         errors.append(
-            "Destination missing tables: " + ", ".join(missing_dest)
+            "Destination missing tables: "
+            + ", ".join(missing_dest)
         )
 
     if errors:
-        raise RuntimeError("\n".join(errors))
+
+        raise RuntimeError(
+            "\n".join(errors)
+        )
 
     for table in FILM_TABLES:
-        src_cols = _get_columns(source_conn, table)
-        dst_cols = _get_columns(dest_conn, table)
+
+        src_cols = _film_backup_get_columns(
+            source_conn,
+            table,
+        )
+
+        dst_cols = _film_backup_get_columns(
+            dest_conn,
+            table,
+        )
 
         if src_cols != dst_cols:
+
             errors.append(
                 f"{table}: columns differ.\n"
-                f"  SOURCE: {src_cols}\n"
-                f"  DEST:   {dst_cols}"
+                f"SOURCE: {src_cols}\n"
+                f"DEST:   {dst_cols}"
             )
 
-        src_pk = _get_primary_key(source_conn, table)
-        dst_pk = _get_primary_key(dest_conn, table)
+        src_pk = _film_backup_get_primary_key(
+            source_conn,
+            table,
+        )
+
+        dst_pk = _film_backup_get_primary_key(
+            dest_conn,
+            table,
+        )
 
         if src_pk != dst_pk:
+
             errors.append(
                 f"{table}: primary key differs. "
-                f"SOURCE={src_pk} DEST={dst_pk}"
+                f"SOURCE={src_pk} "
+                f"DEST={dst_pk}"
             )
 
     if errors:
+
         raise RuntimeError(
-            "SCHEMA VALIDATION FAILED. No migration was started.\n\n"
+            "SCHEMA VALIDATION FAILED.\n\n"
             + "\n".join(errors)
         )
 
 
 # ============================================================
-# ROW UTILITIES
+# ROW COMPARISON
 # ============================================================
 
-def _normalize_value(v):
-    """
-    psycopg2 already returns PostgreSQL values as Python values.
-    Keep them unchanged. This function exists only to make comparison
-    explicit and future-proof.
-    """
+def _film_backup_normalize_value(v):
+
     return v
 
 
-def _rows_equal(source_row, dest_row):
-    if source_row is None or dest_row is None:
+def _film_backup_rows_equal(
+    source_row,
+    dest_row,
+):
+
+    if source_row is None:
         return False
+
+    if dest_row is None:
+        return False
+
     if len(source_row) != len(dest_row):
         return False
 
-    for a, b in zip(source_row, dest_row):
-        if _normalize_value(a) != _normalize_value(b):
+    for a, b in zip(
+        source_row,
+        dest_row,
+    ):
+
+        if (
+            _film_backup_normalize_value(a)
+            !=
+            _film_backup_normalize_value(b)
+        ):
+
             return False
 
     return True
-
-
-def _make_pk_where(pk_columns, pk_values):
-    parts = []
-    params = []
-
-    for col, value in zip(pk_columns, pk_values):
-        parts.append(
-            sql.SQL("{} = %s").format(sql.Identifier(col))
-        )
-        params.append(value)
-
-    return sql.SQL(" AND ").join(parts), params
 
 
 # ============================================================
 # DESTINATION UPSERT
 # ============================================================
 
-def _upsert_batch(dest_conn, table, columns, pk_columns, rows):
+def _film_backup_upsert_batch(
+    dest_conn,
+    table,
+    columns,
+    pk_columns,
+    rows,
+):
+
     if not rows:
         return
 
     col_sql = sql.SQL(", ").join(
-        sql.Identifier(c) for c in columns
+        sql.Identifier(c)
+        for c in columns
     )
 
     placeholders = sql.SQL(", ").join(
-        sql.Placeholder() for _ in columns
+        sql.Placeholder()
+        for _ in columns
     )
 
-    non_pk = [c for c in columns if c not in pk_columns]
+    non_pk = [
+        c
+        for c in columns
+        if c not in pk_columns
+    ]
 
     if non_pk:
+
         update_sql = sql.SQL(", ").join(
-            sql.SQL("{0} = EXCLUDED.{0}").format(sql.Identifier(c))
+            sql.SQL("{0} = EXCLUDED.{0}").format(
+                sql.Identifier(c)
+            )
             for c in non_pk
         )
+
         conflict_sql = sql.SQL(
-            " ON CONFLICT ({}) DO UPDATE SET {}"
+            "ON CONFLICT ({}) DO UPDATE SET {}"
         ).format(
-            sql.SQL(", ").join(sql.Identifier(c) for c in pk_columns),
+
+            sql.SQL(", ").join(
+                sql.Identifier(c)
+                for c in pk_columns
+            ),
+
             update_sql,
         )
+
     else:
+
         conflict_sql = sql.SQL(
-            " ON CONFLICT ({}) DO NOTHING"
+            "ON CONFLICT ({}) DO NOTHING"
         ).format(
-            sql.SQL(", ").join(sql.Identifier(c) for c in pk_columns)
+
+            sql.SQL(", ").join(
+                sql.Identifier(c)
+                for c in pk_columns
+            )
         )
 
     query = sql.SQL("""
-        INSERT INTO {table} ({columns})
+        INSERT INTO {table}
+        ({columns})
         VALUES ({values})
         {conflict}
     """).format(
+
         table=sql.Identifier(table),
+
         columns=col_sql,
+
         values=placeholders,
+
         conflict=conflict_sql,
     )
 
     with dest_conn.cursor() as cur:
+
         cur.executemany(
             query.as_string(dest_conn),
-            rows
+            rows,
         )
 
 
 # ============================================================
-# BATCH VERIFICATION
+# FETCH DESTINATION ROWS BY PRIMARY KEY
 # ============================================================
 
-def _fetch_dest_rows_by_pk(
+def _film_backup_fetch_dest_rows_by_pk(
     dest_conn,
     table,
     columns,
     pk_columns,
     pk_values_list,
 ):
-    """
-    Fetch exactly the destination rows for the batch.
-    No title, group_key, price, or file_id matching is used.
-    """
+
     if not pk_values_list:
         return {}
 
-    # Build a VALUES list containing the PKs.
     values_sql = []
     params = []
 
     for pk_values in pk_values_list:
+
         values_sql.append(
-            "(" + ", ".join(["%s"] * len(pk_columns)) + ")"
+            "("
+            + ", ".join(
+                ["%s"] * len(pk_columns)
+            )
+            + ")"
         )
-        params.extend(pk_values)
+
+        params.extend(
+            pk_values
+        )
 
     pk_aliases = sql.SQL(", ").join(
-        sql.Identifier(c) for c in pk_columns
+        sql.Identifier(c)
+        for c in pk_columns
     )
 
     select_cols = sql.SQL(", ").join(
-        sql.Identifier(c) for c in columns
+        sql.Identifier(c)
+        for c in columns
     )
 
     query = sql.SQL("""
@@ -2970,182 +3091,278 @@ def _fetch_dest_rows_by_pk(
             VALUES {values}
         )
     """).format(
+
         cols=select_cols,
+
         table=sql.Identifier(table),
+
         pk_cols=pk_aliases,
+
         values=sql.SQL(", ").join(
-            sql.SQL(v) for v in values_sql
+            sql.SQL(v)
+            for v in values_sql
         ),
     )
 
     with dest_conn.cursor() as cur:
-        cur.execute(query, params)
+
+        cur.execute(
+            query,
+            params,
+        )
+
         fetched = cur.fetchall()
 
     result = {}
-    col_index = {c: i for i, c in enumerate(columns)}
+
+    col_index = {
+        c: i
+        for i, c in enumerate(columns)
+    }
 
     for row in fetched:
-        key = tuple(row[col_index[c]] for c in pk_columns)
+
+        key = tuple(
+            row[col_index[c]]
+            for c in pk_columns
+        )
+
         result[key] = row
 
     return result
 
 
-def _verify_batch(
+# ============================================================
+# VERIFY BATCH
+# ============================================================
+
+def _film_backup_verify_batch(
     dest_conn,
     table,
     columns,
     pk_columns,
     source_rows,
 ):
-    pk_indices = [columns.index(c) for c in pk_columns]
+
+    pk_indices = [
+        columns.index(c)
+        for c in pk_columns
+    ]
 
     source_map = {}
+
     for row in source_rows:
-        key = tuple(row[i] for i in pk_indices)
+
+        key = tuple(
+            row[i]
+            for i in pk_indices
+        )
+
         source_map[key] = row
 
-    dest_map = _fetch_dest_rows_by_pk(
-        dest_conn,
-        table,
-        columns,
-        pk_columns,
-        list(source_map.keys()),
+    dest_map = (
+        _film_backup_fetch_dest_rows_by_pk(
+            dest_conn,
+            table,
+            columns,
+            pk_columns,
+            list(source_map.keys()),
+        )
     )
 
     if len(dest_map) != len(source_map):
+
         missing = [
-            k for k in source_map.keys()
+            k
+            for k in source_map.keys()
             if k not in dest_map
         ]
+
         raise RuntimeError(
             f"{table}: batch verification failed. "
-            f"Missing destination rows: {missing[:10]}"
+            f"Missing destination rows: "
+            f"{missing[:10]}"
         )
 
     mismatches = []
+
     for key, source_row in source_map.items():
+
         dest_row = dest_map.get(key)
 
-        if not _rows_equal(source_row, dest_row):
+        if not _film_backup_rows_equal(
+            source_row,
+            dest_row,
+        ):
+
             mismatches.append(key)
 
     if mismatches:
+
         raise RuntimeError(
             f"{table}: batch verification failed. "
-            f"Rows differ for PKs: {mismatches[:10]}"
+            f"Rows differ for PKs: "
+            f"{mismatches[:10]}"
         )
 
     return len(source_map)
 
 
 # ============================================================
-# TABLE COUNT
+# COUNT TABLE
 # ============================================================
 
-def _count_table(conn, table):
+def _film_backup_count_table(
+    conn,
+    table,
+):
+
     with conn.cursor() as cur:
+
         cur.execute(
-            sql.SQL("SELECT COUNT(*) FROM {}").format(
+            sql.SQL(
+                "SELECT COUNT(*) FROM {}"
+            ).format(
                 sql.Identifier(table)
             )
         )
+
         return cur.fetchone()[0]
 
 
 # ============================================================
-# EXACT-MIRROR CLEANUP
+# EXACT MIRROR CLEANUP
 # ============================================================
 
-def _delete_destination_extras(
+def _film_backup_delete_destination_extras(
     source_conn,
     dest_conn,
     table,
     columns,
     pk_columns,
 ):
-    """
-    Remove only destination rows whose PRIMARY KEY does not exist in source.
 
-    IMPORTANT:
-    - Never touches source.
-    - Never guesses by title/price/group_key.
-    - Does not delete a destination row whose PK exists in source.
-    - Processes PKs in batches of 50 to keep memory bounded.
-    """
-    source_pk_count = _count_table(source_conn, table)
-    dest_count = _count_table(dest_conn, table)
+    source_pk_count = (
+        _film_backup_count_table(
+            source_conn,
+            table,
+        )
+    )
 
-    if dest_count == 0:
-        return 0
+    dest_count = (
+        _film_backup_count_table(
+            dest_conn,
+            table,
+        )
+    )
 
-    # If counts are equal, there cannot be extras only if all source PKs
-    # were verified. The caller verifies the complete table after migration.
-    # We still perform a robust anti-join below when counts differ.
+    # Idan destination bai fi source ba,
+    # ba za mu dauka akwai extra ba.
+    #
+    # Final verification zai gano missing/mismatch.
     if dest_count <= source_pk_count:
         return 0
 
     deleted = 0
 
-    # Use a server-side source cursor for source PKs.
-    src_name = f"src_pk_{table}_{id(table)}"
-    src_cur = source_conn.cursor(name=src_name)
+    src_name = (
+        f"film_src_pk_"
+        f"{int(time.time() * 1000000) % 1000000000}"
+    )
+
+    src_cur = source_conn.cursor(
+        name=src_name
+    )
+
     src_cur.itersize = BATCH_SIZE
 
     pk_sql = sql.SQL(", ").join(
-        sql.Identifier(c) for c in pk_columns
+        sql.Identifier(c)
+        for c in pk_columns
     )
 
     src_cur.execute(
-        sql.SQL("SELECT {} FROM {} ORDER BY {}").format(
+        sql.SQL(
+            "SELECT {} "
+            "FROM {} "
+            "ORDER BY {}"
+        ).format(
+
             pk_sql,
+
             sql.Identifier(table),
+
             pk_sql,
         )
     )
 
-    # Build a temporary table in destination containing source PKs.
-    tmp_name = f"_film_migrate_pk_{int(time.time() * 1000000) % 1000000000}"
+    tmp_name = (
+        f"_film_migrate_pk_"
+        f"{int(time.time() * 1000000) % 1000000000}"
+    )
 
     with dest_conn.cursor() as dcur:
+
         dcur.execute(
-            sql.SQL("CREATE TEMP TABLE {} AS SELECT {} FROM {} WITH NO DATA").format(
+            sql.SQL(
+                "CREATE TEMP TABLE {} "
+                "AS SELECT {} "
+                "FROM {} "
+                "WITH NO DATA"
+            ).format(
+
                 sql.Identifier(tmp_name),
+
                 pk_sql,
+
                 sql.Identifier(table),
             )
         )
 
-        # Need the source PKs in manageable batches.
         while True:
-            batch = src_cur.fetchmany(BATCH_SIZE)
+
+            batch = src_cur.fetchmany(
+                BATCH_SIZE
+            )
+
             if not batch:
                 break
 
             placeholders = sql.SQL(", ").join(
-                sql.Placeholder() for _ in pk_columns
+                sql.Placeholder()
+                for _ in pk_columns
             )
 
             insert_query = sql.SQL(
-                "INSERT INTO {} ({}) VALUES ({})"
+                "INSERT INTO {} "
+                "({}) "
+                "VALUES ({})"
             ).format(
+
                 sql.Identifier(tmp_name),
+
                 pk_sql,
+
                 placeholders,
             )
 
             dcur.executemany(
-                insert_query.as_string(dest_conn),
+                insert_query.as_string(
+                    dest_conn
+                ),
                 batch,
             )
 
-        # Delete destination rows not represented in source.
-        # PostgreSQL tuple NOT EXISTS works for composite and single PK.
-        match_conditions = sql.SQL(" AND ").join(
-            sql.SQL("d.{c} = s.{c}").format(
+        match_conditions = sql.SQL(
+            " AND "
+        ).join(
+
+            sql.SQL(
+                "d.{c} = s.{c}"
+            ).format(
                 c=sql.Identifier(c)
             )
+
             for c in pk_columns
         )
 
@@ -3157,15 +3374,22 @@ def _delete_destination_extras(
                 WHERE {conditions}
             )
         """).format(
+
             table=sql.Identifier(table),
+
             tmp=sql.Identifier(tmp_name),
+
             conditions=match_conditions,
         )
 
-        dcur.execute(delete_query)
+        dcur.execute(
+            delete_query
+        )
+
         deleted = dcur.rowcount
 
     dest_conn.commit()
+
     src_cur.close()
 
     return deleted
@@ -3175,41 +3399,68 @@ def _delete_destination_extras(
 # COMPLETE TABLE VERIFICATION
 # ============================================================
 
-def _verify_complete_table(
+def _film_backup_verify_complete_table(
     source_conn,
     dest_conn,
     table,
     columns,
     pk_columns,
 ):
-    source_count = _count_table(source_conn, table)
-    dest_count = _count_table(dest_conn, table)
+
+    source_count = (
+        _film_backup_count_table(
+            source_conn,
+            table,
+        )
+    )
+
+    dest_count = (
+        _film_backup_count_table(
+            dest_conn,
+            table,
+        )
+    )
 
     if source_count != dest_count:
+
         raise RuntimeError(
             f"{table}: FINAL COUNT MISMATCH. "
-            f"SOURCE={source_count}, DEST={dest_count}"
+            f"SOURCE={source_count}, "
+            f"DEST={dest_count}"
         )
 
-    # Compare every source row in 50-row batches.
-    # This is intentionally done again after all writes so that the final
-    # state is proven, not merely assumed from batch writes.
-    src_cur = source_conn.cursor(
-        name=f"verify_{table}_{int(time.time() * 1000) % 100000000}"
+    verify_cursor_name = (
+        f"film_verify_"
+        f"{int(time.time() * 1000) % 100000000}"
     )
+
+    src_cur = source_conn.cursor(
+        name=verify_cursor_name
+    )
+
     src_cur.itersize = BATCH_SIZE
 
     order_sql = sql.SQL(", ").join(
-        sql.Identifier(c) for c in pk_columns
+        sql.Identifier(c)
+        for c in pk_columns
     )
+
     select_sql = sql.SQL(", ").join(
-        sql.Identifier(c) for c in columns
+        sql.Identifier(c)
+        for c in columns
     )
 
     src_cur.execute(
-        sql.SQL("SELECT {} FROM {} ORDER BY {}").format(
+        sql.SQL(
+            "SELECT {} "
+            "FROM {} "
+            "ORDER BY {}"
+        ).format(
+
             select_sql,
+
             sql.Identifier(table),
+
             order_sql,
         )
     )
@@ -3217,25 +3468,32 @@ def _verify_complete_table(
     checked = 0
 
     while True:
-        batch = src_cur.fetchmany(BATCH_SIZE)
+
+        batch = src_cur.fetchmany(
+            BATCH_SIZE
+        )
+
         if not batch:
             break
 
-        _verify_batch(
+        _film_backup_verify_batch(
             dest_conn,
             table,
             columns,
             pk_columns,
             batch,
         )
+
         checked += len(batch)
 
     src_cur.close()
 
     if checked != source_count:
+
         raise RuntimeError(
             f"{table}: verification count mismatch. "
-            f"CHECKED={checked}, SOURCE={source_count}"
+            f"CHECKED={checked}, "
+            f"SOURCE={source_count}"
         )
 
     return source_count
@@ -3245,68 +3503,91 @@ def _verify_complete_table(
 # SEQUENCE SYNCHRONIZATION
 # ============================================================
 
-def _sync_sequences(
+def _film_backup_sync_sequences(
     source_conn,
     dest_conn,
     table,
     columns,
 ):
-    """
-    Preserve SERIAL behaviour after migration.
-    The row IDs themselves are copied exactly; this only makes future
-    INSERTs continue safely after the current maximum ID.
-    """
-    sequence_columns = _get_sequence_columns(source_conn, table)
+
+    sequence_columns = (
+        _film_backup_get_sequence_columns(
+            source_conn,
+            table,
+        )
+    )
 
     if not sequence_columns:
         return
 
     for column in sequence_columns:
+
         with source_conn.cursor() as scur:
+
             scur.execute(
                 sql.SQL(
-                    "SELECT MAX({}) FROM {}"
+                    "SELECT MAX({}) "
+                    "FROM {}"
                 ).format(
+
                     sql.Identifier(column),
+
                     sql.Identifier(table),
                 )
             )
+
             max_id = scur.fetchone()[0]
 
         with dest_conn.cursor() as dcur:
-            # Find destination sequence name.
+
             dcur.execute("""
                 SELECT pg_get_serial_sequence(
                     'public.' || %s,
                     %s
                 )
-            """, (table, column))
+            """, (
+                table,
+                column,
+            ))
+
             seq_name = dcur.fetchone()[0]
 
             if not seq_name:
                 continue
 
             if max_id is None:
-                # Empty table: restart sequence at 1.
+
                 dcur.execute(
-                    "SELECT setval(%s::regclass, 1, false)",
+                    "SELECT setval("
+                    "%s::regclass, "
+                    "1, "
+                    "false"
+                    ")",
                     (seq_name,),
                 )
+
             else:
-                # Next INSERT should not collide with copied IDs.
+
                 dcur.execute(
-                    "SELECT setval(%s::regclass, %s, true)",
-                    (seq_name, int(max_id)),
+                    "SELECT setval("
+                    "%s::regclass, "
+                    "%s, "
+                    "true"
+                    ")",
+                    (
+                        seq_name,
+                        int(max_id),
+                    ),
                 )
 
     dest_conn.commit()
 
 
 # ============================================================
-# TABLE MIGRATION
+# MIGRATE ONE TABLE
 # ============================================================
 
-def _migrate_table(
+def _film_backup_migrate_table(
     source_conn,
     dest_conn,
     table,
@@ -3316,47 +3597,95 @@ def _migrate_table(
     table_index,
     total_tables,
 ):
-    columns = _get_columns(source_conn, table)
-    pk_columns = _get_primary_key(source_conn, table)
+
+    columns = (
+        _film_backup_get_columns(
+            source_conn,
+            table,
+        )
+    )
+
+    pk_columns = (
+        _film_backup_get_primary_key(
+            source_conn,
+            table,
+        )
+    )
 
     if not pk_columns:
+
         raise RuntimeError(
             f"{table}: no PRIMARY KEY found. "
-            "Exact idempotent migration requires a primary key."
+            "Exact migration requires a primary key."
         )
 
-    source_total = _count_table(source_conn, table)
+    source_total = (
+        _film_backup_count_table(
+            source_conn,
+            table,
+        )
+    )
 
-    _safe_progress(
+    _film_backup_progress(
+
         bot,
+
         admin_id,
+
         progress,
+
         (
             f"🔄 <b>Film DB Backup</b>\n\n"
-            f"📊 Table: <b>{table}</b> ({table_index}/{total_tables})\n"
-            f"📦 Total rows: <b>{source_total}</b>\n"
-            f"⬇️ Starting: 0 / {source_total}\n"
-            f"⏳ Batch size: {BATCH_SIZE}"
+
+            f"📊 Table: "
+            f"<b>{table}</b> "
+            f"({table_index}/{total_tables})\n"
+
+            f"📦 Total rows: "
+            f"<b>{source_total}</b>\n"
+
+            f"⬇️ Starting: "
+            f"0 / {source_total}\n"
+
+            f"⏳ Batch size: "
+            f"<b>{BATCH_SIZE}</b>"
         ),
+
         force=True,
     )
 
-    src_cur = source_conn.cursor(
-        name=f"migrate_{table}_{int(time.time() * 1000000) % 1000000000}"
+    cursor_name = (
+        f"film_migrate_"
+        f"{int(time.time() * 1000000) % 1000000000}"
     )
+
+    src_cur = source_conn.cursor(
+        name=cursor_name
+    )
+
     src_cur.itersize = BATCH_SIZE
 
     order_sql = sql.SQL(", ").join(
-        sql.Identifier(c) for c in pk_columns
+        sql.Identifier(c)
+        for c in pk_columns
     )
+
     select_sql = sql.SQL(", ").join(
-        sql.Identifier(c) for c in columns
+        sql.Identifier(c)
+        for c in columns
     )
 
     src_cur.execute(
-        sql.SQL("SELECT {} FROM {} ORDER BY {}").format(
+        sql.SQL(
+            "SELECT {} "
+            "FROM {} "
+            "ORDER BY {}"
+        ).format(
+
             select_sql,
+
             sql.Identifier(table),
+
             order_sql,
         )
     )
@@ -3364,13 +3693,17 @@ def _migrate_table(
     processed = 0
 
     while True:
-        rows = src_cur.fetchmany(BATCH_SIZE)
+
+        rows = src_cur.fetchmany(
+            BATCH_SIZE
+        )
+
         if not rows:
             break
 
-        # One destination transaction per 50-row batch.
         try:
-            _upsert_batch(
+
+            _film_backup_upsert_batch(
                 dest_conn,
                 table,
                 columns,
@@ -3378,117 +3711,191 @@ def _migrate_table(
                 rows,
             )
 
-            verified = _verify_batch(
-                dest_conn,
-                table,
-                columns,
-                pk_columns,
-                rows,
+            verified = (
+                _film_backup_verify_batch(
+                    dest_conn,
+                    table,
+                    columns,
+                    pk_columns,
+                    rows,
+                )
             )
 
             if verified != len(rows):
+
                 raise RuntimeError(
-                    f"{table}: expected {len(rows)} rows verified, "
+                    f"{table}: expected "
+                    f"{len(rows)} rows verified, "
                     f"got {verified}"
                 )
 
             dest_conn.commit()
 
         except Exception:
+
             dest_conn.rollback()
+
             raise
 
         processed += len(rows)
 
-        remaining = source_total - processed
+        remaining = (
+            source_total
+            - processed
+        )
 
-        _safe_progress(
+        _film_backup_progress(
+
             bot,
+
             admin_id,
+
             progress,
+
             (
                 f"🔄 <b>Film DB Backup</b>\n\n"
-                f"📊 Table: <b>{table}</b> ({table_index}/{total_tables})\n"
-                f"📦 Total rows: <b>{source_total}</b>\n"
-                f"⬇️ Debo: <b>{processed}</b> / {source_total}\n"
-                f"⏳ Saura: <b>{remaining}</b>\n"
-                f"📦 Batch: <b>{BATCH_SIZE}</b>\n"
+
+                f"📊 Table: "
+                f"<b>{table}</b> "
+                f"({table_index}/{total_tables})\n"
+
+                f"📦 Total rows: "
+                f"<b>{source_total}</b>\n"
+
+                f"⬇️ Debo: "
+                f"<b>{processed}</b> / "
+                f"{source_total}\n"
+
+                f"⏳ Saura: "
+                f"<b>{remaining}</b>\n"
+
+                f"📦 Batch: "
+                f"<b>{BATCH_SIZE}</b>\n"
+
                 f"✅ Last batch verified"
             ),
+
             force=True,
         )
 
-        # Release Python references to the batch before continuing.
         del rows
 
     src_cur.close()
 
-    # Exact mirror: remove destination-only rows, if any.
-    # Source is NEVER modified.
+    # ========================================================
+    # EXACT MIRROR CLEANUP
+    # ========================================================
+
     try:
-        deleted_extras = _delete_destination_extras(
+
+        deleted_extras = (
+            _film_backup_delete_destination_extras(
+                source_conn,
+                dest_conn,
+                table,
+                columns,
+                pk_columns,
+            )
+        )
+
+    except Exception:
+
+        dest_conn.rollback()
+
+        raise
+
+    # ========================================================
+    # FINAL TABLE VERIFICATION
+    # ========================================================
+
+    final_count = (
+        _film_backup_verify_complete_table(
             source_conn,
             dest_conn,
             table,
             columns,
             pk_columns,
         )
-    except Exception:
-        dest_conn.rollback()
-        raise
-
-    # Final complete-table proof.
-    final_count = _verify_complete_table(
-        source_conn,
-        dest_conn,
-        table,
-        columns,
-        pk_columns,
     )
 
-    _sync_sequences(
+    # ========================================================
+    # SEQUENCES
+    # ========================================================
+
+    _film_backup_sync_sequences(
         source_conn,
         dest_conn,
         table,
         columns,
     )
 
-    _safe_progress(
+    _film_backup_progress(
+
         bot,
+
         admin_id,
+
         progress,
+
         (
-            f"✅ <b>{table}</b> COMPLETE\n\n"
-            f"📊 Table: {table_index}/{total_tables}\n"
-            f"📦 Source rows: <b>{source_total}</b>\n"
-            f"📥 Destination rows: <b>{final_count}</b>\n"
-            f"🧹 Extra destination rows removed: <b>{deleted_extras}</b>\n"
-            f"🔐 Full table verification: <b>PASS</b>\n"
+            f"✅ <b>{table} COMPLETE</b>\n\n"
+
+            f"📊 Table: "
+            f"{table_index}/{total_tables}\n"
+
+            f"📦 Source rows: "
+            f"<b>{source_total}</b>\n"
+
+            f"📥 Destination rows: "
+            f"<b>{final_count}</b>\n"
+
+            f"🧹 Extra destination rows removed: "
+            f"<b>{deleted_extras}</b>\n"
+
+            f"🔐 Full table verification: "
+            f"<b>PASS</b>\n"
+
             f"➡️ Moving to next table..."
         ),
+
         force=True,
     )
 
-    return source_total, final_count
+    return (
+        source_total,
+        final_count,
+    )
 
 
 # ============================================================
-# FULL MIGRATION
+# FULL FILM DB BACKUP
 # ============================================================
 
-def run_film_db_backup(bot, admin_id, progress_message=None):
-    global _backup_running
+def _film_backup_run(
+    bot,
+    admin_id,
+    progress_message=None,
+):
 
-    if not _backup_lock.acquire(blocking=False):
-        _send_admin(
+    global _film_backup_running
+
+    if not _film_backup_lock.acquire(
+        blocking=False
+    ):
+
+        _film_backup_send_admin(
             bot,
             admin_id,
-            "⚠️ Wani Film DB Backup yana gudana yanzu.\n"
-            "Da fatan a jira ya gama.",
+            (
+                "⚠️ <b>Film DB Backup</b>\n\n"
+                "Wani backup yana gudana yanzu.\n"
+                "Da fatan a jira ya gama."
+            ),
         )
+
         return
 
-    _backup_running = True
+    _film_backup_running = True
 
     source_conn = None
     dest_conn = None
@@ -3496,65 +3903,117 @@ def run_film_db_backup(bot, admin_id, progress_message=None):
     started_at = datetime.now()
 
     try:
-        source_url = os.environ.get("DATABASE_URL")
-        dest_url = os.environ.get("FILM_SUPABASE_DATABASE_URL")
+
+        source_url = os.environ.get(
+            "DATABASE_URL"
+        )
+
+        dest_url = os.environ.get(
+            "FILM_SUPABASE_DATABASE_URL"
+        )
 
         if not source_url:
-            raise RuntimeError("DATABASE_URL is not set")
 
-        if not dest_url:
             raise RuntimeError(
-                "FILM_SUPABASE_DATABASE_URL is not set"
+                "DATABASE_URL is not set"
             )
 
-        _safe_progress(
+        if not dest_url:
+
+            raise RuntimeError(
+                "FILM_SUPABASE_DATABASE_URL "
+                "is not set"
+            )
+
+        _film_backup_progress(
+
             bot,
+
             admin_id,
+
             progress_message,
+
             (
                 "🚀 <b>FILM DB BACKUP YA FARA</b>\n\n"
-                f"📚 Tables: <b>{TABLE_COUNT_EXPECTED}</b>\n"
-                f"📦 Batch: <b>{BATCH_SIZE}</b>\n"
-                "🔐 Source: DATABASE_URL\n"
-                "🎯 Destination: FILM_SUPABASE_DATABASE_URL\n\n"
+
+                f"📚 Tables: "
+                f"<b>{TABLE_COUNT_EXPECTED}</b>\n"
+
+                f"📦 Batch: "
+                f"<b>{BATCH_SIZE}</b>\n"
+
+                "🔐 Source: "
+                "DATABASE_URL\n"
+
+                "🎯 Destination: "
+                "FILM_SUPABASE_DATABASE_URL\n\n"
+
                 "⏳ Ana bude connections..."
             ),
+
             force=True,
         )
 
-        source_conn = _connect(
+        # ====================================================
+        # SOURCE
+        # ====================================================
+
+        source_conn = _film_backup_connect(
             source_url,
             "DATABASE_URL",
         )
 
-        dest_conn = _connect(
+        # ====================================================
+        # DESTINATION
+        # ====================================================
+
+        dest_conn = _film_backup_connect(
             dest_url,
             "FILM_SUPABASE_DATABASE_URL",
         )
 
-        # Source transaction gives us a consistent snapshot while the
-        # migration reads 50 rows at a time.
+        # ====================================================
+        # SCHEMA CHECK
+        # ====================================================
+
         source_conn.commit()
 
-        _validate_schema(
+        _film_backup_validate_schema(
             source_conn,
             dest_conn,
         )
 
-        _safe_progress(
+        _film_backup_progress(
+
             bot,
+
             admin_id,
+
             progress_message,
+
             (
                 "✅ <b>SCHEMA VERIFIED</b>\n\n"
-                f"📚 Tables: <b>{len(FILM_TABLES)}</b>\n"
-                f"📦 Batch size: <b>{BATCH_SIZE}</b>\n"
+
+                f"📚 Tables: "
+                f"<b>{len(FILM_TABLES)}</b>\n"
+
+                f"📦 Batch size: "
+                f"<b>{BATCH_SIZE}</b>\n"
+
                 "🔐 Columns: MATCH\n"
+
                 "🔑 Primary keys: MATCH\n"
-                "➡️ Za a fara data migration yanzu..."
+
+                "➡️ Za a fara "
+                "data migration yanzu..."
             ),
+
             force=True,
         )
+
+        # ====================================================
+        # ALL TABLES
+        # ====================================================
 
         grand_total = 0
         completed_tables = 0
@@ -3563,283 +4022,658 @@ def run_film_db_backup(bot, admin_id, progress_message=None):
             FILM_TABLES,
             start=1,
         ):
-            source_count, destination_count = _migrate_table(
+
+            (
+                source_count,
+                destination_count,
+            ) = _film_backup_migrate_table(
+
                 source_conn=source_conn,
+
                 dest_conn=dest_conn,
+
                 table=table,
+
                 progress=progress_message,
+
                 bot=bot,
+
                 admin_id=admin_id,
+
                 table_index=index,
+
                 total_tables=len(FILM_TABLES),
             )
 
             grand_total += source_count
+
             completed_tables += 1
 
-            _safe_progress(
+            _film_backup_progress(
+
                 bot,
+
                 admin_id,
+
                 progress_message,
+
                 (
                     "📚 <b>FILM DB BACKUP</b>\n\n"
-                    f"✅ Tables complete: <b>{completed_tables}/{len(FILM_TABLES)}</b>\n"
-                    f"📦 Rows verified so far: <b>{grand_total}</b>\n"
-                    f"📍 Last table: <b>{table}</b>\n\n"
-                    "➡️ Ana ci gaba da table na gaba..."
+
+                    f"✅ Tables complete: "
+                    f"<b>{completed_tables}/"
+                    f"{len(FILM_TABLES)}</b>\n"
+
+                    f"📦 Rows verified so far: "
+                    f"<b>{grand_total}</b>\n"
+
+                    f"📍 Last table: "
+                    f"<b>{table}</b>\n\n"
+
+                    "➡️ Ana ci gaba da "
+                    "table na gaba..."
                 ),
+
                 force=True,
             )
 
-        # Final global verification:
-        # every table count and every row has already been checked.
-        elapsed = datetime.now() - started_at
+        # ====================================================
+        # COMPLETE
+        # ====================================================
 
-        final_text = (
-            "🎉 <b>FILM DB BACKUP YA KAMMALA</b>\n\n"
-            f"📚 Tables: <b>{completed_tables}/{len(FILM_TABLES)}</b>\n"
-            f"📦 Total rows verified: <b>{grand_total}</b>\n"
-            f"📦 Batch size: <b>{BATCH_SIZE}</b>\n"
-            "🔐 IDs: <b>preserved</b>\n"
-            "🎬 Titles: <b>preserved</b>\n"
-            "💰 Prices: <b>preserved</b>\n"
-            "🔗 Group keys: <b>preserved</b>\n"
-            "📁 File IDs: <b>preserved</b>\n"
-            "📝 File names: <b>preserved</b>\n"
-            "🕒 Timestamps: <b>preserved</b>\n"
-            "🔄 Existing rows: <b>verified/repaired</b>\n"
-            "🚫 Duplicate migration rows: <b>0</b>\n"
-            "⏭️ Skipped source rows: <b>0</b>\n"
-            "🔎 Final verification: <b>PASS</b>\n"
-            f"⏱️ Time: <b>{elapsed}</b>\n\n"
-            "✅ Sabon Film DB ya zama exact mirror na tsohon Film DB."
+        elapsed = (
+            datetime.now()
+            - started_at
         )
 
-        _safe_progress(
+        final_text = (
+
+            "🎉 <b>FILM DB BACKUP "
+            "YA KAMMALA</b>\n\n"
+
+            f"📚 Tables: "
+            f"<b>{completed_tables}/"
+            f"{len(FILM_TABLES)}</b>\n"
+
+            f"📦 Total rows verified: "
+            f"<b>{grand_total}</b>\n"
+
+            f"📦 Batch size: "
+            f"<b>{BATCH_SIZE}</b>\n"
+
+            "🔐 IDs: "
+            "<b>preserved</b>\n"
+
+            "🎬 Titles: "
+            "<b>preserved</b>\n"
+
+            "💰 Prices: "
+            "<b>preserved</b>\n"
+
+            "🔗 Group keys: "
+            "<b>preserved</b>\n"
+
+            "📁 File IDs: "
+            "<b>preserved</b>\n"
+
+            "📝 File names: "
+            "<b>preserved</b>\n"
+
+            "🕒 Timestamps: "
+            "<b>preserved</b>\n"
+
+            "🔄 Existing rows: "
+            "<b>verified/repaired</b>\n"
+
+            "🚫 Duplicate migration rows: "
+            "<b>0</b>\n"
+
+            "⏭️ Skipped source rows: "
+            "<b>0</b>\n"
+
+            "🔎 Final verification: "
+            "<b>PASS</b>\n"
+
+            f"⏱️ Time: "
+            f"<b>{elapsed}</b>\n\n"
+
+            "✅ Sabon Film DB ya zama "
+            "exact mirror na tsohon Film DB."
+        )
+
+        _film_backup_progress(
+
             bot,
+
             admin_id,
+
             progress_message,
+
             final_text,
+
             force=True,
         )
 
-        print("🎉 FILM DB BACKUP COMPLETE")
-        print("Tables:", completed_tables)
-        print("Rows:", grand_total)
+        print(
+            "🎉 FILM DB BACKUP COMPLETE"
+        )
+
+        print(
+            "Tables:",
+            completed_tables,
+        )
+
+        print(
+            "Rows:",
+            grand_total,
+        )
 
     except Exception as e:
+
         if dest_conn:
+
             try:
                 dest_conn.rollback()
             except Exception:
                 pass
 
         error_text = (
-            "❌ <b>FILM DB BACKUP YA TSAYA</b>\n\n"
-            f"⚠️ Error:\n<code>{str(e)[:3500]}</code>\n\n"
-            "🔐 Tsohon DB ba a canza shi ba.\n"
-            "▶️ Za ka iya sake danna Film DB Backup; "
-            "system ɗin zai verify/repaire abin da ya riga ya shiga "
+
+            "❌ <b>FILM DB BACKUP "
+            "YA TSAYA</b>\n\n"
+
+            "⚠️ Error:\n"
+
+            f"<code>{str(e)[:3500]}</code>\n\n"
+
+            "🔐 Tsohon DB ba a canza shi ba.\n\n"
+
+            "▶️ Za ka iya sake danna "
+            "Film DB Backup.\n"
+
+            "System ɗin zai verify/repaire "
+            "abin da ya riga ya shiga "
             "kuma ya ci gaba lafiya."
         )
 
         if progress_message:
-            _safe_progress(
+
+            _film_backup_progress(
+
                 bot,
+
                 admin_id,
+
                 progress_message,
+
                 error_text,
+
                 force=True,
             )
+
         else:
-            _send_admin(
+
+            _film_backup_send_admin(
                 bot,
                 admin_id,
                 error_text,
             )
 
-        print("❌ FILM DB BACKUP ERROR:", repr(e))
+        print(
+            "❌ FILM DB BACKUP ERROR:",
+            repr(e),
+        )
 
     finally:
+
         if source_conn:
+
             try:
                 source_conn.close()
             except Exception:
                 pass
 
         if dest_conn:
+
             try:
                 dest_conn.close()
             except Exception:
                 pass
 
-        _backup_running = False
+        _film_backup_running = False
 
         try:
-            _backup_lock.release()
+            _film_backup_lock.release()
         except Exception:
             pass
 
 
 # ============================================================
-# TELEGRAM UI / CALLBACK INTEGRATION
+# /newbutton
 # ============================================================
 
-def register_film_db_backup(bot, admin_id):
-    """
-    Adds the exact button flow shown in the user's screenshot.
+@bot.message_handler(
+    commands=["newbutton"]
+)
+def newbutton_film_db(message):
 
-    Existing menu button:
-        callback_data="backup_film_db"
+    # ========================================================
+    # ADMIN KAWAI
+    # ========================================================
 
-    Then:
-        Film DB -> Yes / No -> start backup
-    """
+    if message.from_user.id != ADMIN_ID:
 
-    from telebot import types
+        bot.reply_to(
+            message,
+            "❌ Ba ka da izinin amfani da wannan."
+        )
 
-    @bot.callback_query_handler(
-        func=lambda call: call.data == "backup_film_db"
+        return
+
+    # ========================================================
+    # BUTTON
+    # ========================================================
+
+    kb = types.InlineKeyboardMarkup()
+
+    kb.add(
+        types.InlineKeyboardButton(
+            "🎬 Film DB",
+            callback_data="backup_film_db",
+        )
     )
-    def film_db_backup_ask(call):
-        if call.from_user.id != admin_id:
-            try:
-                bot.answer_callback_query(
-                    call.id,
-                    "Ba ka da izinin wannan aikin.",
-                    show_alert=True,
-                )
-            except Exception:
-                pass
-            return
+
+    bot.send_message(
+
+        message.chat.id,
+
+        "👇 Danna nan domin fara "
+        "aikin Film DB:",
+
+        reply_markup=kb,
+    )
+
+
+print(
+    "✅ /newbutton FILM DB READY"
+)
+
+
+# ============================================================
+# FILM DB BUTTON
+# ============================================================
+
+@bot.callback_query_handler(
+    func=lambda call:
+        call.data == "backup_film_db"
+)
+def film_db_backup_button(call):
+
+    # ========================================================
+    # ADMIN KAWAI
+    # ========================================================
+
+    if call.from_user.id != ADMIN_ID:
 
         try:
-            bot.answer_callback_query(call.id)
+
+            bot.answer_callback_query(
+                call.id,
+                "Ba ka da izinin wannan aikin.",
+                show_alert=True,
+            )
+
         except Exception:
             pass
 
-        kb = types.InlineKeyboardMarkup()
-        kb.row(
-            types.InlineKeyboardButton(
-                "✅ YES — Fara Backup",
-                callback_data="film_backup_confirm_yes",
+        return
+
+    try:
+
+        bot.answer_callback_query(
+            call.id
+        )
+
+    except Exception:
+        pass
+
+    # ========================================================
+    # YES / NO
+    # ========================================================
+
+    kb = types.InlineKeyboardMarkup()
+
+    kb.row(
+
+        types.InlineKeyboardButton(
+            "✅ YES — Fara Backup",
+            callback_data=
+                "film_backup_confirm_yes",
+        ),
+
+        types.InlineKeyboardButton(
+            "❌ NO — Kar a fara",
+            callback_data=
+                "film_backup_confirm_no",
+        ),
+    )
+
+    try:
+
+        bot.send_message(
+
+            ADMIN_ID,
+
+            (
+                "⚠️ <b>FIM DB BACKUP</b>\n\n"
+
+                "Kana son mu fara Backup "
+                "na Film DB yanzu?\n\n"
+
+                "System ɗin zai:\n"
+
+                "• debo tables 24 gaba ɗaya\n"
+
+                "• debo rows 50-50\n"
+
+                "• kiyaye IDs da duk columns\n"
+
+                "• ba zai haɗa films saboda "
+                "suna iri ɗaya ba\n"
+
+                "• group_key ba zai zama "
+                "matching condition ba\n"
+
+                "• ya gyara destination idan "
+                "row ta bambanta\n"
+
+                "• ya tabbatar kowane batch "
+                "kafin ya ci gaba\n"
+
+                "• ya verify kowane table "
+                "bayan an gama\n"
+
+                "• ya ci gaba lafiya idan aka "
+                "sake kunna backup\n\n"
+
+                "🔐 Tsohon DB ba za a taba "
+                "shi ba."
             ),
-            types.InlineKeyboardButton(
-                "❌ NO — Kar a fara",
-                callback_data="film_backup_confirm_no",
+
+            reply_markup=kb,
+
+            parse_mode="HTML",
+        )
+
+    except Exception as e:
+
+        print(
+            "❌ Confirmation message error:",
+            repr(e),
+        )
+
+
+# ============================================================
+# NO — CANCEL BACKUP
+# ============================================================
+
+@bot.callback_query_handler(
+    func=lambda call:
+        call.data == "film_backup_confirm_no"
+)
+def film_db_backup_no(call):
+
+    if call.from_user.id != ADMIN_ID:
+
+        try:
+
+            bot.answer_callback_query(
+                call.id,
+                "Ba ka da izini.",
+                show_alert=True,
+            )
+
+        except Exception:
+            pass
+
+        return
+
+    try:
+
+        bot.answer_callback_query(
+            call.id,
+            "An soke backup.",
+        )
+
+    except Exception:
+        pass
+
+    try:
+
+        bot.edit_message_text(
+
+            "❌ <b>Film DB Backup "
+            "an soke.</b>",
+
+            chat_id=ADMIN_ID,
+
+            message_id=call.message.message_id,
+
+            parse_mode="HTML",
+        )
+
+    except Exception as e:
+
+        print(
+            "⚠️ Cancel edit error:",
+            repr(e),
+        )
+
+
+# ============================================================
+# YES — START BACKUP
+# ============================================================
+
+@bot.callback_query_handler(
+    func=lambda call:
+        call.data == "film_backup_confirm_yes"
+)
+def film_db_backup_yes(call):
+
+    global _film_backup_running
+
+    # ========================================================
+    # ADMIN KAWAI
+    # ========================================================
+
+    if call.from_user.id != ADMIN_ID:
+
+        try:
+
+            bot.answer_callback_query(
+                call.id,
+                "Ba ka da izini.",
+                show_alert=True,
+            )
+
+        except Exception:
+            pass
+
+        return
+
+    try:
+
+        bot.answer_callback_query(
+            call.id,
+            "An fara Film DB Backup...",
+        )
+
+    except Exception:
+        pass
+
+    # ========================================================
+    # CHECK IF ALREADY RUNNING
+    # ========================================================
+
+    if _film_backup_running:
+
+        try:
+
+            bot.send_message(
+
+                ADMIN_ID,
+
+                (
+                    "⚠️ <b>Film DB Backup</b>\n\n"
+                    "Wani backup yana gudana yanzu."
+                ),
+
+                parse_mode="HTML",
+            )
+
+        except Exception:
+            pass
+
+        return
+
+    # ========================================================
+    # PROGRESS MESSAGE
+    # ========================================================
+
+    try:
+
+        progress = bot.edit_message_text(
+
+            (
+                "🚀 <b>FILM DB BACKUP</b>\n\n"
+
+                "⏳ Ana shirya migration...\n"
+
+                f"📦 Batch size: "
+                f"<b>{BATCH_SIZE}</b>\n"
+
+                f"📚 Tables: "
+                f"<b>{len(FILM_TABLES)}</b>"
+            ),
+
+            chat_id=ADMIN_ID,
+
+            message_id=call.message.message_id,
+
+            parse_mode="HTML",
+        )
+
+    except Exception as e:
+
+        print(
+            "⚠️ Progress edit error:",
+            repr(e),
+        )
+
+        progress = _film_backup_send_admin(
+
+            bot,
+
+            ADMIN_ID,
+
+            (
+                "🚀 <b>FILM DB BACKUP</b>\n\n"
+                "⏳ Ana shirya migration..."
             ),
         )
 
+    # ========================================================
+    # START BACKUP IN BACKGROUND
+    #
+    # WANNAN SHI NE MUHIMMIN GYARA.
+    #
+    # Ba za mu gudanar da babban DB migration
+    # kai tsaye a callback handler ba.
+    #
+    # Thread zai sa Telegram bot ya ci gaba da
+    # amsa users yayin backup.
+    # ========================================================
+
+    try:
+
+        _film_backup_running = True
+
+        # Lock din yana nan domin run function ya sake tabbatarwa.
+        # Saboda mun riga mun sa running=True, za mu fara thread
+        # ta hanyar worker na musamman.
+
+        def _start_film_backup_worker():
+
+            global _film_backup_running
+
+            # A nan run function din zai yi aikin database.
+            #
+            # Mun riga mun tabbatar callback guda daya ne.
+            #
+            # Lock din zai rike aikin har sai an gama.
+
+            _film_backup_running = False
+
+            _film_backup_run(
+                bot=bot,
+                admin_id=ADMIN_ID,
+                progress_message=progress,
+            )
+
+        # ====================================================
+        # KADAN KAWAI:
+        #
+        # Idan muka bar _film_backup_running=True kafin
+        # _film_backup_run(), lock checker zai dauka wani
+        # backup yana gudana.
+        #
+        # Saboda haka worker din zai sake saita shi False
+        # kafin run.
+        # ====================================================
+
+        threading.Thread(
+            target=_start_film_backup_worker,
+            daemon=True,
+            name="FilmDBBackupWorker",
+        ).start()
+
+        print(
+            "🚀 Film DB backup worker started."
+        )
+
+    except Exception as e:
+
+        _film_backup_running = False
+
+        print(
+            "❌ Could not start Film DB worker:",
+            repr(e),
+        )
+
         try:
+
             bot.send_message(
-                admin_id,
+
+                ADMIN_ID,
+
                 (
-                    "⚠️ <b>FIM DB BACKUP</b>\n\n"
-                    "Kana son mu fara Backup na Film DB yanzu?\n\n"
-                    "System ɗin zai:\n"
-                    "• debo tables 24 gaba ɗaya\n"
-                    "• debo rows 50-50\n"
-                    "• kiyaye IDs da duk columns\n"
-                    "• ba zai haɗa films saboda suna iri ɗaya ba\n"
-                    "• group_key ba zai zama matching condition ba\n"
-                    "• ya gyara destination idan row ta bambanta\n"
-                    "• ya tabbatar kowane batch kafin ya ci gaba\n"
-                    "• ya verify kowane table bayan an gama\n"
-                    "• ya ci gaba lafiya idan an sake kunna bot\n\n"
-                    "Tsohon DB ba za a taba shi ba."
+                    "❌ <b>Ba a iya fara "
+                    "Film DB Backup ba.</b>\n\n"
+
+                    f"<code>{str(e)[:2000]}</code>"
                 ),
-                reply_markup=kb,
-            )
-        except Exception as e:
-            print("❌ Confirmation message error:", repr(e))
 
-    @bot.callback_query_handler(
-        func=lambda call: call.data == "film_backup_confirm_no"
-    )
-    def film_db_backup_no(call):
-        if call.from_user.id != admin_id:
-            try:
-                bot.answer_callback_query(
-                    call.id,
-                    "Ba ka da izini.",
-                    show_alert=True,
-                )
-            except Exception:
-                pass
-            return
-
-        try:
-            bot.answer_callback_query(
-                call.id,
-                "An soke backup.",
+                parse_mode="HTML",
             )
+
         except Exception:
             pass
 
-        try:
-            bot.edit_message_text(
-                "❌ <b>Film DB Backup an soke.</b>",
-                chat_id=admin_id,
-                message_id=call.message.message_id,
-            )
-        except Exception:
-            pass
 
-    @bot.callback_query_handler(
-        func=lambda call: call.data == "film_backup_confirm_yes"
-    )
-    def film_db_backup_yes(call):
-        if call.from_user.id != admin_id:
-            try:
-                bot.answer_callback_query(
-                    call.id,
-                    "Ba ka da izini.",
-                    show_alert=True,
-                )
-            except Exception:
-                pass
-            return
+print(
+    "✅ FILM DB BACKUP SYSTEM READY"
+)
 
-        try:
-            bot.answer_callback_query(
-                call.id,
-                "An fara Film DB Backup...",
-            )
-        except Exception:
-            pass
-
-        global _backup_running
-
-        if _backup_running:
-            try:
-                bot.send_message(
-                    admin_id,
-                    "⚠️ Wani Film DB Backup yana gudana yanzu.",
-                )
-            except Exception:
-                pass
-            return
-
-        try:
-            progress = bot.edit_message_text(
-                (
-                    "🚀 <b>FILM DB BACKUP</b>\n\n"
-                    "⏳ Ana shirya migration...\n"
-                    f"📦 Batch size: <b>{BATCH_SIZE}</b>\n"
-                    f"📚 Tables: <b>{len(FILM_TABLES)}</b>"
-                ),
-                chat_id=admin_id,
-                message_id=call.message.message_id,
-            )
-        except Exception:
-            progress = _send_admin(
-                bot,
-                admin_id,
-                (
-                    "🚀 <b>FILM DB BACKUP</b>\n\n"
-                    "⏳ Ana shirya migration..."
-                ),
-            )
 
 
 
@@ -14719,7 +15553,7 @@ def weekly_sales():
     )
 
 
-## ================= AUTOMATIC MONTHLY (GROUP) =================
+# ================= AUTOMATIC MONTHLY (GROUP) =================
 def monthly_sales():
     now = _ng_now()
     since = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
