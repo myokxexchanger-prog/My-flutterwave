@@ -2532,6 +2532,40 @@ def deliver_items(call):
 
     send_feedback_prompt(user_id, order_id)
 
+# ============================================================
+# /newbutton — FILM DB BACKUP BUTTON
+# ============================================================
+
+@bot.message_handler(commands=["newbutton"])
+def newbutton_film_db(message):
+
+    # ADMIN KAWAI
+    if message.from_user.id != ADMIN_ID:
+        bot.reply_to(
+            message,
+            "❌ Ba ka da izinin amfani da wannan."
+        )
+        return
+
+    kb = types.InlineKeyboardMarkup()
+
+    kb.add(
+        types.InlineKeyboardButton(
+            "🎬 Film DB",
+            callback_data="backup_film_db"
+        )
+    )
+
+    bot.send_message(
+        message.chat.id,
+        "👇 Danna nan domin fara aikin Film DB:",
+        reply_markup=kb
+    )
+
+
+print("✅ /newbutton FILM DB READY")
+
+
 # -*- coding: utf-8 -*-
 """
 FILM DB BACKUP / MIGRATION SYSTEM
