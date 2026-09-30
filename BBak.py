@@ -82,16 +82,28 @@ def get_film_supabase_conn():
 
         film_supabase_connection.autocommit = True
 
+        print("✅ FILM SUPABASE CONNECTION SUCCESSFUL")
+
         return film_supabase_connection
 
     except Exception as e:
-
         print(
             "❌ FILM SUPABASE CONNECTION ERROR:",
             repr(e)
         )
+        raise
 
-        return None
+
+# ============================================================
+# FILM SUPABASE CONNECTION + CURSOR
+# ============================================================
+
+film_supabase_conn = get_film_supabase_conn()
+
+film_supabase_cur = film_supabase_conn.cursor()
+
+print("✅ FILM SUPABASE CURSOR READY")
+
 # ============================================================
 # SUPABASE WALLET DATABASE
 # DEDICATED CONNECTION — COMPLETELY SEPARATE
