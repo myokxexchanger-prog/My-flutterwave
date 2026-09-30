@@ -2531,6 +2531,953 @@ def deliver_items(call):
 
     send_feedback_prompt(user_id, order_id)
 
+import os
+import time
+import json
+import html
+import threading
+import traceback
+from decimal import Decimal
+from datetime import date, datetime, time as dt_time
+from uuid import UUID
+
+import psycopg2
+from psycopg2 import sql
+from psycopg2.extras import Json
+from psycopg2.extensions import ISOLATION_LEVEL_REPEATABLE_READ
+from telebot import types
+
+
+# ============================================================
+# SETTINGS
+# ============================================================
+FILM_BACKUP_BATCH_SIZE = 50
+FILM_MIGRATION_STATE_TABLE = "film_db_migration_state"
+FILM_MIGRATION_INTERNAL_TABLES = {FILM_MIGRATION_STATE_TABLE}
+FILM_BACKUP_THREAD_LOCK = threading.Lock()
+
+FILM_TABLE_PRIORITY = [
+    "items", "users", "orders", "order_items",
+    "user_movies", "vip_members",
+]
+
+
+def _safe_html(value, limit=3500):
+    return html.escape(str(value))[:limit]
+
+
+def film_backup_edit(chat_id, message_id, text):
+    try:
+        bot.edit_message_text(
+            text, chat_id=chat_id, message_id=message_id,
+            parse_mode="HTML"
+        )
+        return True
+    except Exception as e:
+        print("⚠️ FILM BACKUP EDIT ERROR:", repr(e))
+        return False
+
+
+def film_backup_admin(text):
+    try:
+        bot.send_message(ADMIN_ID, text, parse_mode="HTML")
+    except Exception as e:
+        print("⚠️ ADMIN BACKUP MESSAGE ERROR:", repr(e))
+
+
+def film_get_source_conn():
+    url = os.getenv("DATABASE_URL")
+    if not url:
+        raise RuntimeError("DATABASE_URL is missing. It must be the SOURCE Film DB.")
+    try:
+        conn = psycopg2.connect(url, connect_timeout=20)
+        conn.set_session(
+            isolation_level=ISOLATION_LEVEL_REPEATABLE_READ,
+            readonly=True,
+            autocommit=False,
+        )
+        # Establish the consistent source snapshot now.
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+        return conn
+    except Exception as e:
+        raise RuntimeError("Could not connect to SOURCE DATABASE_URL: " + str(e))
+
+
+def film_get_destination_conn():
+    url = os.getenv("FILM_SUPABASE_DATABASE_URL")
+    if not url:
+        raise RuntimeError(
+            "FILM_SUPABASE_DATABASE_URL is missing. It must be the DESTINATION Film DB."
+        )
+    try:
+        conn = psycopg2.connect(url, connect_timeout=20)
+        conn.autocommit = True
+        return conn
+    except Exception as e:
+        raise RuntimeError(
+            "Could not connect to DESTINATION FILM_SUPABASE_DATABASE_URL: " + str(e)
+        )
+
+
+def film_create_state_table(conn):
+    with conn.cursor() as cur:
+        cur.execute(sql.SQL("""
+            CREATE TABLE IF NOT EXISTS {} (
+                table_name TEXT PRIMARY KEY,
+                status TEXT NOT NULL DEFAULT 'pending',
+                last_pk JSONB,
+                offset_value BIGINT NOT NULL DEFAULT 0,
+                rows_processed BIGINT NOT NULL DEFAULT 0,
+                rows_inserted BIGINT NOT NULL DEFAULT 0,
+                rows_skipped BIGINT NOT NULL DEFAULT 0,
+                rows_failed BIGINT NOT NULL DEFAULT 0,
+                started_at TIMESTAMPTZ,
+                updated_at TIMESTAMPTZ DEFAULT NOW(),
+                finished_at TIMESTAMPTZ,
+                error TEXT
+            )
+        """).format(sql.Identifier(FILM_MIGRATION_STATE_TABLE)))
+
+
+def film_get_state(conn, table_name):
+    with conn.cursor() as cur:
+        cur.execute(sql.SQL("""
+            SELECT table_name,status,last_pk,offset_value,rows_processed,
+                   rows_inserted,rows_skipped,rows_failed,started_at,
+                   updated_at,finished_at,error
+            FROM {} WHERE table_name=%s
+        """).format(sql.Identifier(FILM_MIGRATION_STATE_TABLE)), (table_name,))
+        r = cur.fetchone()
+    if not r:
+        return None
+    return {
+        "table_name": r[0], "status": r[1], "last_pk": r[2],
+        "offset_value": r[3], "rows_processed": r[4],
+        "rows_inserted": r[5], "rows_skipped": r[6], "rows_failed": r[7],
+        "started_at": r[8], "updated_at": r[9], "finished_at": r[10],
+        "error": r[11],
+    }
+
+
+def film_save_state(conn, table_name, status="pending", last_pk=None,
+                    offset_value=0, rows_processed=0, rows_inserted=0,
+                    rows_skipped=0, rows_failed=0, error=None, finished=False):
+    # JSONB cannot directly serialize UUID/date/Decimal/bytes.  We store
+    # checkpoint values as JSON-safe strings; the fetch query casts them back
+    # to each PK column's PostgreSQL type.
+    with conn.cursor() as cur:
+        cur.execute(sql.SQL("""
+            INSERT INTO {} (
+                table_name,status,last_pk,offset_value,rows_processed,
+                rows_inserted,rows_skipped,rows_failed,started_at,updated_at,
+                finished_at,error
+            ) VALUES (
+                %s,%s,%s,%s,%s,%s,%s,%s,NOW(),NOW(),
+                CASE WHEN %s THEN NOW() ELSE NULL END,%s
+            )
+            ON CONFLICT (table_name) DO UPDATE SET
+                status=EXCLUDED.status,
+                last_pk=EXCLUDED.last_pk,
+                offset_value=EXCLUDED.offset_value,
+                rows_processed=EXCLUDED.rows_processed,
+                rows_inserted=EXCLUDED.rows_inserted,
+                rows_skipped=EXCLUDED.rows_skipped,
+                rows_failed=EXCLUDED.rows_failed,
+                updated_at=NOW(),
+                finished_at=CASE WHEN %s THEN NOW() ELSE {}.finished_at END,
+                error=EXCLUDED.error
+        """).format(
+            sql.Identifier(FILM_MIGRATION_STATE_TABLE),
+            sql.Identifier(FILM_MIGRATION_STATE_TABLE),
+        ), (
+            table_name, status,
+            Json(last_pk, dumps=lambda obj: json.dumps(obj, default=str)) if last_pk is not None else None,
+            int(offset_value or 0), int(rows_processed or 0),
+            int(rows_inserted or 0), int(rows_skipped or 0), int(rows_failed or 0),
+            bool(finished), error, bool(finished),
+        ))
+
+
+def film_get_tables(conn):
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT table_name
+            FROM information_schema.tables
+            WHERE table_schema='public' AND table_type='BASE TABLE'
+            ORDER BY table_name
+        """)
+        return [r[0] for r in cur.fetchall()
+                if r[0] not in FILM_MIGRATION_INTERNAL_TABLES]
+
+
+def film_get_columns(conn, table_name):
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT
+                c.column_name,
+                c.ordinal_position,
+                c.data_type,
+                c.udt_name,
+                c.is_nullable,
+                c.column_default,
+                c.is_identity,
+                c.identity_generation,
+                c.is_generated,
+                c.generation_expression,
+                c.character_maximum_length,
+                c.numeric_precision,
+                c.numeric_scale,
+                c.datetime_precision,
+                format_type(a.atttypid, a.atttypmod) AS pg_type
+            FROM information_schema.columns c
+            JOIN pg_catalog.pg_namespace n
+              ON n.nspname=c.table_schema
+            JOIN pg_catalog.pg_class t
+              ON t.relnamespace=n.oid AND t.relname=c.table_name
+            JOIN pg_catalog.pg_attribute a
+              ON a.attrelid=t.oid AND a.attname=c.column_name
+            WHERE c.table_schema='public' AND c.table_name=%s
+            ORDER BY c.ordinal_position
+        """, (table_name,))
+        rows = cur.fetchall()
+    return [{
+        "name": r[0], "ordinal": r[1], "data_type": r[2], "udt_name": r[3],
+        "nullable": r[4], "default": r[5], "is_identity": r[6],
+        "identity_generation": r[7], "is_generated": r[8],
+        "generation_expression": r[9], "character_maximum_length": r[10],
+        "numeric_precision": r[11], "numeric_scale": r[12],
+        "datetime_precision": r[13], "pg_type": r[14],
+    } for r in rows]
+
+
+def film_insertable_columns(columns):
+    return [c for c in columns if c["is_generated"] != "ALWAYS"]
+
+
+def film_get_primary_key(conn, table_name):
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT kcu.column_name
+            FROM information_schema.table_constraints tc
+            JOIN information_schema.key_column_usage kcu
+              ON tc.constraint_name=kcu.constraint_name
+             AND tc.table_schema=kcu.table_schema
+             AND tc.table_name=kcu.table_name
+            WHERE tc.table_schema='public' AND tc.table_name=%s
+              AND tc.constraint_type='PRIMARY KEY'
+            ORDER BY kcu.ordinal_position
+        """, (table_name,))
+        return [r[0] for r in cur.fetchall()]
+
+
+def film_get_foreign_keys(conn):
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT
+                child.relname AS child_table,
+                parent.relname AS parent_table
+            FROM pg_constraint c
+            JOIN pg_class child ON child.oid=c.conrelid
+            JOIN pg_class parent ON parent.oid=c.confrelid
+            JOIN pg_namespace child_ns ON child_ns.oid=child.relnamespace
+            JOIN pg_namespace parent_ns ON parent_ns.oid=parent.relnamespace
+            WHERE c.contype='f'
+              AND child_ns.nspname='public'
+              AND parent_ns.nspname='public'
+        """)
+        return cur.fetchall()
+
+
+def film_get_fk_signature(conn, table_name):
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT
+                c.conname,
+                child.relname,
+                parent.relname,
+                ARRAY(
+                    SELECT a.attname
+                    FROM pg_attribute a
+                    WHERE a.attrelid=c.conrelid
+                      AND a.attnum=ANY(c.conkey)
+                    ORDER BY array_position(c.conkey,a.attnum)
+                ),
+                ARRAY(
+                    SELECT a.attname
+                    FROM pg_attribute a
+                    WHERE a.attrelid=c.confrelid
+                      AND a.attnum=ANY(c.confkey)
+                    ORDER BY array_position(c.confkey,a.attnum)
+                ),
+                c.confupdtype,c.confdeltype,c.confmatchtype
+            FROM pg_constraint c
+            JOIN pg_class child ON child.oid=c.conrelid
+            JOIN pg_class parent ON parent.oid=c.confrelid
+            JOIN pg_namespace n ON n.oid=child.relnamespace
+            WHERE c.contype='f' AND n.nspname='public'
+              AND child.relname=%s
+            ORDER BY c.conname
+        """, (table_name,))
+        return [tuple(r) for r in cur.fetchall()]
+
+
+def film_get_pk_signature(conn, table_name):
+    return tuple(film_get_primary_key(conn, table_name))
+
+
+def film_order_tables(conn, tables):
+    foreign_keys = film_get_foreign_keys(conn)
+    dependencies = {t: set() for t in tables}
+    for child, parent in foreign_keys:
+        if child in dependencies and parent in dependencies and child != parent:
+            dependencies[child].add(parent)
+    ordered, remaining = [], set(tables)
+    while remaining:
+        ready = [t for t in remaining if dependencies[t].isdisjoint(remaining)]
+        if not ready:
+            raise RuntimeError(
+                "Foreign-key dependency cycle detected: " + ", ".join(sorted(remaining))
+            )
+        ready.sort(key=lambda x: (
+            FILM_TABLE_PRIORITY.index(x) if x in FILM_TABLE_PRIORITY else 9999, x
+        ))
+        for t in ready:
+            ordered.append(t)
+            remaining.remove(t)
+    return ordered
+
+
+def film_compare_schema(source_conn, destination_conn, table_name):
+    sc = film_get_columns(source_conn, table_name)
+    dc = film_get_columns(destination_conn, table_name)
+    def sig(cols):
+        return [(
+            c["name"], c["ordinal"], c["pg_type"], c["nullable"], c["default"],
+            c["is_identity"], c["identity_generation"], c["is_generated"],
+            c["generation_expression"], c["character_maximum_length"],
+            c["numeric_precision"], c["numeric_scale"], c["datetime_precision"],
+        ) for c in cols]
+    if sig(sc) != sig(dc):
+        raise RuntimeError(
+            f"Schema mismatch in table '{table_name}'.\n\n"
+            f"SOURCE columns:\n{sig(sc)}\n\nDESTINATION columns:\n{sig(dc)}"
+        )
+    spk = film_get_pk_signature(source_conn, table_name)
+    dpk = film_get_pk_signature(destination_conn, table_name)
+    if spk != dpk:
+        raise RuntimeError(
+            f"Primary-key mismatch in '{table_name}'. SOURCE={spk}, DESTINATION={dpk}"
+        )
+    sfk = film_get_fk_signature(source_conn, table_name)
+    dfk = film_get_fk_signature(destination_conn, table_name)
+    # Constraint names can legitimately differ; compare relationship definitions.
+    def normalize_fk(items):
+        return sorted((x[1], x[2], tuple(x[3] or []), tuple(x[4] or []), x[5], x[6], x[7]) for x in items)
+    if normalize_fk(sfk) != normalize_fk(dfk):
+        raise RuntimeError(
+            f"Foreign-key mismatch in '{table_name}'.\n"
+            f"SOURCE={normalize_fk(sfk)}\nDESTINATION={normalize_fk(dfk)}"
+        )
+    return sc
+
+
+def film_table_exists(conn, table_name):
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT 1 FROM information_schema.tables
+            WHERE table_schema='public' AND table_name=%s LIMIT 1
+        """, (table_name,))
+        return cur.fetchone() is not None
+
+
+def film_row_dict(columns, row):
+    return dict(zip([c["name"] for c in columns], row))
+
+
+def film_exact_pk_row_exists(conn, table_name, columns, pk_columns, row):
+    values = film_row_dict(columns, row)
+    pk_where = [sql.SQL("{} IS NOT DISTINCT FROM %s").format(sql.Identifier(pk))
+                for pk in pk_columns]
+    compare_where = [sql.SQL("{} IS NOT DISTINCT FROM %s").format(sql.Identifier(c["name"]))
+                     for c in columns if c["is_generated"] != "ALWAYS"]
+    params = [values.get(pk) for pk in pk_columns] + [values.get(c["name"]) for c in columns if c["is_generated"] != "ALWAYS"]
+    with conn.cursor() as cur:
+        cur.execute(sql.SQL("SELECT 1 FROM public.{} WHERE {} LIMIT 1").format(
+            sql.Identifier(table_name), sql.SQL(" AND ").join(pk_where + compare_where)
+        ), tuple(params))
+        return cur.fetchone() is not None
+
+
+def film_pk_exists(conn, table_name, columns, pk_columns, row):
+    values = film_row_dict(columns, row)
+    parts = [sql.SQL("{} IS NOT DISTINCT FROM %s").format(sql.Identifier(pk)) for pk in pk_columns]
+    with conn.cursor() as cur:
+        cur.execute(sql.SQL("SELECT 1 FROM public.{} WHERE {} LIMIT 1").format(
+            sql.Identifier(table_name), sql.SQL(" AND ").join(parts)
+        ), tuple(values.get(pk) for pk in pk_columns))
+        return cur.fetchone() is not None
+
+
+def film_exact_row_count(conn, table_name, columns, row):
+    parts, params = [], []
+    for c, value in zip(columns, row):
+        if c["is_generated"] == "ALWAYS":
+            continue
+        parts.append(sql.SQL("{} IS NOT DISTINCT FROM %s").format(sql.Identifier(c["name"])))
+        params.append(value)
+    with conn.cursor() as cur:
+        cur.execute(sql.SQL("SELECT COUNT(*) FROM public.{} WHERE {}").format(
+            sql.Identifier(table_name), sql.SQL(" AND ").join(parts)
+        ), tuple(params))
+        return int(cur.fetchone()[0])
+
+
+def _json_safe_pk(values):
+    return [None if v is None else str(v) for v in values]
+
+
+def film_pk_cast_params(pk_columns, columns, last_pk):
+    by_name = {c["name"]: c for c in columns}
+    params = []
+    casts = []
+    for name, value in zip(pk_columns, last_pk):
+        c = by_name[name]
+        # format_type is generated by PostgreSQL, not user input.
+        casts.append(sql.SQL("CAST(%s AS {})").format(sql.SQL(c["pg_type"])))
+        params.append(value)
+    return casts, params
+
+
+def film_fetch_batch(source_conn, table_name, columns, pk_columns, state):
+    names = [c["name"] for c in columns if c["is_generated"] != "ALWAYS"]
+    if not names:
+        return []
+    select_cols = sql.SQL(", ").join(sql.Identifier(n) for n in names)
+    params = []
+    if pk_columns:
+        order_sql = sql.SQL(", ").join(sql.Identifier(pk) for pk in pk_columns)
+        where_sql = sql.SQL("")
+        last_pk = state.get("last_pk")
+        if last_pk:
+            casts, cast_params = film_pk_cast_params(pk_columns, columns, last_pk)
+            left = sql.SQL(", ").join(sql.Identifier(pk) for pk in pk_columns)
+            right = sql.SQL(", ").join(casts)
+            where_sql = sql.SQL(" WHERE ({}) > ({})").format(left, right)
+            params.extend(cast_params)
+        query = sql.SQL("""
+            SELECT {} FROM public.{} {} ORDER BY {} LIMIT %s
+        """).format(select_cols, sql.Identifier(table_name), where_sql, order_sql)
+        params.append(FILM_BACKUP_BATCH_SIZE)
+    else:
+        # No-PK tables cannot safely resume by ctid across a restart.
+        # We intentionally re-scan from offset 0 on a new process and use
+        # multiset-safe exact-row counts, so duplicates are preserved.
+        offset = int(state.get("offset_value") or 0)
+        query = sql.SQL("""
+            SELECT {} FROM public.{} ORDER BY ctid LIMIT %s OFFSET %s
+        """).format(select_cols, sql.Identifier(table_name))
+        params.extend([FILM_BACKUP_BATCH_SIZE, offset])
+    with source_conn.cursor() as cur:
+        cur.execute(query, tuple(params))
+        return cur.fetchall()
+
+
+def film_insert_row(conn, table_name, insertable_columns, row):
+    names = [c["name"] for c in insertable_columns]
+    if not names:
+        return
+    identity_always = any(
+        c["is_identity"] == "YES" and c["identity_generation"] == "ALWAYS"
+        for c in insertable_columns
+    )
+    overriding = sql.SQL(" OVERRIDING SYSTEM VALUE") if identity_always else sql.SQL("")
+    query = sql.SQL("INSERT INTO public.{} ({}){} VALUES ({})").format(
+        sql.Identifier(table_name),
+        sql.SQL(", ").join(sql.Identifier(n) for n in names),
+        overriding,
+        sql.SQL(", ").join(sql.Placeholder() for _ in names),
+    )
+    with conn.cursor() as cur:
+        cur.execute(query, tuple(row))
+
+
+def film_fix_sequences(conn, table_name):
+    columns = film_get_columns(conn, table_name)
+    with conn.cursor() as cur:
+        for c in columns:
+            col = c["name"]
+            cur.execute("SELECT pg_get_serial_sequence(%s,%s)", (f"public.{table_name}", col))
+            r = cur.fetchone()
+            if not r or not r[0]:
+                continue
+            seq = r[0]
+            cur.execute(sql.SQL("SELECT MAX({}) FROM public.{}").format(
+                sql.Identifier(col), sql.Identifier(table_name)
+            ))
+            max_value = cur.fetchone()[0]
+            if max_value is None:
+                cur.execute("SELECT setval(%s::regclass,1,false)", (seq,))
+            else:
+                cur.execute("SELECT setval(%s::regclass,%s,true)", (seq, max_value))
+
+
+def film_count(conn, table_name):
+    with conn.cursor() as cur:
+        cur.execute(sql.SQL("SELECT COUNT(*) FROM public.{}").format(sql.Identifier(table_name)))
+        return int(cur.fetchone()[0])
+
+
+def film_get_counts(conn, tables):
+    return {t: film_count(conn, t) for t in tables}
+
+
+def film_progress_text(table_name, table_number, total_tables, total_rows,
+                       processed, inserted, skipped, failed, current_batch,
+                       status="RUNNING 🟢"):
+    percent = (processed / total_rows * 100) if total_rows else 100
+    return (
+        "🎬 <b>FILM DATABASE MIGRATION</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "🟢 SOURCE: <b>DATABASE_URL</b>\n"
+        "🔵 DESTINATION: <b>FILM_SUPABASE_DATABASE_URL</b>\n\n"
+        f"📋 Table: <b>{_safe_html(table_name, 200)}</b>\n"
+        f"📊 Table: {table_number}/{total_tables}\n"
+        f"📦 Source rows: {total_rows:,}\n\n"
+        f"📈 Progress: <b>{processed:,}/{total_rows:,}</b> ({percent:.2f}%)\n\n"
+        f"✅ Inserted: {inserted:,}\n"
+        f"♻️ Already existed: {skipped:,}\n"
+        f"❌ Errors: {failed:,}\n\n"
+        f"📦 Batch: {_safe_html(current_batch, 100)}\n"
+        f"🟢 Status: {_safe_html(status, 100)}"
+    )
+
+
+def film_migrate_table(source_conn, destination_conn, table_name, table_number,
+                       total_tables, total_source_rows, progress_chat_id,
+                       progress_message_id):
+    columns = film_get_columns(source_conn, table_name)
+    insertable = film_insertable_columns(columns)
+    pk_columns = film_get_primary_key(source_conn, table_name)
+    state = film_get_state(destination_conn, table_name)
+
+    if state and state["status"] == "complete":
+        # Do not blindly trust an old checkpoint. Final verification still runs.
+        film_backup_edit(progress_chat_id, progress_message_id, film_progress_text(
+            table_name, table_number, total_tables, total_source_rows,
+            int(state["rows_processed"] or 0), int(state["rows_inserted"] or 0),
+            int(state["rows_skipped"] or 0), int(state["rows_failed"] or 0),
+            "ALREADY COMPLETE", "CHECKPOINTED ♻️"
+        ))
+        return state
+
+    if not state:
+        state = {"status":"pending", "last_pk":None, "offset_value":0,
+                 "rows_processed":0, "rows_inserted":0, "rows_skipped":0,
+                 "rows_failed":0}
+        film_save_state(destination_conn, table_name, status="running")
+    elif not pk_columns:
+        # ctid/offset is not a logical identifier and cannot safely survive a
+        # process restart. Re-scan this table from the beginning instead.
+        state["offset_value"] = 0
+        state["rows_processed"] = 0
+        state["rows_inserted"] = 0
+        state["rows_skipped"] = 0
+        state["rows_failed"] = 0
+        film_save_state(destination_conn, table_name, status="running",
+                        offset_value=0, rows_processed=0, rows_inserted=0,
+                        rows_skipped=0, rows_failed=0, error=None)
+
+    processed = int(state.get("rows_processed") or 0)
+    inserted = int(state.get("rows_inserted") or 0)
+    skipped = int(state.get("rows_skipped") or 0)
+    failed = int(state.get("rows_failed") or 0)
+    last_pk = state.get("last_pk")
+    offset_value = int(state.get("offset_value") or 0)
+
+    while True:
+        batch = film_fetch_batch(source_conn, table_name, insertable, pk_columns,
+                                 {"last_pk": last_pk, "offset_value": offset_value})
+        if not batch:
+            break
+        batch_inserted = batch_skipped = 0
+        destination_conn.autocommit = False
+        try:
+            for row in batch:
+                if pk_columns:
+                    if film_exact_pk_row_exists(destination_conn, table_name,
+                                                insertable, pk_columns, row):
+                        batch_skipped += 1
+                        continue
+                    if film_pk_exists(destination_conn, table_name, insertable,
+                                      pk_columns, row):
+                        raise RuntimeError(
+                            f"CRITICAL DATA MISMATCH in '{table_name}': "
+                            "same primary key exists in DESTINATION but row data differs."
+                        )
+                    film_insert_row(destination_conn, table_name, insertable, row)
+                    batch_inserted += 1
+                else:
+                    # Exact-row MULTISET check. If there are 3 identical rows
+                    # in SOURCE and only 2 in DESTINATION, the third one is inserted.
+                    source_count_for_row = film_exact_row_count(source_conn, table_name,
+                                                                insertable, row)
+                    destination_count_for_row = film_exact_row_count(
+                        destination_conn, table_name, insertable, row
+                    )
+                    if destination_count_for_row < source_count_for_row:
+                        film_insert_row(destination_conn, table_name, insertable, row)
+                        batch_inserted += 1
+                    else:
+                        batch_skipped += 1
+
+            processed_new = processed + len(batch)
+            inserted_new = inserted + batch_inserted
+            skipped_new = skipped + batch_skipped
+            new_last_pk = last_pk
+            new_offset = offset_value
+            if pk_columns:
+                d = film_row_dict(insertable, batch[-1])
+                new_last_pk = _json_safe_pk([d.get(pk) for pk in pk_columns])
+            else:
+                new_offset = offset_value + len(batch)
+
+            with destination_conn.cursor() as cur:
+                cur.execute(sql.SQL("""
+                    INSERT INTO {} (
+                        table_name,status,last_pk,offset_value,rows_processed,
+                        rows_inserted,rows_skipped,rows_failed,started_at,updated_at,error
+                    ) VALUES (%s,'running',%s,%s,%s,%s,%s,%s,NOW(),NOW(),NULL)
+                    ON CONFLICT (table_name) DO UPDATE SET
+                        status='running',last_pk=EXCLUDED.last_pk,
+                        offset_value=EXCLUDED.offset_value,
+                        rows_processed=EXCLUDED.rows_processed,
+                        rows_inserted=EXCLUDED.rows_inserted,
+                        rows_skipped=EXCLUDED.rows_skipped,
+                        rows_failed=EXCLUDED.rows_failed,
+                        updated_at=NOW(),error=NULL
+                """).format(sql.Identifier(FILM_MIGRATION_STATE_TABLE)), (
+                    table_name,
+                    Json(new_last_pk, dumps=lambda obj: json.dumps(obj, default=str)) if new_last_pk is not None else None,
+                    new_offset, processed_new, inserted_new, skipped_new, failed,
+                ))
+            destination_conn.commit()
+            processed, inserted, skipped = processed_new, inserted_new, skipped_new
+            last_pk, offset_value = new_last_pk, new_offset
+        except Exception:
+            destination_conn.rollback()
+            raise
+        finally:
+            destination_conn.autocommit = True
+
+        batch_start = processed - len(batch) + 1
+        batch_end = processed
+        film_backup_edit(progress_chat_id, progress_message_id, film_progress_text(
+            table_name, table_number, total_tables, total_source_rows,
+            processed, inserted, skipped, failed,
+            f"{batch_start:,}-{batch_end:,}", "RUNNING 🟢"
+        ))
+        time.sleep(0.15)
+
+    film_fix_sequences(destination_conn, table_name)
+    film_save_state(destination_conn, table_name, status="complete",
+                    last_pk=last_pk, offset_value=offset_value,
+                    rows_processed=processed, rows_inserted=inserted,
+                    rows_skipped=skipped, rows_failed=failed,
+                    finished=True, error=None)
+    film_backup_edit(progress_chat_id, progress_message_id, film_progress_text(
+        table_name, table_number, total_tables, total_source_rows,
+        processed, inserted, skipped, failed, "COMPLETE ✅", "COMPLETED 🟢"
+    ))
+    return {"status":"complete", "processed":processed, "inserted":inserted,
+            "skipped":skipped, "failed":failed}
+
+
+def film_verify_table_exact(source_conn, destination_conn, table_name):
+    columns = film_get_columns(source_conn, table_name)
+    insertable = film_insertable_columns(columns)
+    pk = film_get_primary_key(source_conn, table_name)
+    source_count = film_count(source_conn, table_name)
+    dest_count = film_count(destination_conn, table_name)
+    if source_count != dest_count:
+        raise RuntimeError(
+            f"FINAL COUNT MISMATCH: {table_name}\n"
+            f"SOURCE (DATABASE_URL) = {source_count}\n"
+            f"DESTINATION (FILM_SUPABASE_DATABASE_URL) = {dest_count}"
+        )
+    # Strong verification for keyed tables: every source row must have the
+    # exact same destination row. This also catches same-count/wrong-data cases.
+    if pk:
+        state = {"last_pk": None, "offset_value": 0}
+        checked = 0
+        while True:
+            batch = film_fetch_batch(source_conn, table_name, insertable, pk, state)
+            if not batch:
+                break
+            for row in batch:
+                if not film_exact_pk_row_exists(destination_conn, table_name,
+                                                insertable, pk, row):
+                    raise RuntimeError(
+                        f"FINAL DATA MISMATCH: exact row missing/different in '{table_name}'."
+                    )
+            d = film_row_dict(insertable, batch[-1])
+            state["last_pk"] = _json_safe_pk([d.get(k) for k in pk])
+            checked += len(batch)
+        return source_count, dest_count, checked
+    # For no-PK tables, compare the full multiset by checking every source row
+    # has enough identical copies in the destination. The count equality above
+    # makes this a complete multiset check without deleting anything.
+    checked = 0
+    state = {"offset_value": 0, "last_pk": None}
+    while True:
+        batch = film_fetch_batch(source_conn, table_name, insertable, [], state)
+        if not batch:
+            break
+        for row in batch:
+            if film_exact_row_count(destination_conn, table_name, insertable, row) < \
+               film_exact_row_count(source_conn, table_name, insertable, row):
+                raise RuntimeError(
+                    f"FINAL DATA MISMATCH: exact row multiplicity differs in '{table_name}'."
+                )
+        state["offset_value"] += len(batch)
+        checked += len(batch)
+    return source_count, dest_count, checked
+
+
+def film_final_verification(source_conn, destination_conn, tables):
+    results = []
+    for table in tables:
+        results.append((table, *film_verify_table_exact(source_conn, destination_conn, table)))
+    return results
+
+
+def run_film_database_backup(progress_chat_id, progress_message_id):
+    if not FILM_BACKUP_THREAD_LOCK.acquire(blocking=False):
+        film_backup_edit(progress_chat_id, progress_message_id,
+                         "⚠️ <b>Film DB Migration</b>\n\nA Film DB migration is already running.")
+        return
+    source_conn = destination_conn = None
+    advisory_locked = False
+    try:
+        film_backup_edit(progress_chat_id, progress_message_id,
+                         "🔌 <b>Connecting...</b>\n\n🟢 SOURCE: <code>DATABASE_URL</code>\n\n⏳ Connecting...")
+        source_conn = film_get_source_conn()
+        film_backup_edit(progress_chat_id, progress_message_id,
+                         "🔌 <b>Connecting...</b>\n\n🟢 SOURCE: DATABASE_URL ✅\n"
+                         "🔵 DESTINATION: <code>FILM_SUPABASE_DATABASE_URL</code>\n\n⏳ Connecting...")
+        destination_conn = film_get_destination_conn()
+
+        with destination_conn.cursor() as cur:
+            cur.execute("SELECT pg_try_advisory_lock(913742,662001)")
+            advisory_locked = bool(cur.fetchone()[0])
+        if not advisory_locked:
+            raise RuntimeError("Another Film DB migration process is already running.")
+
+        film_create_state_table(destination_conn)
+        film_backup_edit(progress_chat_id, progress_message_id,
+                         "🔍 <b>PHASE 0 — PRE-FLIGHT CHECK</b>\n━━━━━━━━━━━━━━━━━━\n\n"
+                         "🟢 SOURCE: DATABASE_URL\n"
+                         "🔵 DESTINATION: FILM_SUPABASE_DATABASE_URL\n\n"
+                         "🔎 Discovering tables and validating schema...\n⏳ Please wait...")
+
+        source_tables = film_get_tables(source_conn)
+        if not source_tables:
+            raise RuntimeError("No public BASE TABLEs found in SOURCE DATABASE_URL.")
+        missing = [t for t in source_tables if not film_table_exists(destination_conn, t)]
+        if missing:
+            raise RuntimeError("DESTINATION is missing these tables:\n" + "\n".join(f"❌ {t}" for t in missing))
+        for table in source_tables:
+            film_compare_schema(source_conn, destination_conn, table)
+        ordered = film_order_tables(source_conn, source_tables)
+        counts = film_get_counts(source_conn, ordered)
+        total_tables = len(ordered)
+        total_rows = sum(counts.values())
+        preview = "\n".join(f"• {t}: {counts[t]:,}" for t in ordered[:40])
+        if len(ordered) > 40:
+            preview += "\n... and more tables."
+        film_backup_edit(progress_chat_id, progress_message_id,
+                         "🔍 <b>PRE-FLIGHT COMPLETE ✅</b>\n━━━━━━━━━━━━━━━━━━\n\n"
+                         "🟢 SOURCE: <code>DATABASE_URL</code> ✅\n"
+                         "🔵 DESTINATION: <code>FILM_SUPABASE_DATABASE_URL</code> ✅\n\n"
+                         f"📋 Tables: <b>{total_tables}</b>\n📦 Source rows: <b>{total_rows:,}</b>\n\n"
+                         "🛡 Columns/schema/PK/FK checked.\n"
+                         "🛡 Original IDs are preserved.\n"
+                         "🛡 50-row transactions + checkpoint enabled.\n"
+                         "🛡 Source snapshot is consistent for this run.\n\n"
+                         f"<b>Tables:</b>\n{_safe_html(preview, 3500)}\n\nStarting...")
+        time.sleep(1.5)
+
+        grand_inserted = grand_skipped = grand_processed = 0
+        for index, table in enumerate(ordered, start=1):
+            current = film_get_state(destination_conn, table)
+            if current and current["status"] == "complete":
+                # We still verify it at the end; do not silently assume it is right.
+                grand_inserted += int(current["rows_inserted"] or 0)
+                grand_skipped += int(current["rows_skipped"] or 0)
+                grand_processed += int(current["rows_processed"] or 0)
+                continue
+            result = film_migrate_table(
+                source_conn, destination_conn, table, index, total_tables,
+                counts[table], progress_chat_id, progress_message_id
+            )
+            grand_inserted += int(result.get("inserted", 0))
+            grand_skipped += int(result.get("skipped", 0))
+            grand_processed += int(result.get("processed", 0))
+
+        film_backup_edit(progress_chat_id, progress_message_id,
+                         "🔎 <b>FINAL VERIFICATION</b>\n━━━━━━━━━━━━━━━━━━\n\n"
+                         "Comparing SOURCE and DESTINATION row counts and exact data...\n"
+                         "🔢 Repairing/checking sequences...\n⏳ Almost done...")
+        verification = film_final_verification(source_conn, destination_conn, ordered)
+        lines = [f"✅ {t}: {s:,} = {d:,} (checked {checked:,})" for t,s,d,checked in verification]
+        summary = "\n".join(lines)
+        film_backup_edit(progress_chat_id, progress_message_id,
+                         "🎉 <b>FILM DATABASE MIGRATION COMPLETE</b>\n━━━━━━━━━━━━━━━━━━\n\n"
+                         "🟢 SOURCE: <code>DATABASE_URL</code> ✅\n"
+                         "🔵 DESTINATION: <code>FILM_SUPABASE_DATABASE_URL</code> ✅\n\n"
+                         "Schema: ✅\nRelationships: ✅\nOriginal IDs: ✅\nFile IDs/names: ✅\n"
+                         "Group/order/user IDs: ✅\nCheckpoint: ✅\nSequences: ✅\nExact verification: ✅\n\n"
+                         f"📋 Tables: {total_tables:,}\n📦 Rows processed: {grand_processed:,}\n"
+                         f"📥 Newly inserted: {grand_inserted:,}\n♻️ Already existed: {grand_skipped:,}\n\n"
+                         f"<b>FINAL TABLE CHECK:</b>\n{_safe_html(summary, 3500)}")
+        film_backup_admin(
+            "🎉 <b>FILM DB MIGRATION FINISHED</b>\n\n"
+            "🟢 SOURCE: DATABASE_URL\n🔵 DESTINATION: FILM_SUPABASE_DATABASE_URL\n\n"
+            f"Tables: {total_tables:,}\nRows processed: {grand_processed:,}\n"
+            f"Inserted: {grand_inserted:,}\nAlready existed: {grand_skipped:,}\n\n"
+            "Exact verification passed."
+        )
+    except Exception as e:
+        error = _safe_html(str(e), 3000)
+        film_backup_edit(progress_chat_id, progress_message_id,
+                         "🚨 <b>FILM DATABASE MIGRATION STOPPED</b>\n━━━━━━━━━━━━━━━━━━\n\n"
+                         "🟢 SOURCE: <code>DATABASE_URL</code>\n"
+                         "🔵 DESTINATION: <code>FILM_SUPABASE_DATABASE_URL</code>\n\n"
+                         f"❌ Error:\n<code>{error}</code>\n\n"
+                         "🛡️ Migration stopped safely.\n"
+                         "No automatic deletion or overwrite was performed.\n"
+                         "Completed batch checkpoints remain in DESTINATION.")
+        film_backup_admin("🚨 <b>FILM DB MIGRATION ERROR</b>\n\n<code>" + error + "</code>")
+        print("========== FILM DB MIGRATION ERROR ==========")
+        traceback.print_exc()
+    finally:
+        if destination_conn and advisory_locked:
+            try:
+                with destination_conn.cursor() as cur:
+                    cur.execute("SELECT pg_advisory_unlock(913742,662001)")
+            except Exception as e:
+                print("⚠️ Could not release advisory lock:", repr(e))
+        if source_conn:
+            try:
+                source_conn.rollback()
+                source_conn.close()
+            except Exception:
+                pass
+        if destination_conn:
+            try:
+                destination_conn.close()
+            except Exception:
+                pass
+        FILM_BACKUP_THREAD_LOCK.release()
+
+
+# ============================================================
+# TELEGRAM CALLBACKS
+# ============================================================
+
+def _film_admin_only(callback):
+    try:
+        return int(callback.from_user.id) == int(ADMIN_ID)
+    except Exception:
+        return False
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "backup_film_db")
+def film_backup_button(c):
+    if not _film_admin_only(c):
+        try:
+            bot.answer_callback_query(c.id, "Not allowed.", show_alert=True)
+        except Exception:
+            pass
+        return
+    try:
+        bot.answer_callback_query(c.id)
+        kb = types.InlineKeyboardMarkup()
+        kb.row(
+            types.InlineKeyboardButton("✅ YES — BACKUP FILM DB", callback_data="backup_film_db_yes"),
+            types.InlineKeyboardButton("❌ NO", callback_data="backup_film_db_no"),
+        )
+        bot.send_message(
+            ADMIN_ID,
+            "⚠️ <b>FILM DATABASE MIGRATION</b>\n━━━━━━━━━━━━━━━━━━\n\n"
+            "🟢 <b>SOURCE</b>\n<code>DATABASE_URL</code>\n\n"
+            "🔵 <b>DESTINATION</b>\n<code>FILM_SUPABASE_DATABASE_URL</code>\n\n"
+            "Zai debo dukkan public table data daga SOURCE ya kwafe zuwa DESTINATION.\n\n"
+            "🛡️ All columns (except PostgreSQL GENERATED ALWAYS columns, which are regenerated by DB).\n"
+            "🛡️ Original IDs/file_id/file_name/group_key/order_id/item_id/user_id preserved.\n"
+            "🛡️ Schema + PK + FK checked before copying.\n"
+            "🛡️ 50 rows per transaction.\n"
+            "🛡️ Existing identical rows are skipped.\n"
+            "🛑 Same ID with different data stops immediately.\n"
+            "🛡️ No DELETE/TRUNCATE/overwrite operation.\n\n"
+            "⚠️ Confirm you want to start?",
+            parse_mode="HTML", reply_markup=kb
+        )
+    except Exception as e:
+        print("❌ FILM BACKUP BUTTON ERROR:", repr(e))
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "backup_film_db_no")
+def film_backup_no(c):
+    if not _film_admin_only(c):
+        try:
+            bot.answer_callback_query(c.id, "Not allowed.", show_alert=True)
+        except Exception:
+            pass
+        return
+    try:
+        bot.answer_callback_query(c.id, "Backup cancelled.")
+        bot.edit_message_text(
+            "❌ <b>Film Database Migration Cancelled.</b>\n\nBabu wani data da aka canza.",
+            chat_id=c.message.chat.id, message_id=c.message.message_id, parse_mode="HTML"
+        )
+    except Exception as e:
+        print("❌ BACKUP NO ERROR:", repr(e))
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "backup_film_db_yes")
+def film_backup_yes(c):
+    if not _film_admin_only(c):
+        try:
+            bot.answer_callback_query(c.id, "Not allowed.", show_alert=True)
+        except Exception:
+            pass
+        return
+    try:
+        bot.answer_callback_query(c.id, "Starting Film DB migration...")
+        progress = bot.send_message(
+            ADMIN_ID,
+            "🚀 <b>Starting Film Database Migration...</b>\n\n"
+            "🟢 SOURCE: DATABASE_URL\n"
+            "🔵 DESTINATION: FILM_SUPABASE_DATABASE_URL\n\n"
+            "🔌 Connecting to databases...",
+            parse_mode="HTML"
+        )
+        threading.Thread(
+            target=run_film_database_backup,
+            args=(progress.chat.id, progress.message_id),
+            daemon=True,
+        ).start()
+    except Exception as e:
+        print("❌ FILM BACKUP START ERROR:", repr(e))
+        try:
+            bot.send_message(ADMIN_ID,
+                             "🚨 <b>Could not start Film DB Migration</b>\n\n<code>" +
+                             _safe_html(e, 3000) + "</code>", parse_mode="HTML")
+        except Exception:
+            pass
+
+
 
 # ============================================================
 # WALLET DB BACKUP / MIGRATION SYSTEM
