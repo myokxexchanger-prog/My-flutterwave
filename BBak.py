@@ -1,6 +1,5 @@
 
-# bot.py  (PostgreSQL SAFE – FULL FIX, nothing r
-emoved)
+# bot.py  (PostgreSQL SAFE – FULL FIX, nothing emoved)
 
 import telebot
 from telebot import types
