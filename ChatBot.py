@@ -1981,6 +1981,70 @@ def telegram_webhook():
     return "OK", 200
 
 
+# ============================================================
+# TEMPORARY ADMIN COMMAND: /dtask
+# DELETE ALL CHAT SYSTEM DATA
+# ============================================================
+
+@bot.message_handler(commands=["dtask"])
+def delete_all_chat_data(message):
+
+    if int(message.from_user.id) != int(ADMIN_ID):
+        return
+
+    conn = None
+    cur = None
+
+    try:
+
+        conn = get_all_chat_db_conn()
+        cur = conn.cursor()
+
+        cur.execute("""
+            TRUNCATE TABLE
+                chat_messages,
+                tasks,
+                customers,
+                workers
+            RESTART IDENTITY
+        """)
+
+        conn.commit()
+
+        bot.reply_to(
+            message,
+            "✅ ALL CHAT DATA DELETED SUCCESSFULLY.\n\n"
+            "Customers: CLEARED\n"
+            "Tasks: CLEARED\n"
+            "Chat Messages: CLEARED\n"
+            "Workers: CLEARED\n\n"
+            "Database tables preserved.\n"
+            "Ready for fresh testing."
+        )
+
+    except Exception as e:
+
+        if conn:
+            conn.rollback()
+
+        bot.reply_to(
+            message,
+            f"❌ DATABASE CLEANUP FAILED:\n{str(e)[:1000]}"
+        )
+
+    finally:
+
+        if cur:
+            cur.close()
+
+        if conn:
+            conn.close()
+
+# ============================================================
+# END TEMPORARY CLEANUP
+# ============================================================
+
+
 import time
 import re
 import difflib
