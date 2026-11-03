@@ -784,6 +784,27 @@ CREATE TABLE IF NOT EXISTS movies (
 )
 """)
 
+
+
+# ==========================================
+# MOVIES NAME DATABASE TABLE
+# ==========================================
+
+cur.execute("""
+CREATE TABLE IF NOT EXISTS movies_name (
+    id BIGSERIAL PRIMARY KEY,
+    translated_title TEXT,
+    translation_company TEXT,
+    original_title TEXT,
+    release_year TEXT,
+    main_actor TEXT
+)
+""")
+
+print("✅ MOVIES_NAME TABLE CREATED SUCCESSFULLY")
+
+
+
 # -------- ITEMS --------
 cur.execute("""
 CREATE TABLE IF NOT EXISTS items (
