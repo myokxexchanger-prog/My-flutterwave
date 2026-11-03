@@ -2959,9 +2959,10 @@ def deliver_items(call):
     )
 
 
+
 # ============================================================
 # CHAT MESSAGE SYSTEM - PART 1
-# CONFIGURATION + ADMIN DEBUG
+# CONFIGURATION
 # ============================================================
 
 import re
@@ -2998,25 +2999,10 @@ def chat_error(message, *args):
     CHAT_LOGGER.exception(message, *args)
 
 
-# ------------------------------------------------------------
-# SEND DEBUG TO ADMIN
-# ------------------------------------------------------------
-
-def chat_admin_debug(message):
-
-    try:
-        bot.send_message(
-            ADMIN_ID,
-            "🔎 CHAT MESSAGE SYSTEM DEBUG\n\n" + str(message)[:3500]
-        )
-
-    except Exception:
-        chat_log("Could not send debug to ADMIN_ID")
-
-
 # ============================================================
 # END PART 1
 # ============================================================
+
 
 # ============================================================
 # CHAT MESSAGE SYSTEM - PART 2
@@ -3194,12 +3180,6 @@ def chat_create_user_task(message):
 
         conn = get_all_chat_db_conn()
 
-        chat_admin_debug(
-            "✅ CHAT DATABASE CONNECTION SUCCESSFUL\n"
-            f"User ID: {user_id}\n"
-            "Action: Preparing task INSERT"
-        )
-
         cur = conn.cursor()
 
         # Create customer if not already present
@@ -3256,12 +3236,6 @@ def chat_create_user_task(message):
         if active_task:
 
             conn.commit()
-
-            chat_admin_debug(
-                "⚠️ USER TASK BUSY\n"
-                f"User ID: {user_id}\n"
-                f"Active Task: {active_task[0]}"
-            )
 
             return "busy", None, None
 
@@ -3343,15 +3317,6 @@ def chat_create_user_task(message):
 
         conn.commit()
 
-        chat_admin_debug(
-            "✅ TASK INSERT SUCCESSFUL\n"
-            f"User ID: {user_id}\n"
-            f"Task ID: {task_id}\n"
-            f"Message Row ID: {message_row_id}\n"
-            "Task Status: pending\n"
-            "Database Commit: SUCCESS"
-        )
-
         chat_log(
             "Task inserted successfully: %s",
             task_id
@@ -3365,13 +3330,6 @@ def chat_create_user_task(message):
             conn.rollback()
 
         chat_error("CHAT DATABASE INSERT FAILED")
-
-        chat_admin_debug(
-            "❌ CHAT DATABASE INSERT FAILED\n"
-            f"User ID: {user_id}\n"
-            f"Error Type: {type(e).__name__}\n"
-            f"Error: {str(e)[:1500]}"
-        )
 
         raise
 
@@ -3387,6 +3345,7 @@ def chat_create_user_task(message):
 # ============================================================
 # END PART 2
 # ============================================================
+
 
 # ============================================================
 # CHAT MESSAGE SYSTEM - PART 3
@@ -3440,25 +3399,11 @@ def chat_save_typing_message(
 
         conn.commit()
 
-        chat_admin_debug(
-            "✅ TYPING MESSAGE SAVED\n"
-            f"Task ID: {task_id}\n"
-            f"Telegram Message ID: {telegram_message_id}\n"
-            f"Database Row ID: {row_id}"
-        )
-
         return row_id
 
     except Exception as e:
 
         conn.rollback()
-
-        chat_admin_debug(
-            "❌ TYPING MESSAGE DATABASE ERROR\n"
-            f"Task ID: {task_id}\n"
-            f"Error: {str(e)[:1000]}"
-        )
-
         raise
 
     finally:
@@ -3676,14 +3621,6 @@ def chat_wait_for_worker(
     last_debug_time = started_at
     language = chat_get_user_language(user_id)
 
-    chat_admin_debug(
-        "🔄 WORKER RESPONSE CHECK STARTED\n"
-        f"Task ID: {task_id}\n"
-        f"User ID: {user_id}\n"
-        "Database polling interval: 2 seconds\n"
-        "Maximum wait: 5 minutes"
-    )
-
     while not CHAT_STOP_EVENT.is_set():
 
         elapsed = time.monotonic() - started_at
@@ -3724,23 +3661,9 @@ def chat_wait_for_worker(
 
                 chat_mark_task_timeout(task_id)
 
-                chat_admin_debug(
-                    "⏰ WORKER RESPONSE TIMEOUT\n"
-                    f"Task ID: {task_id}\n"
-                    f"User ID: {user_id}\n"
-                    "Waited: 5 minutes\n"
-                    "Timeout message delivered to user."
-                )
-
             except Exception as e:
 
                 chat_error("Could not deliver timeout message")
-
-                chat_admin_debug(
-                    "❌ TIMEOUT DELIVERY ERROR\n"
-                    f"Task ID: {task_id}\n"
-                    f"Error: {str(e)[:1000]}"
-                )
 
             return
 
@@ -3759,13 +3682,6 @@ def chat_wait_for_worker(
             now = time.monotonic()
 
             if now - last_debug_time >= 30:
-
-                chat_admin_debug(
-                    "⚠️ DATABASE POLLING ERROR\n"
-                    f"Task ID: {task_id}\n"
-                    f"Error: {str(e)[:1000]}\n"
-                    "The bot will retry."
-                )
 
                 last_debug_time = now
 
@@ -3828,14 +3744,6 @@ def chat_wait_for_worker(
 
                 chat_mark_task_delivered(task_id)
 
-                chat_admin_debug(
-                    "✅ WORKER ANSWER DELIVERED\n"
-                    f"Task ID: {task_id}\n"
-                    f"User ID: {user_id}\n"
-                    "Telegram edit: SUCCESS\n"
-                    "Database status: delivered"
-                )
-
                 chat_log(
                     "Task delivered successfully: %s",
                     task_id
@@ -3848,13 +3756,6 @@ def chat_wait_for_worker(
                 chat_error(
                     "Answer delivery failed for task %s",
                     task_id
-                )
-
-                chat_admin_debug(
-                    "❌ ANSWER DELIVERY ERROR\n"
-                    f"Task ID: {task_id}\n"
-                    f"Error: {str(e)[:1000]}\n"
-                    "Will retry."
                 )
 
                 time.sleep(CHAT_RESPONSE_POLL_SECONDS)
@@ -3894,13 +3795,6 @@ def chat_wait_for_worker(
                     error_reply
                 )
 
-                chat_admin_debug(
-                    "❌ WORKER REPORTED FAILURE\n"
-                    f"Task ID: {task_id}\n"
-                    f"User ID: {user_id}\n"
-                    f"Worker Error: {str(task.get('error_message') or '')[:1000]}"
-                )
-
                 return
 
             except Exception:
@@ -3909,21 +3803,13 @@ def chat_wait_for_worker(
                 return
 
         # --------------------------------------------
-        # PERIODIC WORKER STATUS DEBUG
-        # Every 30 seconds, not every 2 seconds
+        # PERIODIC WORKER STATUS
+        # Every 30 seconds
         # --------------------------------------------
 
         now = time.monotonic()
 
         if now - last_debug_time >= 30:
-
-            chat_admin_debug(
-                "🔄 WORKER STILL PROCESSING\n"
-                f"Task ID: {task_id}\n"
-                f"User ID: {user_id}\n"
-                f"Current Status: {status}\n"
-                f"Waiting: {int(elapsed)} seconds"
-            )
 
             last_debug_time = now
 
@@ -3934,6 +3820,7 @@ def chat_wait_for_worker(
 # ============================================================
 # END PART 3
 # ============================================================
+
 
 # ============================================================
 # CHAT MESSAGE SYSTEM - PART 4
@@ -4052,22 +3939,9 @@ def chat_save_typing_message(
 
         conn.commit()
 
-        chat_admin_debug(
-            "✅ TYPING MESSAGE INSERTED\n"
-            f"Task ID: {task_id}\n"
-            f"Telegram Message ID: {telegram_message_id}"
-        )
-
     except Exception as e:
 
         conn.rollback()
-
-        chat_admin_debug(
-            "❌ TYPING MESSAGE INSERT FAILED\n"
-            f"Task ID: {task_id}\n"
-            f"Error: {str(e)[:1000]}"
-        )
-
         raise
 
     finally:
@@ -4236,13 +4110,6 @@ def chat_receive_text(message):
 
         chat_error("Could not save incoming message")
 
-        chat_admin_debug(
-            "❌ INCOMING MESSAGE SAVE FAILED\n"
-            f"User ID: {user_id}\n"
-            f"Error Type: {type(e).__name__}\n"
-            f"Error: {str(e)[:1200]}"
-        )
-
         try:
 
             bot.reply_to(
@@ -4280,22 +4147,9 @@ def chat_receive_text(message):
             "Typing..."
         )
 
-        chat_admin_debug(
-            "✅ TELEGRAM TYPING MESSAGE SENT\n"
-            f"Task ID: {task_id}\n"
-            f"User ID: {user_id}\n"
-            f"Telegram Message ID: {typing_message.message_id}"
-        )
-
     except Exception as e:
 
         chat_error("Could not send typing message")
-
-        chat_admin_debug(
-            "❌ TELEGRAM TYPING MESSAGE FAILED\n"
-            f"Task ID: {task_id}\n"
-            f"Error: {str(e)[:1000]}"
-        )
 
         try:
 
@@ -4360,14 +4214,6 @@ def chat_receive_text(message):
 
         waiting_thread.start()
 
-        chat_admin_debug(
-            "✅ RESPONSE CHECKER THREAD STARTED\n"
-            f"Task ID: {task_id}\n"
-            f"User ID: {user_id}\n"
-            "Polling: Every 2 seconds\n"
-            "Timeout: 5 minutes"
-        )
-
         chat_log(
             "Incoming text accepted. Task ID: %s",
             task_id
@@ -4376,12 +4222,6 @@ def chat_receive_text(message):
     except Exception as e:
 
         chat_error("Could not start response checker thread")
-
-        chat_admin_debug(
-            "❌ RESPONSE CHECKER THREAD FAILED\n"
-            f"Task ID: {task_id}\n"
-            f"Error: {str(e)[:1000]}"
-        )
 
         try:
 
@@ -4454,14 +4294,6 @@ def start_chat_message_system():
 
     chat_log("Chat message handlers are ready")
 
-    chat_admin_debug(
-        "🚀 CHAT MESSAGE SYSTEM STARTED\n"
-        "Handlers: Registered\n"
-        "Database: Ready for connection checks\n"
-        "Worker polling: 2 seconds\n"
-        "Response timeout: 5 minutes"
-    )
-
 
 # ============================================================
 # RUN START FUNCTION
@@ -4472,7 +4304,6 @@ start_chat_message_system()
 # ============================================================
 # END PART 4
 # ============================================================
-
 
 
 
