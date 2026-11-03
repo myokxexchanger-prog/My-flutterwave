@@ -2895,10 +2895,9 @@ def deliver_items(call):
     )
 
 
-
 # ============================================================
 # CHAT MESSAGE SYSTEM - PART 1
-# CONFIGURATION
+# CONFIGURATION + ADMIN DEBUG
 # ============================================================
 
 import re
@@ -2915,17 +2914,13 @@ from telebot.apihelper import ApiTelegramException
 CHAT_LOGGER = logging.getLogger("CHAT_MESSAGE_SYSTEM")
 CHAT_LOGGER.setLevel(logging.INFO)
 
-CHAT_RESPONSE_POLL_SECONDS = 1
+# Duba database duk bayan dakika 2
+CHAT_RESPONSE_POLL_SECONDS = 2
 
-CHAT_TYPING_FRAMES = [
-    "Typing.",
-    "Typing..",
-    "Typing..."
-]
+# Minti 5 kacal ake jiran Worker
+CHAT_MAX_WAIT_SECONDS = 300
 
 CHAT_STOP_EVENT = threading.Event()
-
-CHAT_MAX_WAIT_SECONDS = 1800
 
 CHAT_MESSAGE_SYSTEM_LOCK = threading.Lock()
 CHAT_MESSAGE_SYSTEM_RUNNING = False
@@ -2939,18 +2934,31 @@ def chat_error(message, *args):
     CHAT_LOGGER.exception(message, *args)
 
 
+# ------------------------------------------------------------
+# SEND DEBUG TO ADMIN
+# ------------------------------------------------------------
+
+def chat_admin_debug(message):
+
+    try:
+        bot.send_message(
+            ADMIN_ID,
+            "🔎 CHAT MESSAGE SYSTEM DEBUG\n\n" + str(message)[:3500]
+        )
+
+    except Exception:
+        chat_log("Could not send debug to ADMIN_ID")
+
+
 # ============================================================
 # END PART 1
 # ============================================================
-
-
 
 # ============================================================
 # CHAT MESSAGE SYSTEM - PART 2
 # TEXT FILTER + DATABASE INSERT
 # ============================================================
 
-# Iyakar rubutu: haruffa 500
 CHAT_MAX_TEXT_LENGTH = 500
 
 CHAT_BLOCKED_TERMS = {
@@ -2994,10 +3002,6 @@ def chat_normalize_text(text):
     return normalized, compact
 
 
-# ------------------------------------------------------------
-# LINK DETECTION
-# ------------------------------------------------------------
-
 CHAT_LINK_PATTERN = re.compile(
     r"("
     r"https?://|"
@@ -3032,10 +3036,6 @@ def chat_contains_link(text):
     return False
 
 
-# ------------------------------------------------------------
-# BASIC ADULT CONTENT FILTER
-# ------------------------------------------------------------
-
 def chat_contains_blocked_content(text):
 
     normalized, compact = chat_normalize_text(text)
@@ -3056,8 +3056,6 @@ def chat_contains_blocked_content(text):
 
 # ------------------------------------------------------------
 # GET USER LANGUAGE
-# Hausa = default
-# English = if preferred/detected language is English
 # ------------------------------------------------------------
 
 def chat_get_user_language(user_id, telegram_language_code=None):
@@ -3067,6 +3065,7 @@ def chat_get_user_language(user_id, telegram_language_code=None):
     cur = None
 
     try:
+
         conn = get_all_chat_db_conn()
         cur = conn.cursor()
 
@@ -3079,6 +3078,7 @@ def chat_get_user_language(user_id, telegram_language_code=None):
         row = cur.fetchone()
 
         if row:
+
             preferred_language, detected_language = row
 
             if preferred_language in ("ha", "en"):
@@ -3088,11 +3088,14 @@ def chat_get_user_language(user_id, telegram_language_code=None):
                 language = detected_language
 
     except Exception as e:
-        chat_error("Could not get user language: %s", repr(e))
+
+        chat_error("Could not get user language")
 
     finally:
+
         if cur:
             cur.close()
+
         if conn:
             conn.close()
 
@@ -3100,6 +3103,7 @@ def chat_get_user_language(user_id, telegram_language_code=None):
         return language
 
     if telegram_language_code:
+
         if telegram_language_code.lower().startswith("en"):
             return "en"
 
@@ -3108,24 +3112,33 @@ def chat_get_user_language(user_id, telegram_language_code=None):
 
 # ------------------------------------------------------------
 # CREATE CUSTOMER + TASK + INCOMING MESSAGE
-#
-# Returns:
-# ("created", task_id, message_row_id)
-# ("busy", None, None)
 # ------------------------------------------------------------
 
 def chat_create_user_task(message):
 
-    conn = get_all_chat_db_conn()
+    conn = None
     cur = None
 
+    user_id = message.from_user.id
+
     try:
+
+        chat_log(
+            "Connecting to Chat Database for INSERT. User: %s",
+            user_id
+        )
+
+        conn = get_all_chat_db_conn()
+
+        chat_admin_debug(
+            "✅ CHAT DATABASE CONNECTION SUCCESSFUL\n"
+            f"User ID: {user_id}\n"
+            "Action: Preparing task INSERT"
+        )
+
         cur = conn.cursor()
 
-        user_id = message.from_user.id
-
-        # Create customer if not already present.
-        # Do not increase total_messages yet.
+        # Create customer if not already present
         cur.execute("""
             INSERT INTO customers (
                 user_id,
@@ -3151,9 +3164,7 @@ def chat_create_user_task(message):
             message.from_user.last_name
         ))
 
-        # Lock this customer's row.
-        # This prevents two simultaneous messages from creating
-        # two active tasks for the same user.
+        # Lock customer row
         cur.execute("""
             SELECT user_id
             FROM customers
@@ -3163,7 +3174,7 @@ def chat_create_user_task(message):
 
         cur.fetchone()
 
-        # Check whether this user already has unfinished work.
+        # Check unfinished task
         cur.execute("""
             SELECT task_id
             FROM tasks
@@ -3179,7 +3190,15 @@ def chat_create_user_task(message):
         active_task = cur.fetchone()
 
         if active_task:
+
             conn.commit()
+
+            chat_admin_debug(
+                "⚠️ USER TASK BUSY\n"
+                f"User ID: {user_id}\n"
+                f"Active Task: {active_task[0]}"
+            )
+
             return "busy", None, None
 
         # Create new task
@@ -3249,7 +3268,7 @@ def chat_create_user_task(message):
 
         message_row_id = cur.fetchone()[0]
 
-        # Increase message count only for accepted messages
+        # Increase accepted message count
         cur.execute("""
             UPDATE customers
             SET total_messages = total_messages + 1,
@@ -3260,23 +3279,50 @@ def chat_create_user_task(message):
 
         conn.commit()
 
+        chat_admin_debug(
+            "✅ TASK INSERT SUCCESSFUL\n"
+            f"User ID: {user_id}\n"
+            f"Task ID: {task_id}\n"
+            f"Message Row ID: {message_row_id}\n"
+            "Task Status: pending\n"
+            "Database Commit: SUCCESS"
+        )
+
+        chat_log(
+            "Task inserted successfully: %s",
+            task_id
+        )
+
         return "created", str(task_id), message_row_id
 
-    except Exception:
-        conn.rollback()
+    except Exception as e:
+
+        if conn:
+            conn.rollback()
+
+        chat_error("CHAT DATABASE INSERT FAILED")
+
+        chat_admin_debug(
+            "❌ CHAT DATABASE INSERT FAILED\n"
+            f"User ID: {user_id}\n"
+            f"Error Type: {type(e).__name__}\n"
+            f"Error: {str(e)[:1500]}"
+        )
+
         raise
 
     finally:
+
         if cur:
             cur.close()
-        conn.close()
+
+        if conn:
+            conn.close()
 
 
 # ============================================================
 # END PART 2
 # ============================================================
-
-
 
 # ============================================================
 # CHAT MESSAGE SYSTEM - PART 3
@@ -3292,6 +3338,7 @@ def chat_save_typing_message(
 ):
 
     conn = get_all_chat_db_conn()
+    cur = None
 
     try:
 
@@ -3314,7 +3361,7 @@ def chat_save_typing_message(
                 'outgoing',
                 'bot',
                 'text',
-                'Typing.',
+                'Typing...',
                 NOW() + INTERVAL '12 hours'
             )
             RETURNING id
@@ -3329,16 +3376,32 @@ def chat_save_typing_message(
 
         conn.commit()
 
+        chat_admin_debug(
+            "✅ TYPING MESSAGE SAVED\n"
+            f"Task ID: {task_id}\n"
+            f"Telegram Message ID: {telegram_message_id}\n"
+            f"Database Row ID: {row_id}"
+        )
+
         return row_id
 
-    except Exception:
+    except Exception as e:
 
         conn.rollback()
+
+        chat_admin_debug(
+            "❌ TYPING MESSAGE DATABASE ERROR\n"
+            f"Task ID: {task_id}\n"
+            f"Error: {str(e)[:1000]}"
+        )
+
         raise
 
     finally:
 
-        cur.close()
+        if cur:
+            cur.close()
+
         conn.close()
 
 
@@ -3420,6 +3483,7 @@ def chat_update_bot_message(
 ):
 
     conn = get_all_chat_db_conn()
+    cur = None
 
     try:
 
@@ -3427,8 +3491,7 @@ def chat_update_bot_message(
 
         cur.execute("""
             UPDATE chat_messages
-            SET content = %s,
-                updated_at = NOW()
+            SET content = %s
             WHERE telegram_chat_id = %s
               AND telegram_message_id = %s
               AND sender_type = 'bot'
@@ -3439,11 +3502,6 @@ def chat_update_bot_message(
             telegram_message_id
         ))
 
-        # Note:
-        # Idan chat_messages ɗinka bai da updated_at,
-        # kada a yi amfani da shi a wannan UPDATE.
-        # Za mu gyara wannan a ƙasa ta hanyar cire shi.
-
         conn.commit()
 
     except Exception:
@@ -3453,7 +3511,9 @@ def chat_update_bot_message(
 
     finally:
 
-        cur.close()
+        if cur:
+            cur.close()
+
         conn.close()
 
 
@@ -3464,6 +3524,7 @@ def chat_update_bot_message(
 def chat_mark_task_delivered(task_id):
 
     conn = get_all_chat_db_conn()
+    cur = None
 
     try:
 
@@ -3487,12 +3548,57 @@ def chat_mark_task_delivered(task_id):
 
     finally:
 
-        cur.close()
+        if cur:
+            cur.close()
+
+        conn.close()
+
+
+# ------------------------------------------------------------
+# MARK TASK TIMEOUT
+# ------------------------------------------------------------
+
+def chat_mark_task_timeout(task_id):
+
+    conn = get_all_chat_db_conn()
+    cur = None
+
+    try:
+
+        cur = conn.cursor()
+
+        cur.execute("""
+            UPDATE tasks
+            SET status = 'failed',
+                error_message = %s,
+                completed_at = NOW(),
+                updated_at = NOW()
+            WHERE task_id = %s
+              AND status IN ('pending', 'processing')
+        """, (
+            "Worker response timeout after 5 minutes",
+            task_id
+        ))
+
+        conn.commit()
+
+    except Exception:
+
+        conn.rollback()
+        chat_error("Could not mark task timeout")
+
+    finally:
+
+        if cur:
+            cur.close()
+
         conn.close()
 
 
 # ------------------------------------------------------------
 # WAIT FOR WORKER
+# Checks database every 2 seconds.
+# Stops after 5 minutes.
 # ------------------------------------------------------------
 
 def chat_wait_for_worker(
@@ -3502,24 +3608,112 @@ def chat_wait_for_worker(
     typing_message_id
 ):
 
-    frame_index = 0
-    last_edit = 0
     started_at = time.monotonic()
-    slow_message_shown = False
+    last_debug_time = started_at
+    language = chat_get_user_language(user_id)
+
+    chat_admin_debug(
+        "🔄 WORKER RESPONSE CHECK STARTED\n"
+        f"Task ID: {task_id}\n"
+        f"User ID: {user_id}\n"
+        "Database polling interval: 2 seconds\n"
+        "Maximum wait: 5 minutes"
+    )
 
     while not CHAT_STOP_EVENT.is_set():
+
+        elapsed = time.monotonic() - started_at
+
+        # --------------------------------------------
+        # FIVE-MINUTE TIMEOUT
+        # --------------------------------------------
+
+        if elapsed >= CHAT_MAX_WAIT_SECONDS:
+
+            if language == "en":
+
+                timeout_reply = (
+                    "Sorry, I can't provide an answer right now. "
+                    "Please contact me again later."
+                )
+
+            else:
+
+                timeout_reply = (
+                    "Yi haƙuri, ba zan iya ba ka amsa a yanzu ba. "
+                    "Don Allah ka tuntube ni anjima."
+                )
+
+            try:
+
+                bot.edit_message_text(
+                    timeout_reply,
+                    chat_id,
+                    typing_message_id
+                )
+
+                chat_update_bot_message(
+                    chat_id,
+                    typing_message_id,
+                    timeout_reply
+                )
+
+                chat_mark_task_timeout(task_id)
+
+                chat_admin_debug(
+                    "⏰ WORKER RESPONSE TIMEOUT\n"
+                    f"Task ID: {task_id}\n"
+                    f"User ID: {user_id}\n"
+                    "Waited: 5 minutes\n"
+                    "Timeout message delivered to user."
+                )
+
+            except Exception as e:
+
+                chat_error("Could not deliver timeout message")
+
+                chat_admin_debug(
+                    "❌ TIMEOUT DELIVERY ERROR\n"
+                    f"Task ID: {task_id}\n"
+                    f"Error: {str(e)[:1000]}"
+                )
+
+            return
+
+        # --------------------------------------------
+        # CHECK DATABASE
+        # --------------------------------------------
 
         try:
 
             task = chat_get_task_result(task_id)
 
-        except Exception:
+        except Exception as e:
 
             chat_error("Could not check task result")
+
+            now = time.monotonic()
+
+            if now - last_debug_time >= 30:
+
+                chat_admin_debug(
+                    "⚠️ DATABASE POLLING ERROR\n"
+                    f"Task ID: {task_id}\n"
+                    f"Error: {str(e)[:1000]}\n"
+                    "The bot will retry."
+                )
+
+                last_debug_time = now
+
             time.sleep(CHAT_RESPONSE_POLL_SECONDS)
             continue
 
         if task is None:
+
+            chat_log(
+                "Task not found during polling: %s",
+                task_id
+            )
 
             time.sleep(CHAT_RESPONSE_POLL_SECONDS)
             continue
@@ -3527,7 +3721,7 @@ def chat_wait_for_worker(
         status = task["status"]
 
         # --------------------------------------------
-        # WORKER HAS RETURNED ANSWER
+        # WORKER ANSWER READY
         # --------------------------------------------
 
         if status == "answer_ready":
@@ -3538,6 +3732,7 @@ def chat_wait_for_worker(
 
                 try:
                     result = json.loads(result)
+
                 except Exception:
                     result = {"answer": result}
 
@@ -3547,26 +3742,35 @@ def chat_wait_for_worker(
 
                 answer = (
                     "Yi haƙuri, ba a samu amsa mai inganci ba."
+                    if language == "ha"
+                    else
+                    "Sorry, no valid answer was received."
                 )
 
             try:
 
-                # Edit Typing to final answer
+                # Edit original Typing message
                 bot.edit_message_text(
                     str(answer),
                     chat_id,
                     typing_message_id
                 )
 
-                # Update saved outgoing message
                 chat_update_bot_message(
                     chat_id,
                     typing_message_id,
                     str(answer)
                 )
 
-                # Mark task delivered
                 chat_mark_task_delivered(task_id)
+
+                chat_admin_debug(
+                    "✅ WORKER ANSWER DELIVERED\n"
+                    f"Task ID: {task_id}\n"
+                    f"User ID: {user_id}\n"
+                    "Telegram edit: SUCCESS\n"
+                    "Database status: delivered"
+                )
 
                 chat_log(
                     "Task delivered successfully: %s",
@@ -3575,16 +3779,21 @@ def chat_wait_for_worker(
 
                 return
 
-            except Exception:
+            except Exception as e:
 
                 chat_error(
                     "Answer delivery failed for task %s",
                     task_id
                 )
 
-                # Kada a sa delivered idan Telegram bai karɓi amsar ba.
-                # A sake dubawa daga baya.
-                time.sleep(5)
+                chat_admin_debug(
+                    "❌ ANSWER DELIVERY ERROR\n"
+                    f"Task ID: {task_id}\n"
+                    f"Error: {str(e)[:1000]}\n"
+                    "Will retry."
+                )
+
+                time.sleep(CHAT_RESPONSE_POLL_SECONDS)
                 continue
 
         # --------------------------------------------
@@ -3593,10 +3802,19 @@ def chat_wait_for_worker(
 
         if status in ("failed", "rejected"):
 
-            error_reply = (
-                "Yi haƙuri, an samu matsala wajen "
-                "sarrafa saƙonka. Ka sake gwadawa daga baya."
-            )
+            if language == "en":
+
+                error_reply = (
+                    "Sorry, something went wrong while processing "
+                    "your message. Please try again later."
+                )
+
+            else:
+
+                error_reply = (
+                    "Yi haƙuri, an samu matsala wajen "
+                    "sarrafa saƙonka. Ka sake gwadawa daga baya."
+                )
 
             try:
 
@@ -3612,6 +3830,13 @@ def chat_wait_for_worker(
                     error_reply
                 )
 
+                chat_admin_debug(
+                    "❌ WORKER REPORTED FAILURE\n"
+                    f"Task ID: {task_id}\n"
+                    f"User ID: {user_id}\n"
+                    f"Worker Error: {str(task.get('error_message') or '')[:1000]}"
+                )
+
                 return
 
             except Exception:
@@ -3620,53 +3845,31 @@ def chat_wait_for_worker(
                 return
 
         # --------------------------------------------
-        # TYPING ANIMATION
+        # PERIODIC WORKER STATUS DEBUG
+        # Every 30 seconds, not every 2 seconds
         # --------------------------------------------
 
         now = time.monotonic()
 
-        if now - last_edit >= 1:
+        if now - last_debug_time >= 30:
 
-            if (
-                now - started_at >= CHAT_MAX_WAIT_SECONDS
-                and not slow_message_shown
-            ):
-
-                frame = (
-                    "Har yanzu ana sarrafa saƙonka. "
-                    "Don Allah ka ɗan jira..."
-                )
-
-                slow_message_shown = True
-
-            elif not slow_message_shown:
-
-                frame = CHAT_TYPING_FRAMES[frame_index]
-
-                frame_index = (
-                    frame_index + 1
-                ) % len(CHAT_TYPING_FRAMES)
-
-            else:
-
-                frame = "Ana ci gaba da sarrafa saƙonka..."
-
-            chat_edit_typing(
-                chat_id,
-                typing_message_id,
-                frame
+            chat_admin_debug(
+                "🔄 WORKER STILL PROCESSING\n"
+                f"Task ID: {task_id}\n"
+                f"User ID: {user_id}\n"
+                f"Current Status: {status}\n"
+                f"Waiting: {int(elapsed)} seconds"
             )
 
-            last_edit = now
+            last_debug_time = now
 
+        # Wait 2 seconds before checking again
         time.sleep(CHAT_RESPONSE_POLL_SECONDS)
 
 
 # ============================================================
 # END PART 3
 # ============================================================
-
-
 
 # ============================================================
 # CHAT MESSAGE SYSTEM - PART 4
@@ -3753,6 +3956,7 @@ def chat_save_typing_message(
     cur = None
 
     try:
+
         cur = conn.cursor()
 
         cur.execute("""
@@ -3772,7 +3976,7 @@ def chat_save_typing_message(
                 'outgoing',
                 'bot',
                 'text',
-                'Typing.',
+                'Typing...',
                 NOW() + INTERVAL '12 hours'
             )
         """, (
@@ -3784,13 +3988,29 @@ def chat_save_typing_message(
 
         conn.commit()
 
-    except Exception:
+        chat_admin_debug(
+            "✅ TYPING MESSAGE INSERTED\n"
+            f"Task ID: {task_id}\n"
+            f"Telegram Message ID: {telegram_message_id}"
+        )
+
+    except Exception as e:
+
         conn.rollback()
+
+        chat_admin_debug(
+            "❌ TYPING MESSAGE INSERT FAILED\n"
+            f"Task ID: {task_id}\n"
+            f"Error: {str(e)[:1000]}"
+        )
+
         raise
 
     finally:
+
         if cur:
             cur.close()
+
         conn.close()
 
 
@@ -3808,6 +4028,7 @@ def chat_update_bot_message(
     cur = None
 
     try:
+
         cur = conn.cursor()
 
         cur.execute("""
@@ -3826,18 +4047,20 @@ def chat_update_bot_message(
         conn.commit()
 
     except Exception:
+
         conn.rollback()
         raise
 
     finally:
+
         if cur:
             cur.close()
+
         conn.close()
 
 
 # ------------------------------------------------------------
 # MARK TASK FAILED
-# Used if Telegram cannot send/save the Typing message
 # ------------------------------------------------------------
 
 def chat_mark_task_failed(task_id, error_message):
@@ -3846,6 +4069,7 @@ def chat_mark_task_failed(task_id, error_message):
     cur = None
 
     try:
+
         cur = conn.cursor()
 
         cur.execute("""
@@ -3864,12 +4088,15 @@ def chat_mark_task_failed(task_id, error_message):
         conn.commit()
 
     except Exception:
+
         conn.rollback()
         chat_error("Could not mark task as failed")
 
     finally:
+
         if cur:
             cur.close()
+
         conn.close()
 
 
@@ -3936,55 +4163,89 @@ def chat_receive_text(message):
 
     # 4. Save message and create task
     try:
+
         result, task_id, message_row_id = chat_create_user_task(
             message
         )
 
-    except Exception:
+    except Exception as e:
+
         chat_error("Could not save incoming message")
 
+        chat_admin_debug(
+            "❌ INCOMING MESSAGE SAVE FAILED\n"
+            f"User ID: {user_id}\n"
+            f"Error Type: {type(e).__name__}\n"
+            f"Error: {str(e)[:1200]}"
+        )
+
         try:
+
             bot.reply_to(
                 message,
                 chat_get_text(language, "database_error")
             )
+
         except Exception:
+
             chat_error("Could not send database error message")
 
         return
 
-    # 5. If user already has unfinished work, do not queue this message
+    # 5. If user already has unfinished work
     if result == "busy":
 
         try:
+
             bot.reply_to(
                 message,
                 chat_get_text(language, "busy")
             )
+
         except Exception:
+
             chat_error("Could not send busy response")
 
         return
 
     # 6. Send Typing placeholder
     try:
+
         typing_message = bot.send_message(
             message.chat.id,
-            "Typing."
+            "Typing..."
+        )
+
+        chat_admin_debug(
+            "✅ TELEGRAM TYPING MESSAGE SENT\n"
+            f"Task ID: {task_id}\n"
+            f"User ID: {user_id}\n"
+            f"Telegram Message ID: {typing_message.message_id}"
         )
 
     except Exception as e:
+
         chat_error("Could not send typing message")
 
+        chat_admin_debug(
+            "❌ TELEGRAM TYPING MESSAGE FAILED\n"
+            f"Task ID: {task_id}\n"
+            f"Error: {str(e)[:1000]}"
+        )
+
         try:
+
             chat_mark_task_failed(task_id, repr(e))
+
         except Exception:
+
             chat_error("Could not update failed task")
 
         return
 
-    # 7. Save the Telegram ID of the Typing message
+    # 7. Save Telegram ID of Typing message
     try:
+
         chat_save_typing_message(
             user_id=user_id,
             task_id=task_id,
@@ -3993,45 +4254,80 @@ def chat_receive_text(message):
         )
 
     except Exception:
+
         chat_error("Could not save typing message in DB")
 
-        # Try to remove the unsaved Typing message
         try:
+
             bot.delete_message(
                 message.chat.id,
                 typing_message.message_id
             )
+
         except Exception:
             pass
 
         try:
+
             chat_mark_task_failed(
                 task_id,
                 "Could not save Typing message in database"
             )
+
         except Exception:
+
             chat_error("Could not mark task failed")
 
         return
 
-    # 8. Start a separate thread to wait for the worker
-    waiting_thread = threading.Thread(
-        target=chat_wait_for_worker,
-        args=(
-            task_id,
-            user_id,
-            message.chat.id,
-            typing_message.message_id
-        ),
-        daemon=True
-    )
+    # 8. Start thread to wait for Worker
+    try:
 
-    waiting_thread.start()
+        waiting_thread = threading.Thread(
+            target=chat_wait_for_worker,
+            args=(
+                task_id,
+                user_id,
+                message.chat.id,
+                typing_message.message_id
+            ),
+            daemon=True
+        )
 
-    chat_log(
-        "Incoming text accepted. Task ID: %s",
-        task_id
-    )
+        waiting_thread.start()
+
+        chat_admin_debug(
+            "✅ RESPONSE CHECKER THREAD STARTED\n"
+            f"Task ID: {task_id}\n"
+            f"User ID: {user_id}\n"
+            "Polling: Every 2 seconds\n"
+            "Timeout: 5 minutes"
+        )
+
+        chat_log(
+            "Incoming text accepted. Task ID: %s",
+            task_id
+        )
+
+    except Exception as e:
+
+        chat_error("Could not start response checker thread")
+
+        chat_admin_debug(
+            "❌ RESPONSE CHECKER THREAD FAILED\n"
+            f"Task ID: {task_id}\n"
+            f"Error: {str(e)[:1000]}"
+        )
+
+        try:
+
+            chat_mark_task_failed(
+                task_id,
+                "Response checker thread could not start"
+            )
+
+        except Exception:
+            pass
 
 
 # ------------------------------------------------------------
@@ -4063,12 +4359,14 @@ def chat_reject_non_text(message):
     )
 
     try:
+
         bot.reply_to(
             message,
             chat_get_text(language, "media")
         )
 
     except Exception:
+
         chat_error("Could not reject non-text message")
 
 
@@ -4092,6 +4390,14 @@ def start_chat_message_system():
 
     chat_log("Chat message handlers are ready")
 
+    chat_admin_debug(
+        "🚀 CHAT MESSAGE SYSTEM STARTED\n"
+        "Handlers: Registered\n"
+        "Database: Ready for connection checks\n"
+        "Worker polling: 2 seconds\n"
+        "Response timeout: 5 minutes"
+    )
+
 
 # ============================================================
 # RUN START FUNCTION
@@ -4102,6 +4408,10 @@ start_chat_message_system()
 # ============================================================
 # END PART 4
 # ============================================================
+
+
+
+
 
 
 
