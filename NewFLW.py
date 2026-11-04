@@ -1117,6 +1117,9 @@ def send_feedback_prompt(user_id, order_id):
     except Exception as e:
         print("FEEDBACK SEND ERROR:", e)
 
+
+
+
 import html
 
 def clean_html(text):
@@ -1402,34 +1405,18 @@ Use the button below to open your wallet.
         # ================== FILM ORDER =======================
         # =====================================================
         if order_type == "film":
-            print(f"🐞 [DEBUG FILM]: Fara sarrafa film order_id: {order_id} na user: {user_id}")
-            try:
-                cur.execute(
-                    """
-                    SELECT i.title, i.group_key, COALESCE(i.cashback_amount, 0)
-                    FROM order_items oi
-                    JOIN items i ON i.id = oi.item_id
-                    WHERE oi.order_id=%s
-                    """,
-                    (order_id,)
-                )
-                rows = cur.fetchall()
-            except Exception as db_err:
-                print(f"❌ [DEBUG DB ERROR]: {db_err}")
-                if ADMIN_ID:
-                    try:
-                        bot.send_message(ADMIN_ID, f"🚨 DB ERROR (Items Select):\n<code>{db_err}</code>", parse_mode="HTML")
-                    except:
-                        pass
-                raise db_err
+            cur.execute(
+                """
+                SELECT i.title, i.group_key, COALESCE(i.cashback_amount, 0)
+                FROM order_items oi
+                JOIN items i ON i.id = oi.item_id
+                WHERE oi.order_id=%s
+                """,
+                (order_id,)
+            )
+            rows = cur.fetchall()
 
             if not rows:
-                print(f"⚠️ [DEBUG FILM]: Babu items a cikin order_id: {order_id}")
-                if ADMIN_ID:
-                    try:
-                        bot.send_message(ADMIN_ID, f"⚠️ Empty order items for ID: <code>{order_id}</code>", parse_mode="HTML")
-                    except:
-                        pass
                 cur.close()
                 conn.close()
                 return "Empty order", 200
@@ -1466,131 +1453,97 @@ Use the button below to open your wallet.
                 is_custom_cashback = False
 
             if cashback > 0:
-                try:
-                    wallet_conn = get_wallet_conn()
-                    wallet_cur = wallet_conn.cursor()
+                wallet_conn = get_wallet_conn()
+                wallet_cur = wallet_conn.cursor()
 
-                    wallet_cur.execute(
-                        """
-                        INSERT INTO wallet_balance (user_id, balance)
-                        VALUES (%s,%s)
-                        ON CONFLICT (user_id)
-                        DO UPDATE SET
-                        balance = wallet_balance.balance + EXCLUDED.balance,
-                        updated_at = NOW()
-                        """,
-                        (user_id, cashback)
+                wallet_cur.execute(
+                    """
+                    INSERT INTO wallet_balance (user_id, balance)
+                    VALUES (%s,%s)
+                    ON CONFLICT (user_id)
+                    DO UPDATE SET
+                    balance = wallet_balance.balance + EXCLUDED.balance,
+                    updated_at = NOW()
+                    """,
+                    (user_id, cashback)
+                )
+
+                wallet_cur.execute(
+                    """
+                    INSERT INTO wallet_transactions
+                    (user_id, amount, type, reference, description)
+                    VALUES (%s,%s,'cashback',%s,'Movie Cashback Reward')
+                    """,
+                    (user_id, cashback, order_id)
+                )
+
+                wallet_cur.execute(
+                    """
+                    SELECT balance FROM wallet_balance WHERE user_id=%s
+                    """,
+                    (user_id,)
+                )
+                user_balance_row = wallet_cur.fetchone()
+                user_wallet_balance = user_balance_row[0] if user_balance_row else 0
+
+                wallet_conn.commit()
+                wallet_cur.close()
+                wallet_conn.close()
+
+                cb_kb = InlineKeyboardMarkup()
+                cb_kb.add(
+                    InlineKeyboardButton(
+                        "💼 View Wallet", 
+                        callback_data=f"view_cb_bal:{user_wallet_balance}",
+                        style="primary"
                     )
+                )
 
-                    wallet_cur.execute(
-                        """
-                        INSERT INTO wallet_transactions
-                        (user_id, amount, type, reference, description)
-                        VALUES (%s,%s,'cashback',%s,'Movie Cashback Reward')
-                        """,
-                        (user_id, cashback, order_id)
-                    )
+                cb_text = (
+                    f"🎁 <b>Cashback Reward</b>🎉\n\n"
+                    f"Wallet ID: <code>{user_id}</code>\n"
+                    f"You received ₦{cashback} cashback,\n"
+                    f"View your wallet to see available balance"
+                )
 
-                    wallet_cur.execute(
-                        """
-                        SELECT balance FROM wallet_balance WHERE user_id=%s
-                        """,
-                        (user_id,)
-                    )
-                    user_balance_row = wallet_cur.fetchone()
-                    user_wallet_balance = user_balance_row[0] if user_balance_row else 0
+                bot.send_message(user_id, cb_text, parse_mode="HTML", reply_markup=cb_kb)
 
-                    wallet_conn.commit()
-                    wallet_cur.close()
-                    wallet_conn.close()
-                    print(f"🐞 [DEBUG CASHBACK]: An tura ₦{cashback} ga user {user_id}")
-                except Exception as cb_db_err:
-                    print(f"❌ [DEBUG CASHBACK DB ERROR]: {cb_db_err}")
-                    if ADMIN_ID:
-                        try:
-                            bot.send_message(ADMIN_ID, f"🚨 Cashback DB Error:\n<code>{cb_db_err}</code>", parse_mode="HTML")
-                        except:
-                            pass
-
-                try:
-                    cb_kb = InlineKeyboardMarkup()
-                    cb_kb.add(
-                        InlineKeyboardButton(
-                            "💼 View Wallet", 
-                            callback_data=f"view_cb_bal:{user_wallet_balance}",
-                            style="primary"
-                        )
-                    )
-
-                    cb_text = (
-                        f"🎁 <b>Cashback Reward</b>🎉\n\n"
-                        f"Wallet ID: <code>{user_id}</code>\n"
-                        f"You received ₦{cashback} cashback,\n"
-                        f"View your wallet to see available balance"
-                    )
-
-                    bot.send_message(user_id, cb_text, parse_mode="HTML", reply_markup=cb_kb)
-                    print(f"🐞 [DEBUG TG CASHBACK]: An aika sakon cashback nasara zuwa ga user {user_id}")
-                except Exception as cb_tg_err:
-                    print(f"❌ [DEBUG TG CASHBACK ERROR]: {cb_tg_err}")
-                    if ADMIN_ID:
-                        try:
-                            bot.send_message(ADMIN_ID, f"🚨 Telegram Cashback Msg Error:\n<code>{cb_tg_err}</code>", parse_mode="HTML")
-                        except:
-                            pass
-
-            try:
-                conn.commit()
-            except Exception as commit_err:
-                print(f"❌ [DEBUG COMMIT ERROR]: {commit_err}")
-                if ADMIN_ID:
-                    try:
-                        bot.send_message(ADMIN_ID, f"🚨 Main DB Commit Error:\n<code>{commit_err}</code>", parse_mode="HTML")
-                    except:
-                        pass
+            conn.commit()
+            cur.close()
+            conn.close()
 
             # ================= SABON TSARIN SAKON PAYMENT SUCCESSFUL =================
-            try:
-                kb = InlineKeyboardMarkup()
-                kb.add(
-                    InlineKeyboardButton(
-                        "⬇️ DOWNLOAD NOW",
-                        callback_data=f"deliver:{order_id}",
-                        style="success"
-                    )
+            kb = InlineKeyboardMarkup()
+            kb.add(
+                InlineKeyboardButton(
+                    "⬇️ DOWNLOAD NOW",
+                    callback_data=f"deliver:{order_id}",
+                    style="success"
                 )
+            )
 
-                success_text = (
-                    f"🎉 <b>PAYMENT SUCCESSFUL!</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━\n"
-                    f"Mun Gode {safe_full_name}\n\n"
-                    f"🎬 <b>Film:</b> {safe_titles_text}\n"
-                    f"💵 <b>Amount Paid:</b> ₦{paid_amount}\n"
-                    f"━━━━━━━━━━━━━━━━━━\n"
-                    f"🎁 <b>Cashback Earned:</b> ₦{cashback}\n\n"
-                    f"✅ Biyan ya kammala! 😊\n"
-                    f"Danna DOWNLOAD domin sauke fim din\n"
-                    f"👇👇👇"
-                )
+            success_text = (
+                f"🎉 <b>PAYMENT SUCCESSFUL!</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"Mun Gode {safe_full_name}\n\n"
+                f"🎬 <b>Film:</b> {safe_titles_text}\n"
+                f"💵 <b>Amount Paid:</b> ₦{paid_amount}\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🎁 <b>Cashback Earned:</b> ₦{cashback}\n\n"
+                f"✅ Biyan ya kammala! 😊\n"
+                f"Danna DOWNLOAD domin sauke fim din\n"
+                f"👇👇👇"
+            )
 
-                bot.send_message(user_id, success_text, parse_mode="HTML", reply_markup=kb)
-                print(f"🐞 [DEBUG TG DOWNLOAD]: An aika sakon DOWNLOAD NOW button zuwa ga user {user_id}")
-            except Exception as dl_err:
-                print(f"❌ [DEBUG TG DOWNLOAD ERROR]: {dl_err}")
-                if ADMIN_ID:
-                    try:
-                        bot.send_message(ADMIN_ID, f"🚨 DOWNLOAD BUTTON SEND ERROR (Order {order_id}):\n<code>{dl_err}</code>", parse_mode="HTML")
-                    except:
-                        pass
+            bot.send_message(user_id, success_text, parse_mode="HTML", reply_markup=kb)
 
             if PAYMENT_NOTIFY_GROUP:
-                try:
-                    from datetime import datetime, timedelta
-                    now = (datetime.now() + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+                from datetime import datetime, timedelta
+                now = (datetime.now() + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
 
-                    bot.send_message(
-                        PAYMENT_NOTIFY_GROUP,
-                        f"""✅ <b>NEW PAYMENT RECEIVED</b>
+                bot.send_message(
+                    PAYMENT_NOTIFY_GROUP,
+                    f"""✅ <b>NEW PAYMENT RECEIVED</b>
 
 👤 <b>Name:</b> {safe_full_name}
 🔗 <b>Username:</b> {safe_tg_username}
@@ -1602,19 +1555,9 @@ Use the button below to open your wallet.
 💰 <b>Amount:</b> ₦{paid_amount}
 ⏰ <b>Time:</b> {now}
 """,
-                        parse_mode="HTML"
-                    )
-                    print(f"🐞 [DEBUG NOTIFY GROUP]: An aika sanarwa zuwa Payment Notify Group na order: {order_id}")
-                except Exception as notify_err:
-                    print(f"❌ [DEBUG NOTIFY GROUP ERROR]: {notify_err}")
-                    if ADMIN_ID:
-                        try:
-                            bot.send_message(ADMIN_ID, f"🚨 NOTIFY GROUP ERROR (Order {order_id}):\n<code>{notify_err}</code>", parse_mode="HTML")
-                        except:
-                            pass
+                    parse_mode="HTML"
+                )
 
-            cur.close()
-            conn.close()
             return "OK", 200
 
         # =====================================================
@@ -1780,15 +1723,8 @@ Na gode da kasancewa tare da mu 🙏""",
         return "OK", 200
 
     except Exception as e:
-        print(f"❌ WEBHOOK CRITICAL ERROR: {e}")
-        if ADMIN_ID:
-            try:
-                bot.send_message(ADMIN_ID, f"🚨 WEBHOOK CRITICAL ERROR:\n<code>{e}</code>", parse_mode="HTML")
-            except:
-                pass
+        print(f"Webhook Error: {e}")
         return "Internal Error", 500
-
-
 
 
 
@@ -4815,9 +4751,13 @@ Zabi adadin da zaka deposit zuwa wallet din ka👇👇
 
 
 
-
-
 from datetime import datetime, timedelta
+import html
+
+def clean_html(text):
+    if not text:
+        return ""
+    return html.escape(str(text))
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("walletpay:"))
 def wallet_pay_handler(call):
@@ -4966,6 +4906,9 @@ def wallet_pay_handler(call):
     except:
         tg_username = "unknown"
 
+    safe_full_name = clean_html(full_name)
+    safe_tg_username = clean_html(tg_username)
+
     # ================= FETCH ITEMS =================
     cur.execute(
         """
@@ -4998,6 +4941,7 @@ def wallet_pay_handler(call):
             lines.append(f"{g['title']}")
 
     titles_text = ", ".join(lines) if lines else "N/A"
+    safe_titles_text = clean_html(titles_text)
 
     item_count = sum(g["count"] for g in groups.values())
 
@@ -5013,28 +4957,28 @@ def wallet_pay_handler(call):
     kb.add(
         InlineKeyboardButton(
             "⬇️ DOWNLOAD NOW",
-            callback_data=f"deliver:{order_id}"
+            callback_data=f"deliver:{order_id}",
+            style="success"
         )
+    )
+
+    success_text = (
+        f"🎉 <b>PAYMENT SUCCESSFUL!</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"Mun Gode {safe_full_name}\n\n"
+        f"💳 <b>Payment Method:</b> Wallet Balance\n"
+        f"🎬 <b>Film:</b> {safe_titles_text}\n"
+        f"📦 <b>Items Count:</b> {item_count}\n"
+        f"💵 <b>Amount Paid:</b> ₦{amount}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"✅ Biyan ya kammala ta wallet! 😊\n"
+        f"Danna DOWNLOAD domin sauke fim din\n"
+        f"👇👇👇"
     )
 
     bot.send_message(
         user_id,
-        f"""🎉 <b>PAYMENT SUCCESSFUL</b>
-You used wallet balance
-
-👤 Name: {full_name}
-🆔 User ID: <code>{user_id}</code>
-
-📦 Items: {item_count}
-🎬 Films: {titles_text}
-
-🗃 Order ID:
-<code>{order_id}</code>
-
-💰 Amount Paid: ₦{amount}
-⏰ Time: {now}
-
-⬇️ DOWNLOAD NOW""",
+        success_text,
         parse_mode="HTML",
         reply_markup=kb
     )
@@ -5044,20 +4988,17 @@ You used wallet balance
 
         bot.send_message(
             PAYMENT_NOTIFY_GROUP_WALLET,
-            f"""✅ <b>NEW PAYMENT SUCCESSFUL</b>
+            f"""✅ <b>NEW PAYMENT RECEIVED (WALLET)</b>
 
-👤 <b>User Full Name:</b> {full_name}
-🔗 <b>User Tag:</b> {tg_username}
+👤 <b>Name:</b> {safe_full_name}
+🔗 <b>Username:</b> {safe_tg_username}
+🆔 <b>User ID:</b> <code>{user_id}</code>
 
-🗃 <b>Order ID:</b>
-<code>{order_id}</code>
+🎬 <b>Items:</b> {safe_titles_text}
+🗃 <b>Order ID:</b> <code>{order_id}</code>
 
 💳 <b>Payment Method:</b> Wallet
-
-🎬 <b>Films:</b> {titles_text}
-
 💰 <b>Amount:</b> ₦{amount}
-
 ⏰ <b>Time:</b> {now}
 """,
             parse_mode="HTML"
@@ -8005,241 +7946,6 @@ def start_handler(msg):
     bot.send_message(msg.chat.id, "Welcome!")
 
 
-# ========= BUYD (ITEM ONLY | DEEP LINK → DM) =========
-from psycopg2.extras import RealDictCursor
-import uuid
-import time
-import re
-
-@bot.message_handler(func=lambda m: m.text and m.text.startswith("/start groupitem_"))
-def groupitem_deeplink_handler(msg):
-    uid = msg.from_user.id
-    user_name = msg.from_user.first_name or "Customer"
-
-    # ========= PARSE ITEM IDS + GROUP KEYS =========
-    try:
-        raw = msg.text.split("groupitem_", 1)[1]
-        tokens = [x.strip() for x in re.split(r"[_,\s]+", raw) if x.strip()]
-    except Exception:
-        return
-
-    if not tokens:
-        return
-
-    # ✅ SAFE CONNECTION
-    conn = get_conn()
-    if not conn:
-        return
-    cur = conn.cursor(cursor_factory=RealDictCursor)
-
-    item_ids = []
-
-    try:
-        for token in tokens:
-            # ==== IF ID ====
-            if token.isdigit():
-                item_ids.append(int(token))
-
-            # ==== IF GROUP KEY ====
-            else:
-                cur.execute(
-                    "SELECT id FROM items WHERE group_key=%s",
-                    (token,)
-                )
-                rows = cur.fetchall()
-                item_ids.extend([r["id"] for r in rows])
-
-    except Exception:
-        cur.close()
-        conn.close()
-        return
-
-    if not item_ids:
-        cur.close()
-        conn.close()
-        return
-
-    # ========= FETCH ITEMS =========
-    try:
-        placeholders = ",".join(["%s"] * len(item_ids))
-        cur.execute(
-            f"""
-            SELECT id, title, price, file_id, group_key
-            FROM items
-            WHERE id IN ({placeholders})
-            """,
-            tuple(item_ids)
-        )
-        items = cur.fetchall()
-    except Exception:
-        cur.close()
-        conn.close()
-        return
-
-    if not items:
-        cur.close()
-        conn.close()
-        return
-
-    # ========= FILE_ID REQUIRED =========
-    items = [i for i in items if i.get("file_id")]
-    if not items:
-        cur.close()
-        conn.close()
-        return
-
-    item_ids_clean = [i["id"] for i in items]
-
-    # ========= OWNERSHIP CHECK =========
-    try:
-        cur.execute(
-            f"""
-            SELECT 1 FROM user_movies
-            WHERE user_id=%s
-              AND item_id IN ({",".join(["%s"] * len(item_ids_clean))})
-            LIMIT 1
-            """,
-            (uid, *item_ids_clean)
-        )
-        owned = cur.fetchone()
-    except Exception:
-        cur.close()
-        conn.close()
-        return
-
-    if owned:
-        kb = InlineKeyboardMarkup()
-        kb.add(InlineKeyboardButton("📽 PAID MOVIES", callback_data="my_movies"))
-        bot.send_message(
-            uid,
-            "✅ You have already purchased this movie.\n\n"
-            "Please check your *Paid Movies* to download it again.",
-            parse_mode="Markdown",
-            reply_markup=kb
-        )
-        cur.close()
-        conn.close()
-        return
-
-    # ========= GROUP_KEY PRICING =========
-    groups = {}
-    for i in items:
-        key = i["group_key"] or f"single_{i['id']}"
-        if key not in groups:
-            groups[key] = int(i["price"] or 0)
-
-    total = sum(groups.values())
-    item_count = len(items)
-
-    if total <= 0:
-        cur.close()
-        conn.close()
-        return
-
-    # ========= REUSE / CREATE ORDER =========
-    try:
-        cur.execute(
-            f"""
-            SELECT o.id
-            FROM orders o
-            JOIN order_items oi ON oi.order_id = o.id
-            WHERE o.user_id=%s
-              AND o.paid=0
-              AND oi.item_id IN ({",".join(["%s"] * len(item_ids_clean))})
-            GROUP BY o.id
-            HAVING COUNT(DISTINCT oi.item_id)=%s
-            LIMIT 1
-            """,
-            (uid, *item_ids_clean, len(item_ids_clean))
-        )
-        row = cur.fetchone()
-    except Exception:
-        cur.close()
-        conn.close()
-        return
-
-    if row:
-        order_id = row["id"]
-    else:
-        order_id = str(uuid.uuid4())
-        try:
-            cur.execute(
-                "INSERT INTO orders (id, user_id, amount, paid, type) VALUES (%s,%s,%s,0,'film')",
-                (order_id, uid, total)
-            )
-            for i in items:
-                cur.execute(
-                    """
-                    INSERT INTO order_items (order_id, item_id, file_id, price)
-                    VALUES (%s,%s,%s,%s)
-                    """,
-                    (order_id, i["id"], i["file_id"], int(i["price"] or 0))
-                )
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            cur.close()
-            conn.close()
-            return
-
-    # ========= FLUTTERWAVE (An sauya daga Paystack) =========
-    display_title = f"{item_count} film(s)"
-    # Mun kira sabon function din mu na Flutterwave
-    pay_url = create_flutterwave_payment(uid, order_id, total, display_title)
-
-    if not pay_url:
-        bot.send_message(uid, "❌ Sorry, payment gateway is down. Try again later.")
-        cur.close()
-        conn.close()
-        return
-
-    # ========= FIXED TITLE DISPLAY =========
-    unique_titles = [
-        i["title"]
-        for _, i in {
-            (i["group_key"] or f"single_{i['id']}"): i
-            for i in items
-        }.items()
-    ]
-
-    # ========= FINAL UI =========
-    kb = InlineKeyboardMarkup()
-
-    # PAY NOW (TOP ROW)
-    kb.add(
-        InlineKeyboardButton("💳 PAY NOW", url=pay_url)
-    )
-
-    # SECOND ROW
-    kb.row(
-        InlineKeyboardButton("💵Pay with wallet", callback_data=f"walletpay:{order_id}"),
-        InlineKeyboardButton("❌ Cancel", callback_data=f"cancel:{order_id}")
-    )
-
-    sent = bot.send_message(
-        uid,
-        f"""🧺 <b>Your order created 🎉</b>
-
-🎬 <b>You will buy:</b>
-{", ".join(unique_titles)}
-
-📦 Films: {item_count}
-💵 Total amount: ₦{total}
-
-👤 <b>Your name is:</b> {user_name}
-🆔 <b>Order ID:</b>
-<code>{order_id}</code>
-""",
-        parse_mode="HTML",
-        reply_markup=kb
-    )
-
-    # ===== STORE MESSAGE FOR AUTO DELETE AFTER PAYMENT =====
-    ORDER_MESSAGES[order_id] = (sent.chat.id, sent.message_id)
-
-    cur.close()
-    conn.close()
-
 
    
 
@@ -8472,13 +8178,11 @@ Tura <b>/sendall</b> domin a sake tura items.""",
             conn.close()
 
 
-
-
 import uuid
 import traceback
 from psycopg2.extras import RealDictCursor
 
-# ========= PAY ALL UNPAID (SAFE | GROUP-AWARE | CLEAN VERSION) =========
+# ========= PAY ALL UNPAID (SAFE | GROUP-AWARE | MODERN FORMAT) =========
 @bot.callback_query_handler(func=lambda c: c.data == "payall:")
 def pay_all_unpaid(call):
     uid = call.from_user.id
@@ -8631,7 +8335,7 @@ def pay_all_unpaid(call):
             conn.commit()
 
         # ==================================================
-        # 6️⃣ FLUTTERWAVE (An sauya daga Paystack)
+        # 6️⃣ FLUTTERWAVE PAYMENT LINK
         # ==================================================
         pay_url = create_flutterwave_payment(
             uid,
@@ -8645,7 +8349,7 @@ def pay_all_unpaid(call):
             return
 
         # ==================================================
-        # 7️⃣ DISPLAY
+        # 7️⃣ DISPLAY (MODERN STYLE WITH COLORS & HTML CLEAN)
         # ==================================================
         unique_titles = []
         seen = set()
@@ -8657,36 +8361,35 @@ def pay_all_unpaid(call):
                 unique_titles.append(title)
                 seen.add(key)
 
+        safe_user_name = clean_html(user_name)
+        safe_titles_text = clean_html(", ".join(unique_titles) if unique_titles else "N/A")
+
         kb = InlineKeyboardMarkup()
 
-        # PAY NOW
+        # PAY NOW (CREDIT CARD / FLUTTERWAVE)
         kb.add(
-            InlineKeyboardButton("💳 PAY NOW", url=pay_url)
+            InlineKeyboardButton("💳 PAY NOW 💳", url=pay_url, style="success")
         )
 
-        # NEW WALLET BUTTON (LIKE GROUPITEM)
+        # WALLET & CANCEL BUTTONS (WITH COLOR STYLES)
         kb.row(
-            InlineKeyboardButton("💵Pay with wallet", callback_data=f"walletpay:{order_id}"),
-            InlineKeyboardButton("❌ Cancel", callback_data=f"cancel:{order_id}")
+            InlineKeyboardButton("💰 Pay with Wallet", callback_data=f"walletpay:{order_id}", style="primary"),
+            InlineKeyboardButton("❌ Cancel Order", callback_data=f"cancel:{order_id}", style="danger")
         )
 
         sent = bot.send_message(
             uid,
-            f"""🧺 <b>PAY ALL UNPAID ORDERS</b>
-
-👤 <b>Your name is:</b> {user_name}
-
-🎬 <b>Films:</b>
-{", ".join(unique_titles)}
-
-📦 <b>Films:</b> {len(item_ids)}
-🗂 <b>G-orders:</b> {len(groups)}
-
-💵 <b>Total amount:</b> ₦{total_amount}
-
-🆔 <b>Order ID:</b>
-<code>{order_id}</code>
-""",
+            f"""💳⚡ <b>FLUTTERWAVE SIMPLE PAYMENT</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"Barka {safe_user_name}\n"
+            f"You want buy these movies\n\n"
+            f"🎬 <b>Films:</b> {safe_titles_text}\n\n"
+            f"📦 <b>TOTAL FILMS:</b> {len(item_ids)}\n"
+            f"🗃 <b>GROUPS:</b> {len(groups)}\n"
+            f"💵 <b>TOTAL PRICE:</b> ₦{total_amount}\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"Danna Pay now da ke kasa don biya nan take.\n"
+            f"Click pay now 👇",
             parse_mode="HTML",
             reply_markup=kb
         )
@@ -8695,7 +8398,6 @@ def pay_all_unpaid(call):
         ORDER_MESSAGES[order_id] = (sent.chat.id, sent.message_id)
 
     except Exception:
-        # Don kiyaye bot din daga tsayawa idan akwai error
         print(traceback.format_exc())
         pass
 
@@ -8705,7 +8407,6 @@ def pay_all_unpaid(call):
             conn.close()
         except:
             pass
-
 
 
 import time
@@ -9618,7 +9319,6 @@ def handle_callback(c):
 
     
 
-
     from psycopg2.extras import RealDictCursor
     import uuid
 
@@ -9780,10 +9480,9 @@ def handle_callback(c):
             pass
 
         # ==================================================
-        # FLUTTERWAVE (An sauya daga Paystack)
+        # FLUTTERWAVE PAYMENT
         # ==================================================
         try:
-            # An yi amfani da create_flutterwave_payment yadda ka bukata
             pay_url = create_flutterwave_payment(
                 uid,
                 order_id,
@@ -9797,7 +9496,7 @@ def handle_callback(c):
             return
 
         # ==================================================
-        # FORMAT DISPLAY (LIKE PAYALL)
+        # FORMAT DISPLAY (MODERN STYLE WITH COLORS & HTML CLEAN)
         # ==================================================
         unique_titles = []
         seen = set()
@@ -9811,48 +9510,44 @@ def handle_callback(c):
 
         item_count = sum(len(g["items"]) for g in groups.values())
 
+        safe_user_name = clean_html(user_name)
+        safe_titles_text = clean_html(", ".join(unique_titles) if unique_titles else "N/A")
+
         kb = InlineKeyboardMarkup()
 
-        # TOP ROW
+        # PAY NOW (CREDIT CARD / FLUTTERWAVE)
         kb.add(
-            InlineKeyboardButton("💳 PAY NOW", url=pay_url)
+            InlineKeyboardButton("💳 PAY NOW 💳", url=pay_url, style="success")
         )
 
-        # SECOND ROW (NEW WALLET SYSTEM ADDED)
+        # WALLET & CANCEL BUTTONS (WITH COLOR STYLES)
         kb.row(
-            InlineKeyboardButton("💵Pay with wallet", callback_data=f"walletpay:{order_id}"),
-            InlineKeyboardButton("❌ Cancel", callback_data=f"cancel:{order_id}")
+            InlineKeyboardButton("💰 Pay with Wallet", callback_data=f"walletpay:{order_id}", style="primary"),
+            InlineKeyboardButton("❌ Cancel Order", callback_data=f"cancel:{order_id}", style="danger")
         )
 
         sent = bot.send_message(
             uid,
-            f"""🧺 <b>CART CHECKOUT</b>
-
-👤 <b>Your name is:</b> {user_name}
-
-🎬 <b>Films:</b>
-{", ".join(unique_titles)}
-
-📦 <b>Films:</b> {item_count}
-🗂 <b>G-orders:</b> {len(groups)}
-
-💵 <b>Total amount:</b> ₦{total}
-
-🆔 <b>Order ID:</b>
-<code>{order_id}</code>
-""",
+            f"""💳⚡ <b>FLUTTERWAVE SIMPLE PAYMENT</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"Barka {safe_user_name}\n"
+            f"You want buy these movies\n\n"
+            f"🎬 <b>Films:</b> {safe_titles_text}\n\n"
+            f"📦 <b>TOTAL FILMS:</b> {item_count}\n"
+            f"🗃 <b>GROUPS:</b> {len(groups)}\n"
+            f"💵 <b>TOTAL PRICE:</b> ₦{total}\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"Danna Pay now da ke kasa don biya nan take.\n"
+            f"Click pay now 👇",
             parse_mode="HTML",
             reply_markup=kb
         )
 
-        # ===== NEW: STORE MESSAGE FOR WEBHOOK AUTO DELETE =====
+        # ===== STORE MESSAGE FOR WEBHOOK AUTO DELETE =====
         ORDER_MESSAGES[order_id] = (sent.chat.id, sent.message_id)
 
         bot.answer_callback_query(c.id)
         return
-
-
-
 
     
 
