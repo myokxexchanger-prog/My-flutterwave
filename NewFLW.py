@@ -1117,7 +1117,6 @@ def send_feedback_prompt(user_id, order_id):
     except Exception as e:
         print("FEEDBACK SEND ERROR:", e)
 
-
 import html
 
 def clean_html(text):
@@ -1419,7 +1418,7 @@ Use the button below to open your wallet.
                 print(f"❌ [DEBUG DB ERROR]: {db_err}")
                 if ADMIN_ID:
                     try:
-                        bot.send_message(ADMIN_ID, f"🚨 DB ERROR (Items Select):\n`{db_err}`", parse_mode="Markdown")
+                        bot.send_message(ADMIN_ID, f"🚨 DB ERROR (Items Select):\n<code>{db_err}</code>", parse_mode="HTML")
                     except:
                         pass
                 raise db_err
@@ -1509,7 +1508,7 @@ Use the button below to open your wallet.
                     print(f"❌ [DEBUG CASHBACK DB ERROR]: {cb_db_err}")
                     if ADMIN_ID:
                         try:
-                            bot.send_message(ADMIN_ID, f"🚨 Cashback DB Error:\n`{cb_db_err}`", parse_mode="Markdown")
+                            bot.send_message(ADMIN_ID, f"🚨 Cashback DB Error:\n<code>{cb_db_err}</code>", parse_mode="HTML")
                         except:
                             pass
 
@@ -1524,19 +1523,19 @@ Use the button below to open your wallet.
                     )
 
                     cb_text = (
-                        f"🎁 **Cashback Reward**🎉\n\n"
-                        f"Wallet ID: `{user_id}`\n"
+                        f"🎁 <b>Cashback Reward</b>🎉\n\n"
+                        f"Wallet ID: <code>{user_id}</code>\n"
                         f"You received ₦{cashback} cashback,\n"
                         f"View your wallet to see available balance"
                     )
 
-                    bot.send_message(user_id, cb_text, parse_mode="Markdown", reply_markup=cb_kb)
+                    bot.send_message(user_id, cb_text, parse_mode="HTML", reply_markup=cb_kb)
                     print(f"🐞 [DEBUG TG CASHBACK]: An aika sakon cashback nasara zuwa ga user {user_id}")
                 except Exception as cb_tg_err:
                     print(f"❌ [DEBUG TG CASHBACK ERROR]: {cb_tg_err}")
                     if ADMIN_ID:
                         try:
-                            bot.send_message(ADMIN_ID, f"🚨 Telegram Cashback Msg Error:\n`{cb_tg_err}`", parse_mode="Markdown")
+                            bot.send_message(ADMIN_ID, f"🚨 Telegram Cashback Msg Error:\n<code>{cb_tg_err}</code>", parse_mode="HTML")
                         except:
                             pass
 
@@ -1546,7 +1545,7 @@ Use the button below to open your wallet.
                 print(f"❌ [DEBUG COMMIT ERROR]: {commit_err}")
                 if ADMIN_ID:
                     try:
-                        bot.send_message(ADMIN_ID, f"🚨 Main DB Commit Error:\n`{commit_err}`", parse_mode="Markdown")
+                        bot.send_message(ADMIN_ID, f"🚨 Main DB Commit Error:\n<code>{commit_err}</code>", parse_mode="HTML")
                     except:
                         pass
 
@@ -1566,21 +1565,21 @@ Use the button below to open your wallet.
                     f"━━━━━━━━━━━━━━━━━━\n"
                     f"Mun Gode {safe_full_name}\n\n"
                     f"🎬 <b>Film:</b> {safe_titles_text}\n"
-                    f"💵 **Amount Paid:** ₦{paid_amount}\n"
+                    f"💵 <b>Amount Paid:</b> ₦{paid_amount}\n"
                     f"━━━━━━━━━━━━━━━━━━\n"
-                    f"🎁 **Cashback Earned:** ₦{cashback}\n\n"
+                    f"🎁 <b>Cashback Earned:</b> ₦{cashback}\n\n"
                     f"✅ Biyan ya kammala! 😊\n"
                     f"Danna DOWNLOAD domin sauke fim din\n"
                     f"👇👇👇"
                 )
 
-                bot.send_message(user_id, success_text, parse_mode="Markdown", reply_markup=kb)
+                bot.send_message(user_id, success_text, parse_mode="HTML", reply_markup=kb)
                 print(f"🐞 [DEBUG TG DOWNLOAD]: An aika sakon DOWNLOAD NOW button zuwa ga user {user_id}")
             except Exception as dl_err:
                 print(f"❌ [DEBUG TG DOWNLOAD ERROR]: {dl_err}")
                 if ADMIN_ID:
                     try:
-                        bot.send_message(ADMIN_ID, f"🚨 DOWNLOAD BUTTON SEND ERROR (Order {order_id}):\n`{dl_err}`", parse_mode="Markdown")
+                        bot.send_message(ADMIN_ID, f"🚨 DOWNLOAD BUTTON SEND ERROR (Order {order_id}):\n<code>{dl_err}</code>", parse_mode="HTML")
                     except:
                         pass
 
@@ -1610,7 +1609,7 @@ Use the button below to open your wallet.
                     print(f"❌ [DEBUG NOTIFY GROUP ERROR]: {notify_err}")
                     if ADMIN_ID:
                         try:
-                            bot.send_message(ADMIN_ID, f"🚨 NOTIFY GROUP ERROR (Order {order_id}):\n`{notify_err}`", parse_mode="Markdown")
+                            bot.send_message(ADMIN_ID, f"🚨 NOTIFY GROUP ERROR (Order {order_id}):\n<code>{notify_err}</code>", parse_mode="HTML")
                         except:
                             pass
 
@@ -1784,10 +1783,13 @@ Na gode da kasancewa tare da mu 🙏""",
         print(f"❌ WEBHOOK CRITICAL ERROR: {e}")
         if ADMIN_ID:
             try:
-                bot.send_message(ADMIN_ID, f"🚨 WEBHOOK CRITICAL ERROR:\n`{e}`", parse_mode="Markdown")
+                bot.send_message(ADMIN_ID, f"🚨 WEBHOOK CRITICAL ERROR:\n<code>{e}</code>", parse_mode="HTML")
             except:
                 pass
         return "Internal Error", 500
+
+
+
 
 
 # 
