@@ -1715,6 +1715,7 @@ def send_feedback_prompt(user_id, order_id):
         print("FEEDBACK SEND ERROR:", e)
 
 
+
 @app.route("/webhook", methods=["POST"])
 def flutterwave_webhook():
     try:
@@ -1988,18 +1989,29 @@ Use the button below to open your wallet.
         # ================== FILM ORDER =======================
         # =====================================================
         if order_type == "film":
-            cur.execute(
-                """
-                SELECT i.title, i.group_key, COALESCE(i.cashback_amount, 0)
-                FROM order_items oi
-                JOIN items i ON i.id = oi.item_id
-                WHERE oi.order_id=%s
-                """,
-                (order_id,)
-            )
-            rows = cur.fetchall()
+            print(f"🐞 DEBUG [FILM]: Fara sarrafa film order ID: {order_id} na user: {user_id}")
+            try:
+                cur.execute(
+                    """
+                    SELECT i.title, i.group_key, COALESCE(i.cashback_amount, 0)
+                    FROM order_items oi
+                    JOIN items i ON i.id = oi.item_id
+                    WHERE oi.order_id=%s
+                    """,
+                    (order_id,)
+                )
+                rows = cur.fetchall()
+            except Exception as db_err:
+                print(f"❌ DEBUG DB ERROR [Item Select]: {db_err}")
+                if ADMIN_ID:
+                    try:
+                        bot.send_message(ADMIN_ID, f"🚨 WEBHOOK DB ERROR (Items): {db_err}")
+                    except:
+                        pass
+                raise db_err
 
             if not rows:
+                print(f"⚠️ DEBUG [FILM]: Order items babu komai a ciki na order_id: {order_id}")
                 cur.close()
                 conn.close()
                 return "Empty order", 200
@@ -2038,99 +2050,128 @@ Use the button below to open your wallet.
                 is_custom_cashback = False
 
             if cashback > 0:
-                wallet_conn = get_wallet_conn()
-                wallet_cur = wallet_conn.cursor()
+                try:
+                    wallet_conn = get_wallet_conn()
+                    wallet_cur = wallet_conn.cursor()
 
-                wallet_cur.execute(
-                    """
-                    INSERT INTO wallet_balance (user_id, balance)
-                    VALUES (%s,%s)
-                    ON CONFLICT (user_id)
-                    DO UPDATE SET
-                    balance = wallet_balance.balance + EXCLUDED.balance,
-                    updated_at = NOW()
-                    """,
-                    (user_id, cashback)
-                )
+                    wallet_cur.execute(
+                        """
+                        INSERT INTO wallet_balance (user_id, balance)
+                        VALUES (%s,%s)
+                        ON CONFLICT (user_id)
+                        DO UPDATE SET
+                        balance = wallet_balance.balance + EXCLUDED.balance,
+                        updated_at = NOW()
+                        """,
+                        (user_id, cashback)
+                    )
 
-                wallet_cur.execute(
-                    """
-                    INSERT INTO wallet_transactions
-                    (user_id, amount, type, reference, description)
-                    VALUES (%s,%s,'cashback',%s,'Movie Cashback Reward')
-                    """,
-                    (user_id, cashback, order_id)
-                )
+                    wallet_cur.execute(
+                        """
+                        INSERT INTO wallet_transactions
+                        (user_id, amount, type, reference, description)
+                        VALUES (%s,%s,'cashback',%s,'Movie Cashback Reward')
+                        """,
+                        (user_id, cashback, order_id)
+                    )
 
-                # Samun jimillar balance dake cikin wallet din user bayan an kara cashback
-                wallet_cur.execute(
-                    """
-                    SELECT balance FROM wallet_balance WHERE user_id=%s
-                    """,
-                    (user_id,)
-                )
-                user_balance_row = wallet_cur.fetchone()
-                user_wallet_balance = user_balance_row[0] if user_balance_row else 0
+                    # Samun jimillar balance dake cikin wallet din user bayan an kara cashback
+                    wallet_cur.execute(
+                        """
+                        SELECT balance FROM wallet_balance WHERE user_id=%s
+                        """,
+                        (user_id,)
+                    )
+                    user_balance_row = wallet_cur.fetchone()
+                    user_wallet_balance = user_balance_row[0] if user_balance_row else 0
 
-                wallet_conn.commit()
-                wallet_cur.close()
-                wallet_conn.close()
+                    wallet_conn.commit()
+                    wallet_cur.close()
+                    wallet_conn.close()
+                    print(f"🐞 DEBUG [CASHBACK]: An saka nasara ₦{cashback} ga user {user_id}")
+                except Exception as cb_err:
+                    print(f"❌ DEBUG CASHBACK ERROR: {cb_err}")
+                    if ADMIN_ID:
+                        try:
+                            bot.send_message(ADMIN_ID, f"🚨 WEBHOOK CASHBACK ERROR: {cb_err}")
+                        except:
+                            pass
 
                 # ================= SABON TSARIN SAKON CASHBACK =================
-                cb_kb = InlineKeyboardMarkup()
-                cb_kb.add(
+                try:
+                    cb_kb = InlineKeyboardMarkup()
+                    cb_kb.add(
+                        InlineKeyboardButton(
+                            "💼 View Wallet", 
+                            callback_data=f"view_cb_bal:{user_wallet_balance}",
+                            style="primary"
+                        )
+                    )
+
+                    cb_text = (
+                        f"🎁 **Cashback Reward**🎉\n\n"
+                        f"Wallet ID: `{user_id}`\n"
+                        f"You received ₦{cashback} cashback,\n"
+                        f"View your wallet to see available balance"
+                    )
+
+                    bot.send_message(user_id, cb_text, parse_mode="Markdown", reply_markup=cb_kb)
+                    print(f"🐞 DEBUG [TG]: An aika sakon cashback zuwa ga user {user_id}")
+                except Exception as cb_tg_err:
+                    print(f"❌ DEBUG TG CASHBACK ERROR: {cb_tg_err}")
+                    if ADMIN_ID:
+                        try:
+                            bot.send_message(ADMIN_ID, f"🚨 TG CASHBACK MSG ERROR: {cb_tg_err}")
+                        except:
+                            pass
+
+            try:
+                conn.commit()
+            except Exception as commit_err:
+                print(f"❌ DEBUG MAIN COMMIT ERROR: {commit_err}")
+
+            # ================= SABON TSARIN SAKON PAYMENT SUCCESSFUL =================
+            try:
+                kb = InlineKeyboardMarkup()
+                kb.add(
                     InlineKeyboardButton(
-                        "💼 View Wallet", 
-                        callback_data=f"view_cb_bal:{user_wallet_balance}",
-                        style="primary"
+                        "⬇️ DOWNLOAD NOW",
+                        callback_data=f"deliver:{order_id}",
+                        style="success"
                     )
                 )
 
-                cb_text = (
-                    f"🎁 **Cashback Reward**🎉\n\n"
-                    f"Wallet ID: `{user_id}`\n"
-                    f"You received ₦{cashback} cashback,\n"
-                    f"View your wallet to see available balance"
+                success_text = (
+                    f"🎉 **PAYMENT SUCCESSFUL!**\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"Mun Gode {full_name}\n\n"
+                    f"🎬 **Film:** {titles_text}\n"
+                    f"💵 **Amount Paid:** ₦{paid_amount}\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"🎁 **Cashback Earned:** ₦{cashback}\n\n"
+                    f"✅ Biyan ya kammala! 😊\n"
+                    f"Danna DOWNLOAD domin sauke fim din\n"
+                    f"👇👇👇"
                 )
 
-                bot.send_message(user_id, cb_text, parse_mode="Markdown", reply_markup=cb_kb)
-
-            conn.commit()
-            cur.close()
-            conn.close()
-
-            # ================= SABON TSARIN SAKON PAYMENT SUCCESSFUL =================
-            kb = InlineKeyboardMarkup()
-            kb.add(
-                InlineKeyboardButton(
-                    "⬇️ DOWNLOAD NOW",
-                    callback_data=f"deliver:{order_id}",
-                    style="success"
-                )
-            )
-
-            success_text = (
-                f"🎉 **PAYMENT SUCCESSFUL!**\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"Mun Gode {full_name}\n\n"
-                f"🎬 **Film:** {titles_text}\n"
-                f"💵 **Amount Paid:** ₦{paid_amount}\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"🎁 **Cashback Earned:** ₦{cashback}\n\n"
-                f"✅ Biyan ya kammala! 😊\n"
-                f"Danna DOWNLOAD domin sauke fim din\n"
-                f"👇👇👇"
-            )
-
-            bot.send_message(user_id, success_text, parse_mode="Markdown", reply_markup=kb)
+                bot.send_message(user_id, success_text, parse_mode="Markdown", reply_markup=kb)
+                print(f"🐞 DEBUG [TG DOWNLOAD]: An aika sakon DOWNLOAD NOW button zuwa ga user {user_id} don order: {order_id}")
+            except Exception as dl_err:
+                print(f"❌ DEBUG TG DOWNLOAD BUTTON ERROR: {dl_err}")
+                if ADMIN_ID:
+                    try:
+                        bot.send_message(ADMIN_ID, f"🚨 DOWNLOAD BUTTON SEND ERROR (Order {order_id}): {dl_err}")
+                    except:
+                        pass
 
             if PAYMENT_NOTIFY_GROUP:
-                from datetime import datetime, timedelta
-                now = (datetime.now() + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+                try:
+                    from datetime import datetime, timedelta
+                    now = (datetime.now() + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
 
-                bot.send_message(
-                    PAYMENT_NOTIFY_GROUP,
-                    f"""✅ <b>NEW PAYMENT RECEIVED</b>
+                    bot.send_message(
+                        PAYMENT_NOTIFY_GROUP,
+                        f"""✅ <b>NEW PAYMENT RECEIVED</b>
 
 👤 <b>Name:</b> {full_name}
 🔗 <b>Username:</b> {tg_username}
@@ -2142,9 +2183,19 @@ Use the button below to open your wallet.
 💰 <b>Amount:</b> ₦{paid_amount}
 ⏰ <b>Time:</b> {now}
 """,
-                    parse_mode="HTML"
-                )
+                        parse_mode="HTML"
+                    )
+                    print(f"🐞 DEBUG [NOTIFY GROUP]: An aika sanarwa zuwa Payment Notify Group na order: {order_id}")
+                except Exception as notify_err:
+                    print(f"❌ DEBUG NOTIFY GROUP ERROR: {notify_err}")
+                    if ADMIN_ID:
+                        try:
+                            bot.send_message(ADMIN_ID, f"🚨 NOTIFY GROUP ERROR (Order {order_id}): {notify_err}")
+                        except:
+                            pass
 
+            cur.close()
+            conn.close()
             return "OK", 200
 
         # =====================================================
@@ -2310,7 +2361,12 @@ Na gode da kasancewa tare da mu 🙏""",
         return "OK", 200
 
     except Exception as e:
-        print(f"Webhook Error: {e}")
+        print(f"❌ WEBHOOK CRITICAL ERROR: {e}")
+        if ADMIN_ID:
+            try:
+                bot.send_message(ADMIN_ID, f"🚨 WEBHOOK CRITICAL EXCEPTION:\n`{e}`", parse_mode="Markdown")
+            except:
+                pass
         return "Internal Error", 500
 
 
