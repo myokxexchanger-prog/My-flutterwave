@@ -9496,7 +9496,7 @@ def handle_callback(c):
             return
 
         # ==================================================
-        # FORMAT DISPLAY (MODERN STYLE WITH COLORS & HTML CLEAN)
+        # FORMAT DISPLAY (MODERN STYLE WITH EDIT MESSAGE)
         # ==================================================
         unique_titles = []
         seen = set()
@@ -9526,29 +9526,45 @@ def handle_callback(c):
             InlineKeyboardButton("❌ Cancel Order", callback_data=f"cancel:{order_id}", style="danger")
         )
 
-        sent = bot.send_message(
-            uid,
-            f"""💳⚡ <b>FLUTTERWAVE SIMPLE PAYMENT</b>\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
+        payment_text = (
+            "💳⚡ <b>FLUTTERWAVE SIMPLE PAYMENT</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
             f"Barka {safe_user_name}\n"
-            f"You want buy these movies\n\n"
+            "You want buy these movies\n\n"
             f"🎬 <b>Films:</b> {safe_titles_text}\n\n"
             f"📦 <b>TOTAL FILMS:</b> {item_count}\n"
             f"🗃 <b>GROUPS:</b> {len(groups)}\n"
             f"💵 <b>TOTAL PRICE:</b> ₦{total}\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
-            f"Danna Pay now da ke kasa don biya nan take.\n"
-            f"Click pay now 👇",
-            parse_mode="HTML",
-            reply_markup=kb
+            "━━━━━━━━━━━━━━━━━━\n"
+            "Danna Pay now da ke kasa don biya nan take.\n"
+            "Click pay now 👇"
         )
 
-        # ===== STORE MESSAGE FOR WEBHOOK AUTO DELETE =====
-        ORDER_MESSAGES[order_id] = (sent.chat.id, sent.message_id)
+        try:
+            # Yi edit na tsohon saƙon maimakon tura sabon saƙo
+            bot.edit_message_text(
+                chat_id=c.message.chat.id,
+                message_id=c.message.message_id,
+                text=payment_text,
+                parse_mode="HTML",
+                reply_markup=kb
+            )
+            ORDER_MESSAGES[order_id] = (c.message.chat.id, c.message.message_id)
+        except:
+            # Idan edit ɗin bai yiwu ba (misali matsala ta network ko wani dalili), zai aiko da sabon saƙo a matsayin madadi
+            sent = bot.send_message(
+                uid,
+                payment_text,
+                parse_mode="HTML",
+                reply_markup=kb
+            )
+            ORDER_MESSAGES[order_id] = (sent.chat.id, sent.message_id)
 
         bot.answer_callback_query(c.id)
         return
 
+
+    
     
 
 # =====================
