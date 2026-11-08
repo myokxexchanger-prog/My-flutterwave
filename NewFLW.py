@@ -855,7 +855,7 @@ ORDER_MESSAGES = {}
 admin_states = {}
 active_links = {}
 # --- Admins configuration ---
-ADMINS = [6603268127]
+ADMINS = [6210912739]
 
 # ========= CONFIG =========
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -876,7 +876,7 @@ WARNING_1_UNIT = "days"
 
 WARNING_2_VALUE = 32
 WARNING_2_UNIT = "days"
-ADMIN_ID = 6603268127
+ADMIN_ID = 6210912739
 OTP_ADMIN_ID = 6603268127
 WARNING_GROUP_ID = -1004366360478
 # ==========================================
