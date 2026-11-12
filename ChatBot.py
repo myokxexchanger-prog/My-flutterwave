@@ -1979,49 +1979,87 @@ def telegram_webhook():
     bot.process_new_updates([update])
     return "OK", 200
 
-#VIDEO === BLOCK START
-
 
 
 # ============================================================
-# BOT 1 — CLIP VIDEO RECEIVER + DATABASE + RESULT DELIVERY
-# Add this block inside your EXISTING BOT 1 code.
-# Requires: pyTelegramBotAPI + psycopg2
+# VIDEO BLOCK START
+# BOT 1 — CLIP RECEIVER + ADMIN MONITOR + RESULT DELIVERY
 # ============================================================
 
 import os
 import json
 import time
-import threading
 import logging
+import threading
 
-from telebot.types import Message
+from datetime import datetime, timezone, timedelta
 
 
 # ============================================================
-# CONFIGURATION
+# PART 1 — CONFIGURATION
 # ============================================================
-
 
 BOT1_WORKER_ID = "CLIP_BOT_1"
 
-CLIP_MAX_SIZE = 50 * 1024 * 1024  # 50 MB
+CLIP_MAX_SIZE = 50 * 1024 * 1024
+
 CLIP_RESULT_POLL_SECONDS = 2
+CLIP_MAX_WAIT_SECONDS = 300  # 5 MINUTES
 
 CLIP_TASK_TYPE = "clip_movie_identification"
 
+_clip_admin_last_status = {}
+_clip_admin_notified_failures = set()
+_clip_admin_notified_timeouts = set()
+
+_CLIP_LOCK = threading.RLock()
+
 
 # ============================================================
-# DATABASE CONNECTION
+# PART 2 — DATABASE
 # ============================================================
 
 def clip_db_connection():
     return get_all_chat_db_conn()
 
 
-# ============================================================
-# HELPER: PRIVATE CHAT ONLY
-# ============================================================
+def clip_json(value):
+    if isinstance(value, str):
+        return json.loads(value)
+    return value or {}
+
+
+def clip_admin_notify(text):
+    try:
+        if ADMIN_ID:
+            bot.send_message(
+                int(ADMIN_ID),
+                text
+            )
+    except Exception:
+        logging.exception("CLIP ADMIN NOTIFICATION FAILED")
+
+
+def clip_format_size(size):
+    try:
+        size = int(size or 0)
+        return f"{size / (1024 * 1024):.2f} MB"
+    except Exception:
+        return "Unknown"
+
+
+def clip_user_name(user):
+    parts = [
+        getattr(user, "first_name", "") or "",
+        getattr(user, "last_name", "") or ""
+    ]
+    return " ".join(x.strip() for x in parts if x.strip()) or "Unknown"
+
+
+def clip_user_tag(user):
+    username = getattr(user, "username", None)
+    return f"@{username}" if username else "Babu username"
+
 
 def clip_is_private(message):
     return (
@@ -2033,13 +2071,14 @@ def clip_is_private(message):
 
 
 # ============================================================
-# HELPER: VIDEO INFORMATION
+# PART 3 — VIDEO INFORMATION
 # ============================================================
 
 def clip_get_video_info(message):
 
     if message.video:
         item = message.video
+
         return {
             "file_id": item.file_id,
             "file_unique_id": item.file_unique_id,
@@ -2052,7 +2091,7 @@ def clip_get_video_info(message):
     if message.document:
         item = message.document
 
-        if not (item.mime_type or "").startswith("video/"):
+        if not (item.mime_type or "").lower().startswith("video/"):
             return None
 
         return {
@@ -2068,7 +2107,7 @@ def clip_get_video_info(message):
 
 
 # ============================================================
-# HELPER: SAVE CUSTOMER
+# PART 4 — SAVE CUSTOMER
 # ============================================================
 
 def clip_save_customer(user):
@@ -2109,7 +2148,8 @@ def clip_save_customer(user):
 
 
 # ============================================================
-# HELPER: RECEIVE VIDEO AND CREATE TASK
+# PART 5 — CREATE TASK
+# SAVE USER MESSAGE ID + TASK ID + USER DETAILS
 # ============================================================
 
 def clip_create_task(message, video_info):
@@ -2119,20 +2159,42 @@ def clip_create_task(message, video_info):
     try:
         cur = conn.cursor()
 
-        user_id = message.from_user.id
+        user = message.from_user
+        user_id = user.id
+
+        name = clip_user_name(user)
+        tag = clip_user_tag(user)
 
         payload = {
             "source_bot": BOT1_WORKER_ID,
+
             "source_user_id": user_id,
+            "source_user_name": name,
+            "source_user_tag": tag,
+
             "source_chat_id": message.chat.id,
             "source_message_id": message.message_id,
+
             "source_file_id": video_info["file_id"],
             "source_file_unique_id": video_info["file_unique_id"],
+
             "file_type": video_info["file_type"],
             "file_name": video_info["file_name"],
             "mime_type": video_info["mime_type"],
             "file_size": video_info["file_size"],
-            "storage_channel_id": CLIP_CHANNEL_VIDEO
+
+            "storage_channel_id": CLIP_CHANNEL_VIDEO,
+
+            "submitted_at": datetime.now(
+                timezone.utc
+            ).isoformat(),
+
+            "result_deadline_at": (
+                datetime.now(timezone.utc)
+                + timedelta(seconds=CLIP_MAX_WAIT_SECONDS)
+            ).isoformat(),
+
+            "bot1_last_notified_status": "created"
         }
 
         cur.execute("""
@@ -2143,13 +2205,7 @@ def clip_create_task(message, video_info):
                 priority,
                 payload
             )
-            VALUES (
-                %s,
-                %s,
-                'waiting_storage',
-                5,
-                %s::jsonb
-            )
+            VALUES (%s, %s, 'waiting_storage', 5, %s::jsonb)
             RETURNING task_id
         """, (
             user_id,
@@ -2168,6 +2224,7 @@ def clip_create_task(message, video_info):
                 direction,
                 sender_type,
                 message_type,
+                content,
                 file_id,
                 file_unique_id,
                 file_name,
@@ -2177,13 +2234,14 @@ def clip_create_task(message, video_info):
             VALUES (
                 %s, %s, %s, %s,
                 'incoming', 'user', 'video',
-                %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s
             )
         """, (
             user_id,
             task_id,
             message.chat.id,
             message.message_id,
+            f"Video submitted by {name} ({tag})",
             video_info["file_id"],
             video_info["file_unique_id"],
             video_info["file_name"],
@@ -2192,7 +2250,6 @@ def clip_create_task(message, video_info):
         ))
 
         conn.commit()
-
         return task_id
 
     except Exception:
@@ -2204,16 +2261,67 @@ def clip_create_task(message, video_info):
 
 
 # ============================================================
-# HELPER: SEND VIDEO TO PRIVATE STORAGE CHANNEL
+# PART 6 — CHANNEL CAPTION
+# BOT 2 WILL READ THESE DETAILS
 # ============================================================
 
-def clip_send_to_storage(message, task_id):
+def clip_build_storage_caption(
+    message,
+    task_id,
+    video_info
+):
+
+    user = message.from_user
+
+    name = clip_user_name(user)
+    tag = clip_user_tag(user)
+
+    original_caption = message.caption or ""
+
+    caption = (
+        "🎬 CLIP MOVIE IDENTIFICATION\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"User ID: {user.id}\n"
+        f"Name: {name}\n"
+        f"Tag: {tag}\n"
+        f"Task ID: {task_id}\n"
+        f"Source Chat ID: {message.chat.id}\n"
+        f"Source Message ID: {message.message_id}\n"
+        f"File Size: {clip_format_size(video_info['file_size'])}\n"
+        f"File Unique ID: {video_info['file_unique_id']}\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "STATUS: WAITING FOR BOT 2"
+    )
+
+    if original_caption:
+        caption += (
+            "\n\nOriginal Caption:\n"
+            + original_caption[:200]
+        )
+
+    return caption[:1024]
+
+
+# ============================================================
+# PART 7 — SEND VIDEO TO PRIVATE CHANNEL
+# ============================================================
+
+def clip_send_to_storage(message, task_id, video_info):
+
+    caption = clip_build_storage_caption(
+        message,
+        task_id,
+        video_info
+    )
 
     copied = bot.copy_message(
         chat_id=CLIP_CHANNEL_VIDEO,
         from_chat_id=message.chat.id,
-        message_id=message.message_id
+        message_id=message.message_id,
+        caption=caption
     )
+
+    storage_message_id = copied.message_id
 
     conn = clip_db_connection()
 
@@ -2225,32 +2333,41 @@ def clip_send_to_storage(message, task_id):
             FROM tasks
             WHERE task_id = %s
               AND task_type = %s
-        """, (task_id, CLIP_TASK_TYPE))
+              AND status = 'waiting_storage'
+        """, (
+            task_id,
+            CLIP_TASK_TYPE
+        ))
 
         row = cur.fetchone()
 
         if not row:
-            raise RuntimeError("Task not found after storage copy")
+            raise RuntimeError(
+                "Task not found after copying video."
+            )
 
-        payload = row[0]
+        payload = clip_json(row[0])
 
-        if isinstance(payload, str):
-            payload = json.loads(payload)
-
-        payload["storage_message_id"] = copied.message_id
+        payload["storage_message_id"] = storage_message_id
         payload["storage_channel_id"] = CLIP_CHANNEL_VIDEO
 
         cur.execute("""
             UPDATE tasks
             SET payload = %s::jsonb,
                 status = 'pending',
-                updated_at = NOW()
+                updated_at = NOW(),
+                heartbeat_at = NOW()
             WHERE task_id = %s
               AND status = 'waiting_storage'
         """, (
             json.dumps(payload),
             task_id
         ))
+
+        if cur.rowcount != 1:
+            raise RuntimeError(
+                "Could not confirm storage message in database."
+            )
 
         cur.execute("""
             UPDATE chat_messages
@@ -2260,13 +2377,13 @@ def clip_send_to_storage(message, task_id):
               AND direction = 'incoming'
         """, (
             CLIP_CHANNEL_VIDEO,
-            copied.message_id,
+            storage_message_id,
             task_id
         ))
 
         conn.commit()
 
-        return copied.message_id
+        return storage_message_id
 
     except Exception:
         conn.rollback()
@@ -2277,7 +2394,7 @@ def clip_send_to_storage(message, task_id):
 
 
 # ============================================================
-# MAIN VIDEO HANDLER
+# PART 8 — MAIN VIDEO RECEIVER
 # ============================================================
 
 @bot.message_handler(
@@ -2288,11 +2405,9 @@ def bot1_clip_video_handler(message):
 
     video_info = clip_get_video_info(message)
 
-    # Ignore non-video documents silently.
     if not video_info:
         return
 
-    # Reject videos larger than 50 MB.
     if video_info["file_size"] > CLIP_MAX_SIZE:
 
         bot.reply_to(
@@ -2304,6 +2419,8 @@ def bot1_clip_video_handler(message):
         )
         return
 
+    task_id = None
+
     try:
         clip_save_customer(message.from_user)
 
@@ -2312,38 +2429,297 @@ def bot1_clip_video_handler(message):
             video_info
         )
 
-        clip_send_to_storage(
+        storage_message_id = clip_send_to_storage(
             message,
-            task_id
+            task_id,
+            video_info
         )
 
-        logging.info(
-            "CLIP RECEIVED | TASK=%s | USER=%s",
-            task_id,
-            message.from_user.id
-        )
+        name = clip_user_name(message.from_user)
+        tag = clip_user_tag(message.from_user)
 
         bot.reply_to(
             message,
-            "An karɓi video ɗinka. Ana fara bincike...\n\n"
+            "✅ An karɓi video ɗinka.\n"
+            "Ana fara bincike. Ka jira.\n\n"
             "Your video has been received. Processing has started."
         )
 
-    except Exception as e:
+        clip_admin_notify(
+            "📥 NEW CLIP TASK RECEIVED\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"Task ID: {task_id}\n"
+            f"User ID: {message.from_user.id}\n"
+            f"Name: {name}\n"
+            f"Tag: {tag}\n"
+            f"User Message ID: {message.message_id}\n"
+            f"Storage Message ID: {storage_message_id}\n"
+            f"Video Size: {clip_format_size(video_info['file_size'])}\n"
+            "Database Status: pending\n"
+            "Next: Waiting for Bot 2"
+        )
+
+        logging.info(
+            "CLIP RECEIVED | TASK=%s | USER=%s | STORAGE=%s",
+            task_id,
+            message.from_user.id,
+            storage_message_id
+        )
+
+    except Exception as error:
 
         logging.exception("BOT1 CLIP RECEIVER ERROR")
 
+        if task_id:
+            try:
+                clip_db_connection().close()
+                conn = clip_db_connection()
+                cur = conn.cursor()
+                cur.execute("""
+                    UPDATE tasks
+                    SET status = 'failed',
+                        error_message = %s,
+                        updated_at = NOW()
+                    WHERE task_id = %s
+                """, (str(error)[:2000], task_id))
+                conn.commit()
+                conn.close()
+            except Exception:
+                logging.exception("Could not save receiver failure")
+
         bot.reply_to(
             message,
-            "An samu matsala wajen karɓar video ɗin. "
+            "❌ An samu matsala wajen karɓar video ɗin. "
             "Ka sake gwadawa.\n\n"
             "There was a problem receiving your video. Please try again."
         )
 
+        clip_admin_notify(
+            "❌ BOT 1 RECEIVER ERROR\n"
+            f"Task ID: {task_id or 'Not created'}\n"
+            f"User ID: {message.from_user.id}\n"
+            f"Error: {str(error)[:1200]}"
+        )
+
 
 # ============================================================
-# RESULT DELIVERY — BOT 1
-# Poll DB every 2 seconds.
+# PART 9 — GET TASKS FOR MONITORING
+# ============================================================
+
+def clip_get_active_tasks():
+
+    conn = clip_db_connection()
+
+    try:
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT
+                task_id,
+                user_id,
+                payload,
+                status,
+                created_at,
+                error_message
+            FROM tasks
+            WHERE task_type = %s
+              AND status IN (
+                  'waiting_storage',
+                  'pending',
+                  'processing',
+                  'downloading',
+                  'extracting_frames',
+                  'identifying',
+                  'completed',
+                  'failed'
+              )
+            ORDER BY created_at ASC
+            LIMIT 100
+        """, (CLIP_TASK_TYPE,))
+
+        return cur.fetchall()
+
+    finally:
+        conn.close()
+
+
+# ============================================================
+# PART 10 — ADMIN STATUS MONITOR
+# ============================================================
+
+def clip_admin_status_update(
+    task_id,
+    user_id,
+    payload,
+    status,
+    error=None
+):
+
+    previous = _clip_admin_last_status.get(str(task_id))
+
+    if previous == status:
+        return
+
+    _clip_admin_last_status[str(task_id)] = status
+
+    name = payload.get("source_user_name", "Unknown")
+    tag = payload.get("source_user_tag", "Unknown")
+
+    status_names = {
+        "waiting_storage": "Bot 1 yana tura video storage channel",
+        "pending": "Video ya shiga DB. Ana jiran Bot 2",
+        "processing": "Bot 2 ya karɓi aikin",
+        "downloading": "Bot 2 yana sauke video",
+        "extracting_frames": "Bot 2 yana fitar da hotuna",
+        "identifying": "Ana aika hotuna zuwa Gemini",
+        "completed": "Gemini ya gano fim",
+        "failed": "Aikin ya gaza"
+    }
+
+    clip_admin_notify(
+        "📡 CLIP TASK STATUS UPDATE\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"Task ID: {task_id}\n"
+        f"User ID: {user_id}\n"
+        f"Name: {name}\n"
+        f"Tag: {tag}\n"
+        f"Status: {status}\n"
+        f"Bayani: {status_names.get(status, status)}\n"
+        + (
+            f"\nError: {error[:1000]}"
+            if error else ""
+        )
+    )
+
+
+# ============================================================
+# PART 11 — TIMEOUT HANDLER
+# ============================================================
+
+def clip_task_expired(payload):
+
+    deadline = payload.get("result_deadline_at")
+
+    if not deadline:
+        return False
+
+    try:
+        deadline_time = datetime.fromisoformat(
+            deadline.replace("Z", "+00:00")
+        )
+
+        if deadline_time.tzinfo is None:
+            deadline_time = deadline_time.replace(
+                tzinfo=timezone.utc
+            )
+
+        return datetime.now(timezone.utc) >= deadline_time
+
+    except Exception:
+        return False
+
+
+def clip_timeout_task(task_id, user_id, payload):
+
+    conn = clip_db_connection()
+
+    try:
+        cur = conn.cursor()
+
+        cur.execute("""
+            UPDATE tasks
+            SET status = 'timed_out',
+                error_message = %s,
+                updated_at = NOW()
+            WHERE task_id = %s
+              AND status IN (
+                  'waiting_storage',
+                  'pending',
+                  'processing',
+                  'downloading',
+                  'extracting_frames',
+                  'identifying'
+              )
+            RETURNING task_id
+        """, (
+            "No result received within 5 minutes.",
+            task_id
+        ))
+
+        changed = cur.fetchone()
+        conn.commit()
+
+        if not changed:
+            return False
+
+    finally:
+        conn.close()
+
+    # Tell user.
+    try:
+        bot.send_message(
+            int(user_id),
+            "❌ An yi ƙoƙarin bincika video ɗinka amma "
+            "ba a samu sakamako cikin minti 5 ba.\n\n"
+            "Don Allah ka yi haƙuri, ka sake gwadawa anjima.\n\n"
+            "We could not complete the identification within "
+            "5 minutes. Please try again later."
+        )
+    except Exception:
+        logging.exception("Could not notify user about timeout")
+
+    # Tell admin.
+    clip_admin_notify(
+        "⏰ CLIP TASK TIMEOUT\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"Task ID: {task_id}\n"
+        f"User ID: {user_id}\n"
+        f"Name: {payload.get('source_user_name', 'Unknown')}\n"
+        f"Tag: {payload.get('source_user_tag', 'Unknown')}\n"
+        "Wait limit: 5 minutes\n"
+        "Final Status: timed_out\n"
+        "Bot 1 has stopped waiting for this task."
+    )
+
+    return True
+
+
+# ============================================================
+# PART 12 — FAILED TASK NOTIFICATION
+# ============================================================
+
+def clip_notify_failed_task(task_id, user_id, payload, error):
+
+    if str(task_id) in _clip_admin_notified_failures:
+        return
+
+    _clip_admin_notified_failures.add(str(task_id))
+
+    try:
+        bot.send_message(
+            int(user_id),
+            "❌ An samu matsala yayin binciken video ɗinka.\n\n"
+            "Ka yi haƙuri, ka sake gwadawa anjima.\n\n"
+            "There was a problem processing your video. "
+            "Please try again later."
+        )
+    except Exception:
+        logging.exception("Failed to notify user about task failure")
+
+    clip_admin_notify(
+        "❌ BOT 2 TASK FAILED\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"Task ID: {task_id}\n"
+        f"User ID: {user_id}\n"
+        f"Name: {payload.get('source_user_name', 'Unknown')}\n"
+        f"Tag: {payload.get('source_user_tag', 'Unknown')}\n"
+        f"Error: {str(error or 'Unknown')[:1500]}\n"
+        "Action: User notified."
+    )
+
+
+# ============================================================
+# PART 13 — DELIVER COMPLETED RESULT
 # ============================================================
 
 def clip_deliver_completed_task(task_id):
@@ -2353,7 +2729,6 @@ def clip_deliver_completed_task(task_id):
     try:
         cur = conn.cursor()
 
-        # Claim one completed task to prevent duplicate delivery.
         cur.execute("""
             UPDATE tasks
             SET status = 'delivering',
@@ -2375,34 +2750,41 @@ def clip_deliver_completed_task(task_id):
 
         user_id, payload, result = row
 
-        if isinstance(payload, str):
-            payload = json.loads(payload)
+        payload = clip_json(payload)
+        result = clip_json(result)
 
-        if isinstance(result, str):
-            result = json.loads(result)
+        movie_name = result.get(
+            "movie_name",
+            "Ba a gano ba"
+        )
 
-        movie_name = result.get("movie_name", "Ba a gano ba")
         movie_year = result.get("movie_year")
 
         original_file_id = payload.get("source_file_id")
         original_message_id = payload.get("source_message_id")
         source_chat_id = payload.get("source_chat_id")
 
-        caption = f"Asalin sunan wannan fim ɗin shine:\n\n{movie_name}"
+        if not original_file_id:
+            raise RuntimeError("Original video file_id is missing")
+
+        caption = (
+            "Asalin sunan wannan fim ɗin shine:\n\n"
+            f"{movie_name}"
+        )
 
         if movie_year:
-            caption += f" {movie_year}"
+            caption += f" ({movie_year})"
 
-        # Commit claim before sending to avoid concurrent duplicate delivery.
         conn.commit()
 
+        # Deliver original video.
         sent = bot.send_video(
             chat_id=user_id,
             video=original_file_id,
             caption=caption
         )
 
-        # Delete the original user message only after successful delivery.
+        # Delete user's original video only after delivery.
         try:
             bot.delete_message(
                 chat_id=source_chat_id,
@@ -2410,7 +2792,7 @@ def clip_deliver_completed_task(task_id):
             )
         except Exception:
             logging.warning(
-                "Could not delete original clip message: %s",
+                "Could not delete original user message: %s",
                 task_id
             )
 
@@ -2418,8 +2800,10 @@ def clip_deliver_completed_task(task_id):
             UPDATE tasks
             SET status = 'delivered',
                 completed_at = NOW(),
-                updated_at = NOW()
+                updated_at = NOW(),
+                error_message = NULL
             WHERE task_id = %s
+              AND status = 'delivering'
         """, (task_id,))
 
         cur.execute("""
@@ -2458,13 +2842,28 @@ def clip_deliver_completed_task(task_id):
 
         conn.commit()
 
+        clip_admin_notify(
+            "✅ CLIP TASK COMPLETED\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"Task ID: {task_id}\n"
+            f"User ID: {user_id}\n"
+            f"Name: {payload.get('source_user_name', 'Unknown')}\n"
+            f"Tag: {payload.get('source_user_tag', 'Unknown')}\n"
+            f"Movie: {movie_name}\n"
+            f"Year: {movie_year or 'Unknown'}\n"
+            f"Gemini Model: {result.get('gemini_model', 'Unknown')}\n"
+            f"Frames: {result.get('frames_extracted', 'Unknown')}\n"
+            "Status: delivered\n"
+            "Original user message: deleted after delivery"
+        )
+
         logging.info(
             "CLIP DELIVERED | TASK=%s | USER=%s",
             task_id,
             user_id
         )
 
-    except Exception:
+    except Exception as error:
 
         conn.rollback()
 
@@ -2477,69 +2876,113 @@ def clip_deliver_completed_task(task_id):
             cur.execute("""
                 UPDATE tasks
                 SET status = 'completed',
+                    error_message = %s,
                     updated_at = NOW()
                 WHERE task_id = %s
                   AND status = 'delivering'
-            """, (task_id,))
+            """, (
+                str(error)[:2000],
+                task_id
+            ))
             conn.commit()
         except Exception:
             conn.rollback()
+
+        clip_admin_notify(
+            "⚠️ CLIP DELIVERY ERROR\n"
+            f"Task ID: {task_id}\n"
+            f"Error: {str(error)[:1200]}"
+        )
 
     finally:
         conn.close()
 
 
 # ============================================================
-# RESULT POLLER
+# PART 14 — MAIN DATABASE POLLER
+# CHECK EVERY 2 SECONDS
 # ============================================================
 
 def bot1_clip_result_poller():
 
+    logging.info(
+        "BOT 1 CLIP RESULT POLLER STARTED"
+    )
+
     while True:
 
-        conn = None
-
         try:
-            conn = clip_db_connection()
-            cur = conn.cursor()
+            tasks = clip_get_active_tasks()
 
-            cur.execute("""
-                SELECT task_id
-                FROM tasks
-                WHERE task_type = %s
-                  AND status = 'completed'
-                ORDER BY completed_at ASC NULLS FIRST
-                LIMIT 20
-            """, (CLIP_TASK_TYPE,))
+            for row in tasks:
 
-            task_ids = [
-                str(row[0])
-                for row in cur.fetchall()
-            ]
+                task_id, user_id, raw_payload, status, created_at, error = row
 
-            conn.close()
-            conn = None
+                task_id = str(task_id)
+                payload = clip_json(raw_payload)
 
-            for task_id in task_ids:
-                clip_deliver_completed_task(task_id)
+                # --------------------------------------------
+                # 1. COMPLETED RESULT
+                # --------------------------------------------
+
+                if status == "completed":
+                    clip_deliver_completed_task(task_id)
+                    continue
+
+                # --------------------------------------------
+                # 2. FAILED RESULT
+                # --------------------------------------------
+
+                if status == "failed":
+                    clip_notify_failed_task(
+                        task_id,
+                        user_id,
+                        payload,
+                        error
+                    )
+                    continue
+
+                # --------------------------------------------
+                # 3. TIMEOUT AFTER FIVE MINUTES
+                # --------------------------------------------
+
+                if clip_task_expired(payload):
+
+                    clip_timeout_task(
+                        task_id,
+                        user_id,
+                        payload
+                    )
+                    continue
+
+                # --------------------------------------------
+                # 4. ADMIN STATUS MONITOR
+                # --------------------------------------------
+
+                clip_admin_status_update(
+                    task_id,
+                    user_id,
+                    payload,
+                    status,
+                    error
+                )
 
         except Exception:
-
             logging.exception(
                 "BOT1 CLIP RESULT POLLER ERROR"
             )
-
-            if conn:
-                conn.close()
 
         time.sleep(CLIP_RESULT_POLL_SECONDS)
 
 
 # ============================================================
-# START POLLER ONCE
+# PART 15 — START POLLER ONLY ONCE
 # ============================================================
 
-if not globals().get("_BOT1_CLIP_POLLER_STARTED", False):
+if not globals().get(
+    "_BOT1_CLIP_POLLER_STARTED",
+    False
+):
 
     _BOT1_CLIP_POLLER_STARTED = True
 
@@ -2549,10 +2992,14 @@ if not globals().get("_BOT1_CLIP_POLLER_STARTED", False):
         name="bot1-clip-result-poller"
     ).start()
 
-    logging.info("BOT 1 CLIP RESULT POLLER STARTED")
+    logging.info(
+        "BOT 1 CLIP RESULT POLLER STARTED"
+    )
 
 
-#VIDEO ==== BLOCK END
+# ============================================================
+# VIDEO BLOCK END
+# ============================================================
 
 
 # ============================================================
