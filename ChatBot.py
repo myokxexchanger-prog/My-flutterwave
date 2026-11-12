@@ -1135,8 +1135,7 @@ WARNING_GROUP_ID = -1004366360478
 WARNING_1_VALUE = 4  # Misali: Kwana 5 kafin expire
 WARNING_2_VALUE = 2  # Misali: Kwana 2 kafin expire
 
-
-
+CLIP_CHANNEL_VIDEO = -1004433789999
 BOT_USERNAME = "Algaitabot"
 CHANNEL = "@Algaitamoviestore"
 
@@ -1979,6 +1978,581 @@ def telegram_webhook():
     )
     bot.process_new_updates([update])
     return "OK", 200
+
+#VIDEO === BLOCK START
+
+
+
+# ============================================================
+# BOT 1 — CLIP VIDEO RECEIVER + DATABASE + RESULT DELIVERY
+# Add this block inside your EXISTING BOT 1 code.
+# Requires: pyTelegramBotAPI + psycopg2
+# ============================================================
+
+import os
+import json
+import time
+import threading
+import logging
+
+from telebot.types import Message
+
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+
+BOT1_WORKER_ID = "CLIP_BOT_1"
+
+CLIP_MAX_SIZE = 50 * 1024 * 1024  # 50 MB
+CLIP_RESULT_POLL_SECONDS = 2
+
+CLIP_TASK_TYPE = "clip_movie_identification"
+
+
+# ============================================================
+# DATABASE CONNECTION
+# ============================================================
+
+def clip_db_connection():
+    return get_all_chat_db_conn()
+
+
+# ============================================================
+# HELPER: PRIVATE CHAT ONLY
+# ============================================================
+
+def clip_is_private(message):
+    return (
+        message.chat is not None
+        and message.chat.type == "private"
+        and message.from_user is not None
+        and not message.from_user.is_bot
+    )
+
+
+# ============================================================
+# HELPER: VIDEO INFORMATION
+# ============================================================
+
+def clip_get_video_info(message):
+
+    if message.video:
+        item = message.video
+        return {
+            "file_id": item.file_id,
+            "file_unique_id": item.file_unique_id,
+            "file_name": None,
+            "mime_type": item.mime_type or "video/mp4",
+            "file_size": item.file_size or 0,
+            "file_type": "video"
+        }
+
+    if message.document:
+        item = message.document
+
+        if not (item.mime_type or "").startswith("video/"):
+            return None
+
+        return {
+            "file_id": item.file_id,
+            "file_unique_id": item.file_unique_id,
+            "file_name": item.file_name,
+            "mime_type": item.mime_type,
+            "file_size": item.file_size or 0,
+            "file_type": "document_video"
+        }
+
+    return None
+
+
+# ============================================================
+# HELPER: SAVE CUSTOMER
+# ============================================================
+
+def clip_save_customer(user):
+
+    conn = clip_db_connection()
+
+    try:
+        cur = conn.cursor()
+
+        cur.execute("""
+            INSERT INTO customers (
+                user_id,
+                username,
+                first_name,
+                last_name,
+                last_interaction_at
+            )
+            VALUES (%s, %s, %s, %s, NOW())
+
+            ON CONFLICT (user_id)
+            DO UPDATE SET
+                username = EXCLUDED.username,
+                first_name = EXCLUDED.first_name,
+                last_name = EXCLUDED.last_name,
+                last_interaction_at = NOW(),
+                updated_at = NOW()
+        """, (
+            user.id,
+            user.username,
+            user.first_name,
+            user.last_name
+        ))
+
+        conn.commit()
+
+    finally:
+        conn.close()
+
+
+# ============================================================
+# HELPER: RECEIVE VIDEO AND CREATE TASK
+# ============================================================
+
+def clip_create_task(message, video_info):
+
+    conn = clip_db_connection()
+
+    try:
+        cur = conn.cursor()
+
+        user_id = message.from_user.id
+
+        payload = {
+            "source_bot": BOT1_WORKER_ID,
+            "source_user_id": user_id,
+            "source_chat_id": message.chat.id,
+            "source_message_id": message.message_id,
+            "source_file_id": video_info["file_id"],
+            "source_file_unique_id": video_info["file_unique_id"],
+            "file_type": video_info["file_type"],
+            "file_name": video_info["file_name"],
+            "mime_type": video_info["mime_type"],
+            "file_size": video_info["file_size"],
+            "storage_channel_id": CLIP_CHANNEL_VIDEO
+        }
+
+        cur.execute("""
+            INSERT INTO tasks (
+                user_id,
+                task_type,
+                status,
+                priority,
+                payload
+            )
+            VALUES (
+                %s,
+                %s,
+                'waiting_storage',
+                5,
+                %s::jsonb
+            )
+            RETURNING task_id
+        """, (
+            user_id,
+            CLIP_TASK_TYPE,
+            json.dumps(payload)
+        ))
+
+        task_id = str(cur.fetchone()[0])
+
+        cur.execute("""
+            INSERT INTO chat_messages (
+                user_id,
+                task_id,
+                telegram_chat_id,
+                telegram_message_id,
+                direction,
+                sender_type,
+                message_type,
+                file_id,
+                file_unique_id,
+                file_name,
+                mime_type,
+                file_size
+            )
+            VALUES (
+                %s, %s, %s, %s,
+                'incoming', 'user', 'video',
+                %s, %s, %s, %s, %s
+            )
+        """, (
+            user_id,
+            task_id,
+            message.chat.id,
+            message.message_id,
+            video_info["file_id"],
+            video_info["file_unique_id"],
+            video_info["file_name"],
+            video_info["mime_type"],
+            video_info["file_size"]
+        ))
+
+        conn.commit()
+
+        return task_id
+
+    except Exception:
+        conn.rollback()
+        raise
+
+    finally:
+        conn.close()
+
+
+# ============================================================
+# HELPER: SEND VIDEO TO PRIVATE STORAGE CHANNEL
+# ============================================================
+
+def clip_send_to_storage(message, task_id):
+
+    copied = bot.copy_message(
+        chat_id=CLIP_CHANNEL_VIDEO,
+        from_chat_id=message.chat.id,
+        message_id=message.message_id
+    )
+
+    conn = clip_db_connection()
+
+    try:
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT payload
+            FROM tasks
+            WHERE task_id = %s
+              AND task_type = %s
+        """, (task_id, CLIP_TASK_TYPE))
+
+        row = cur.fetchone()
+
+        if not row:
+            raise RuntimeError("Task not found after storage copy")
+
+        payload = row[0]
+
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+
+        payload["storage_message_id"] = copied.message_id
+        payload["storage_channel_id"] = CLIP_CHANNEL_VIDEO
+
+        cur.execute("""
+            UPDATE tasks
+            SET payload = %s::jsonb,
+                status = 'pending',
+                updated_at = NOW()
+            WHERE task_id = %s
+              AND status = 'waiting_storage'
+        """, (
+            json.dumps(payload),
+            task_id
+        ))
+
+        cur.execute("""
+            UPDATE chat_messages
+            SET storage_channel_id = %s,
+                storage_message_id = %s
+            WHERE task_id = %s
+              AND direction = 'incoming'
+        """, (
+            CLIP_CHANNEL_VIDEO,
+            copied.message_id,
+            task_id
+        ))
+
+        conn.commit()
+
+        return copied.message_id
+
+    except Exception:
+        conn.rollback()
+        raise
+
+    finally:
+        conn.close()
+
+
+# ============================================================
+# MAIN VIDEO HANDLER
+# ============================================================
+
+@bot.message_handler(
+    content_types=["video", "document"],
+    func=lambda message: clip_is_private(message)
+)
+def bot1_clip_video_handler(message):
+
+    video_info = clip_get_video_info(message)
+
+    # Ignore non-video documents silently.
+    if not video_info:
+        return
+
+    # Reject videos larger than 50 MB.
+    if video_info["file_size"] > CLIP_MAX_SIZE:
+
+        bot.reply_to(
+            message,
+            "Idan nufinka siyan fim ɗin nan ne, "
+            "ƙa'idar mu ita ce video kada ya wuce 50MB.\n\n"
+            "If your intention is to buy this movie, "
+            "our rule is that the video must not exceed 50MB."
+        )
+        return
+
+    try:
+        clip_save_customer(message.from_user)
+
+        task_id = clip_create_task(
+            message,
+            video_info
+        )
+
+        clip_send_to_storage(
+            message,
+            task_id
+        )
+
+        logging.info(
+            "CLIP RECEIVED | TASK=%s | USER=%s",
+            task_id,
+            message.from_user.id
+        )
+
+        bot.reply_to(
+            message,
+            "An karɓi video ɗinka. Ana fara bincike...\n\n"
+            "Your video has been received. Processing has started."
+        )
+
+    except Exception as e:
+
+        logging.exception("BOT1 CLIP RECEIVER ERROR")
+
+        bot.reply_to(
+            message,
+            "An samu matsala wajen karɓar video ɗin. "
+            "Ka sake gwadawa.\n\n"
+            "There was a problem receiving your video. Please try again."
+        )
+
+
+# ============================================================
+# RESULT DELIVERY — BOT 1
+# Poll DB every 2 seconds.
+# ============================================================
+
+def clip_deliver_completed_task(task_id):
+
+    conn = clip_db_connection()
+
+    try:
+        cur = conn.cursor()
+
+        # Claim one completed task to prevent duplicate delivery.
+        cur.execute("""
+            UPDATE tasks
+            SET status = 'delivering',
+                updated_at = NOW()
+            WHERE task_id = %s
+              AND task_type = %s
+              AND status = 'completed'
+            RETURNING user_id, payload, result_json
+        """, (
+            task_id,
+            CLIP_TASK_TYPE
+        ))
+
+        row = cur.fetchone()
+
+        if not row:
+            conn.commit()
+            return
+
+        user_id, payload, result = row
+
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+
+        if isinstance(result, str):
+            result = json.loads(result)
+
+        movie_name = result.get("movie_name", "Ba a gano ba")
+        movie_year = result.get("movie_year")
+
+        original_file_id = payload.get("source_file_id")
+        original_message_id = payload.get("source_message_id")
+        source_chat_id = payload.get("source_chat_id")
+
+        caption = f"Asalin sunan wannan fim ɗin shine:\n\n{movie_name}"
+
+        if movie_year:
+            caption += f" {movie_year}"
+
+        # Commit claim before sending to avoid concurrent duplicate delivery.
+        conn.commit()
+
+        sent = bot.send_video(
+            chat_id=user_id,
+            video=original_file_id,
+            caption=caption
+        )
+
+        # Delete the original user message only after successful delivery.
+        try:
+            bot.delete_message(
+                chat_id=source_chat_id,
+                message_id=original_message_id
+            )
+        except Exception:
+            logging.warning(
+                "Could not delete original clip message: %s",
+                task_id
+            )
+
+        cur.execute("""
+            UPDATE tasks
+            SET status = 'delivered',
+                completed_at = NOW(),
+                updated_at = NOW()
+            WHERE task_id = %s
+        """, (task_id,))
+
+        cur.execute("""
+            UPDATE chat_messages
+            SET telegram_deleted = TRUE,
+                deleted_at = NOW()
+            WHERE task_id = %s
+              AND direction = 'incoming'
+        """, (task_id,))
+
+        cur.execute("""
+            INSERT INTO chat_messages (
+                user_id,
+                task_id,
+                telegram_chat_id,
+                telegram_message_id,
+                direction,
+                sender_type,
+                message_type,
+                content,
+                file_id
+            )
+            VALUES (
+                %s, %s, %s, %s,
+                'outgoing', 'bot', 'video',
+                %s, %s
+            )
+        """, (
+            user_id,
+            task_id,
+            user_id,
+            sent.message_id,
+            caption,
+            original_file_id
+        ))
+
+        conn.commit()
+
+        logging.info(
+            "CLIP DELIVERED | TASK=%s | USER=%s",
+            task_id,
+            user_id
+        )
+
+    except Exception:
+
+        conn.rollback()
+
+        logging.exception(
+            "CLIP RESULT DELIVERY ERROR | TASK=%s",
+            task_id
+        )
+
+        try:
+            cur.execute("""
+                UPDATE tasks
+                SET status = 'completed',
+                    updated_at = NOW()
+                WHERE task_id = %s
+                  AND status = 'delivering'
+            """, (task_id,))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+
+    finally:
+        conn.close()
+
+
+# ============================================================
+# RESULT POLLER
+# ============================================================
+
+def bot1_clip_result_poller():
+
+    while True:
+
+        conn = None
+
+        try:
+            conn = clip_db_connection()
+            cur = conn.cursor()
+
+            cur.execute("""
+                SELECT task_id
+                FROM tasks
+                WHERE task_type = %s
+                  AND status = 'completed'
+                ORDER BY completed_at ASC NULLS FIRST
+                LIMIT 20
+            """, (CLIP_TASK_TYPE,))
+
+            task_ids = [
+                str(row[0])
+                for row in cur.fetchall()
+            ]
+
+            conn.close()
+            conn = None
+
+            for task_id in task_ids:
+                clip_deliver_completed_task(task_id)
+
+        except Exception:
+
+            logging.exception(
+                "BOT1 CLIP RESULT POLLER ERROR"
+            )
+
+            if conn:
+                conn.close()
+
+        time.sleep(CLIP_RESULT_POLL_SECONDS)
+
+
+# ============================================================
+# START POLLER ONCE
+# ============================================================
+
+if not globals().get("_BOT1_CLIP_POLLER_STARTED", False):
+
+    _BOT1_CLIP_POLLER_STARTED = True
+
+    threading.Thread(
+        target=bot1_clip_result_poller,
+        daemon=True,
+        name="bot1-clip-result-poller"
+    ).start()
+
+    logging.info("BOT 1 CLIP RESULT POLLER STARTED")
+
+
+#VIDEO ==== BLOCK END
 
 
 # ============================================================
