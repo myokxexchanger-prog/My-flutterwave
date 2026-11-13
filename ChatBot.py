@@ -1135,7 +1135,7 @@ WARNING_GROUP_ID = -1004366360478
 WARNING_1_VALUE = 4  # Misali: Kwana 5 kafin expire
 WARNING_2_VALUE = 2  # Misali: Kwana 2 kafin expire
 
-CLIP_CHANNEL_VIDEO = -1004433789999
+CLIP_CHANNEL_VIDEO = -1004449824546
 BOT_USERNAME = "Algaitabot"
 CHANNEL = "@Algaitamoviestore"
 
