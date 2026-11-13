@@ -1980,6 +1980,34 @@ def telegram_webhook():
     return "OK", 200
 
 
+# ==================================================
+# BOT 1 — CHANNEL MESSAGE SENDER TEST
+# ==================================================
+
+@bot.message_handler(commands=["text"])
+def bot1_send_channel_test(message):
+    try:
+        text = message.text.partition(" ")[2].strip()
+
+        if not text:
+            bot.reply_to(message, "Ka rubuta saƙon bayan /text")
+            return
+
+        sent = bot.send_message(
+            chat_id=CLIP_CHANNEL_VIDEO,
+            text=text
+        )
+
+        bot.reply_to(
+            message,
+            f"✅ An aika saƙo zuwa channel.\n"
+            f"Message ID: {sent.message_id}"
+        )
+
+    except Exception as e:
+        logging.exception("BOT1 CHANNEL SEND ERROR")
+        bot.reply_to(message, f"❌ Error: {str(e)[:500]}")
+
 
 # ============================================================
 # BOT 1 — CLIP RECEIVER + STORAGE + RESULT DELIVERY
