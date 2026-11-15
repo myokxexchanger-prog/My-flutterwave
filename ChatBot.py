@@ -57,6 +57,9 @@ wallet_conn = psycopg2.connect(WALLET_DATABASE_URL)
 wallet_conn.autocommit = True
 wallet_cur = wallet_conn.cursor()
 
+
+
+
 # ============================================================
 # ALL CHAT DATABASE CONNECTION
 # ============================================================
@@ -98,6 +101,7 @@ def get_all_chat_db_conn():
 # ============================================================
 # ALL CHAT DATABASE CONNECTION READY
 # ============================================================
+
 
 
 #=== Farko
@@ -479,6 +483,9 @@ user_states = {}
 active_links = {}
 
 
+
+
+
 # ============================================================
 # ALL CHAT DATABASE TABLES
 # SHARED BY ALGAITABOT AND ALL WORKERS
@@ -668,6 +675,9 @@ chat_conn.close()
 print("✅ ALL CHAT DATABASE TABLES CREATED SUCCESSFULLY")
 
 
+
+
+
 # =========================
 # WALLET DATABASE TABLES
 # =========================
@@ -783,27 +793,6 @@ CREATE TABLE IF NOT EXISTS movies (
     channel_username TEXT
 )
 """)
-
-
-
-# ==========================================
-# MOVIES NAME DATABASE TABLE
-# ==========================================
-
-cur.execute("""
-CREATE TABLE IF NOT EXISTS movies_name (
-    id BIGSERIAL PRIMARY KEY,
-    translated_title TEXT,
-    translation_company TEXT,
-    original_title TEXT,
-    release_year TEXT,
-    main_actor TEXT
-)
-""")
-
-print("✅ MOVIES_NAME TABLE CREATED SUCCESSFULLY")
-
-
 
 # -------- ITEMS --------
 cur.execute("""
@@ -1109,6 +1098,21 @@ active_links = {}
 # --- Admins configuration ---
 ADMINS = [6603268127]
 
+
+
+# Chats where this system must remain silent.
+DONT_TALK = (
+    100054484884,
+    -1003656360408,
+)
+
+# Channel/group for adult-content reports.
+AD_REPORT = -1004433789999
+
+# Wannan shi ne GROUP ID din da ake tura short videos
+CLIP_CHANNEL_VIDEO = -1004449824546
+
+
 # ========= CONFIG =========
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
@@ -1135,7 +1139,8 @@ WARNING_GROUP_ID = -1004366360478
 WARNING_1_VALUE = 4  # Misali: Kwana 5 kafin expire
 WARNING_2_VALUE = 2  # Misali: Kwana 2 kafin expire
 
-CLIP_CHANNEL_VIDEO = -1004433789999
+
+
 BOT_USERNAME = "Algaitabot"
 CHANNEL = "@Algaitamoviestore"
 
@@ -1370,6 +1375,14 @@ def send_feedback_prompt(user_id, order_id):
         print("FEEDBACK SEND ERROR:", e)
 
 
+
+import html
+
+def clean_html(text):
+    if not text:
+        return ""
+    return html.escape(str(text))
+
 @app.route("/webhook", methods=["POST"])
 def flutterwave_webhook():
     try:
@@ -1537,6 +1550,8 @@ def flutterwave_webhook():
             except:
                 tg_username = "unknown"
 
+            safe_full_name_topup = clean_html(full_name)
+
             wallet_kb = InlineKeyboardMarkup()
             wallet_kb.add(
                 InlineKeyboardButton(
@@ -1547,7 +1562,7 @@ def flutterwave_webhook():
 
             bot.send_message(
                 user_id,
-                f"""🎉 <b>CONGRATULATIONS MALAM {full_name}</b>
+                f"""🎉 <b>CONGRATULATIONS MALAM {safe_full_name_topup}</b>
 
 💰 <b>Your wallet credited:</b> ₦{paid_amount}
 
@@ -1569,8 +1584,8 @@ Use the button below to open your wallet.
                     PAYMENT_NOTIFY_GROUP,
                     f"""💰 <b>TOP-UP SUCCESSFUL</b>
 
-👤 <b>Name:</b> {full_name}
-🔗 <b>Username:</b> {tg_username}
+👤 <b>Name:</b> {safe_full_name_topup}
+🔗 <b>Username:</b> {clean_html(tg_username)}
 🆔 <b>User ID:</b> <code>{user_id}</code>
 
 💳 <b>Top-up:</b> ₦{paid_amount}
@@ -1639,6 +1654,9 @@ Use the button below to open your wallet.
         except:
             tg_username = "unknown"
 
+        safe_full_name = clean_html(full_name)
+        safe_tg_username = clean_html(tg_username)
+
         # =====================================================
         # ================== FILM ORDER =======================
         # =====================================================
@@ -1666,7 +1684,6 @@ Use the button below to open your wallet.
                 key = group_key or f"single_{title}"
                 if key not in groups:
                     groups[key] = {"title": title, "count": 0}
-                    # Idan fims na cikin group guda ne, sau daya kawai za a dauki custom cashback din don gudun ninki (doubling)
                     if cb_amount and cb_amount > 0:
                         total_custom_cashback += cb_amount
                 groups[key]["count"] += 1
@@ -1679,14 +1696,13 @@ Use the button below to open your wallet.
                     lines.append(f"{g['title']}")
 
             titles_text = ", ".join(lines) if lines else "N/A"
+            safe_titles_text = clean_html(titles_text)
 
             # ================= CASHBACK REWARD LOGIC =================
             if total_custom_cashback > 0:
-                # 1. SABON TSARI: IDAN FIM(IN) YANA DA CUSTOM CASHBACK A DATABASE
                 cashback = total_custom_cashback
                 is_custom_cashback = True
             else:
-                # 2. TSOHON TSARI: IDAN FIM(IN) BASHI DA CUSTOM CASHBACK
                 cashback = (paid_amount // 200) * CASHBACK
                 if cashback > 200:
                     cashback = 200
@@ -1717,7 +1733,6 @@ Use the button below to open your wallet.
                     (user_id, cashback, order_id)
                 )
 
-                # Samun jimillar balance dake cikin wallet din user bayan an kara cashback
                 wallet_cur.execute(
                     """
                     SELECT balance FROM wallet_balance WHERE user_id=%s
@@ -1731,7 +1746,6 @@ Use the button below to open your wallet.
                 wallet_cur.close()
                 wallet_conn.close()
 
-                # ================= SABON TSARIN SAKON CASHBACK =================
                 cb_kb = InlineKeyboardMarkup()
                 cb_kb.add(
                     InlineKeyboardButton(
@@ -1742,13 +1756,13 @@ Use the button below to open your wallet.
                 )
 
                 cb_text = (
-                    f"🎁 **Cashback Reward**🎉\n\n"
-                    f"Wallet ID: `{user_id}`\n"
+                    f"🎁 <b>Cashback Reward</b>🎉\n\n"
+                    f"Wallet ID: <code>{user_id}</code>\n"
                     f"You received ₦{cashback} cashback,\n"
                     f"View your wallet to see available balance"
                 )
 
-                bot.send_message(user_id, cb_text, parse_mode="Markdown", reply_markup=cb_kb)
+                bot.send_message(user_id, cb_text, parse_mode="HTML", reply_markup=cb_kb)
 
             conn.commit()
             cur.close()
@@ -1765,19 +1779,19 @@ Use the button below to open your wallet.
             )
 
             success_text = (
-                f"🎉 **PAYMENT SUCCESSFUL!**\n"
+                f"🎉 <b>PAYMENT SUCCESSFUL!</b>\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
-                f"Mun Gode {full_name}\n\n"
-                f"🎬 **Film:** {titles_text}\n"
-                f"💵 **Amount Paid:** ₦{paid_amount}\n"
+                f"Mun Gode {safe_full_name}\n\n"
+                f"🎬 <b>Film:</b> {safe_titles_text}\n"
+                f"💵 <b>Amount Paid:</b> ₦{paid_amount}\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
-                f"🎁 **Cashback Earned:** ₦{cashback}\n\n"
+                f"🎁 <b>Cashback Earned:</b> ₦{cashback}\n\n"
                 f"✅ Biyan ya kammala! 😊\n"
                 f"Danna DOWNLOAD domin sauke fim din\n"
                 f"👇👇👇"
             )
 
-            bot.send_message(user_id, success_text, parse_mode="Markdown", reply_markup=kb)
+            bot.send_message(user_id, success_text, parse_mode="HTML", reply_markup=kb)
 
             if PAYMENT_NOTIFY_GROUP:
                 from datetime import datetime, timedelta
@@ -1787,11 +1801,11 @@ Use the button below to open your wallet.
                     PAYMENT_NOTIFY_GROUP,
                     f"""✅ <b>NEW PAYMENT RECEIVED</b>
 
-👤 <b>Name:</b> {full_name}
-🔗 <b>Username:</b> {tg_username}
+👤 <b>Name:</b> {safe_full_name}
+🔗 <b>Username:</b> {safe_tg_username}
 🆔 <b>User ID:</b> <code>{user_id}</code>
 
-🎬 <b>Items:</b> {titles_text}
+🎬 <b>Items:</b> {safe_titles_text}
 🗃 <b>Order ID:</b> <code>{order_id}</code>
 
 💰 <b>Amount:</b> ₦{paid_amount}
@@ -1872,8 +1886,8 @@ Na gode da kasancewa tare da mu 🙏""",
                         PAYMENT_NOTIFY_GROUP,
                         f"""💎 <b>VIP RENEWAL PAYMENT</b>
 
-👤 <b>Name:</b> {full_name}
-🔗 <b>Username:</b> {tg_username}
+👤 <b>Name:</b> {safe_full_name}
+🔗 <b>Username:</b> {safe_tg_username}
 🆔 <b>User ID:</b> <code>{user_id}</code>
 
 🗃 <b>Order ID:</b> <code>{order_id}</code>
@@ -1887,7 +1901,7 @@ Na gode da kasancewa tare da mu 🙏""",
                 try:
                     bot.send_message(
                         ADMIN_ID,
-                        f"🔔 VIP RENEWAL\n\n👤 {full_name}\n🆔 {user_id}\n💰 ₦{paid_amount}\n\nYa sabunta VIP dinsa."
+                        f"🔔 VIP RENEWAL\n\n👤 {safe_full_name}\n🆔 {user_id}\n💰 ₦{paid_amount}\n\nYa sabunta VIP dinsa."
                     )
                 except:
                     pass
@@ -1927,7 +1941,7 @@ Na gode da kasancewa tare da mu 🙏""",
                     user_id,
                     f"""💎 <b>VIP SUBSCRIPTION ACTIVATED</b>
 
-👤 <b>Name:</b> {full_name}
+👤 <b>Name:</b> {safe_full_name}
 🆔 <b>User ID:</b> <code>{user_id}</code>
 
 💳 <b>Amount Paid:</b> ₦{paid_amount}
@@ -1948,8 +1962,8 @@ Na gode da kasancewa tare da mu 🙏""",
                         PAYMENT_NOTIFY_GROUP,
                         f"""💎 <b>NEW VIP SUBSCRIPTION</b>
 
-👤 <b>Name:</b> {full_name}
-🔗 <b>Username:</b> {tg_username}
+👤 <b>Name:</b> {safe_full_name}
+🔗 <b>Username:</b> {safe_tg_username}
 🆔 <b>User ID:</b> <code>{user_id}</code>
 
 🗃 <b>Order ID:</b> <code>{order_id}</code>
@@ -1969,6 +1983,7 @@ Na gode da kasancewa tare da mu 🙏""",
         return "Internal Error", 500
 
 
+
 # 
 # ========= TELEGRAM WEBHOOK =========
 @app.route("/telegram", methods=["POST"])
@@ -1980,1285 +1995,666 @@ def telegram_webhook():
     return "OK", 200
 
 
-# ==========================================
-# /CLEAN - CLEAR ALL BOT DATABASE DATA
-# ADMIN ONLY
-# ==========================================
-
-@bot.message_handler(commands=['clean'])
-def clean_database(message):
-
-    if message.from_user.id != int(ADMIN_ID):
-        return bot.reply_to(message, "❌ Ba ka da izinin yin wannan aiki.")
-
-    try:
-        conn = get_all_chat_db_conn()
-        cur = conn.cursor()
-
-        cur.execute("""
-            TRUNCATE TABLE
-                chat_messages,
-                tasks,
-                workers,
-                customers
-            RESTART IDENTITY;
-        """)
-
-        conn.commit()
-        cur.close()
-        conn.close()
-
-        bot.reply_to(
-            message,
-            "✅ DATABASE CLEANED SUCCESSFULLY!\n\n"
-            "An goge dukkan Rows:\n"
-            "• workers\n"
-            "• customers\n"
-            "• tasks\n"
-            "• chat_messages\n\n"
-            "Database ɗinka yanzu babu tsoffin bayanai."
-        )
-
-    except Exception as e:
-        try:
-            conn.rollback()
-            conn.close()
-        except:
-            pass
-
-        bot.reply_to(message, f"❌ Database cleaning failed:\n{e}")
-
-
-# ==========================================
-# /dbcheck — CHECK LATEST CLIP TASK
-# ADMIN ONLY
-# ==========================================
-
-@bot.message_handler(commands=['dbcheck'])
-def clip_dbcheck(message):
-
-    if message.from_user.id != int(ADMIN_ID):
-        return
-
-    conn = None
-
-    try:
-        conn = get_all_chat_db_conn()
-        cur = conn.cursor()
-
-        cur.execute("""
-            SELECT
-                task_id,
-                user_id,
-                status,
-                assigned_worker,
-                attempts,
-                error_message,
-                payload,
-                result_json,
-                created_at,
-                started_at,
-                completed_at,
-                heartbeat_at,
-                lease_until
-            FROM tasks
-            WHERE task_type = %s
-            ORDER BY created_at DESC
-            LIMIT 1
-        """, (CLIP_TASK_TYPE,))
-
-        row = cur.fetchone()
-
-        if not row:
-            return bot.reply_to(message, "❌ Babu task a database.")
-
-        (
-            task_id, user_id, status, worker, attempts,
-            error, payload, result, created, started,
-            completed, heartbeat, lease
-        ) = row
-
-        payload = clip_json(payload)
-        result = clip_json(result)
-
-        text = (
-            "🔍 DATABASE CHECK\n"
-            "━━━━━━━━━━━━━━━━━━\n"
-            f"Task ID: {task_id}\n"
-            f"User ID: {user_id}\n"
-            f"Status: {status}\n"
-            f"Worker: {worker or 'Not assigned'}\n"
-            f"Attempts: {attempts}\n\n"
-            "📦 STORAGE\n"
-            f"Channel: {payload.get('storage_channel_id')}\n"
-            f"Message: {payload.get('storage_message_id')}\n\n"
-            "⚙️ BOT 2 PROCESSING\n"
-            f"Started: {payload.get('bot2_processing_started_at')}\n"
-            f"Download started: {payload.get('bot2_download_started_at')}\n"
-            f"Download completed: {payload.get('bot2_download_completed_at')}\n"
-            f"Frames completed: {payload.get('bot2_frames_completed_at')}\n"
-            f"Gemini started: {payload.get('bot2_gemini_started_at')}\n"
-            f"Gemini completed: {payload.get('bot2_gemini_completed_at')}\n\n"
-            "🎬 RESULT\n"
-            f"Movie: {result.get('movie_name', 'Not available')}\n"
-            f"Year: {result.get('movie_year', 'Unknown')}\n"
-            f"Actor: {result.get('main_actor', 'Unknown')}\n\n"
-            "🕒 DATABASE TIMES\n"
-            f"Created: {created}\n"
-            f"Started: {started}\n"
-            f"Completed: {completed}\n"
-            f"Heartbeat: {heartbeat}\n"
-            f"Lease: {lease}\n\n"
-            f"❌ Error: {error or 'None'}"
-        )
-
-        bot.reply_to(message, text[:4000])
-
-    except Exception as e:
-        if conn:
-            conn.rollback()
-        bot.reply_to(message, f"❌ DB CHECK ERROR:\n{str(e)[:1500]}")
-
-    finally:
-        if conn:
-            conn.close()
-
 
 # ============================================================
-# BOT 1 — CLIP RECEIVER + STORAGE + RESULT DELIVERY
-# CONTINUOUS DB POLLING EVERY 2 SECONDS
-# BOT 2 PROCESSING TIMEOUT: 30 MINUTES FROM ACTUAL START
+# BOT 1 — VIDEO RECEIVER SYSTEM
+# PRIVATE DM ONLY
+# VIDEO ONLY — NO IMAGE SYSTEM YET
+# 50MB LIMIT
+# ADULT CONTENT CAPTION CHECK
+# DONT_TALK CHAT PROTECTION
+# ADMIN ADD-MOVIE SYSTEM PROTECTED
+# CLIP GROUP INVITE BUTTON
 # ============================================================
 
 import os
-import json
-import time
+import re
 import logging
 import threading
 
 from datetime import datetime, timezone
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 
 # ============================================================
-# CONFIG
+# CONFIGURATION
 # ============================================================
-
-BOT1_WORKER_ID = "CLIP_BOT_1"
-CLIP_TASK_TYPE = "clip_movie_identification"
 
 CLIP_MAX_SIZE = 50 * 1024 * 1024
 
-CLIP_RESULT_POLL_SECONDS = 2
-CLIP_MAX_ACTIVE_TASKS = 100
 
-# Bot 2 gets 30 minutes from the moment it starts processing.
-CLIP_BOT2_PROCESSING_TIMEOUT = 1800
 
-_BOT1_CLIP_POLLER_STARTED = False
+# Admin must remain unaffected by this system.
+CLIP_ADMIN_ID = int(ADMIN_ID)
 
-_CLIP1_NOTIFIED_FAILURES = set()
-_CLIP1_LAST_STATUS = {}
-
-_CLIP1_LOCK = threading.RLock()
+_CLIP_LINK_LOCK = threading.RLock()
 
 
 # ============================================================
-# DATABASE
+# HELPERS
 # ============================================================
 
-def clip_db_connection():
-    return get_all_chat_db_conn()
+def clip_is_private_user(message):
+
+    if not message or not message.chat:
+        return False
+
+    if message.chat.id in DONT_TALK:
+        return False
+
+    if message.chat.type != "private":
+        return False
+
+    if not message.from_user:
+        return False
+
+    if message.from_user.is_bot:
+        return False
+
+    # Protect admin and existing admin handlers.
+    if int(message.from_user.id) == CLIP_ADMIN_ID:
+        return False
+
+    return True
 
 
-def clip_json(value):
-    if isinstance(value, str):
-        return json.loads(value)
-    return value or {}
+def clip_get_user_name(user):
 
-
-def clip_admin_notify(text):
-    try:
-        if ADMIN_ID:
-            bot.send_message(
-                int(ADMIN_ID),
-                str(text)[:3900]
-            )
-    except Exception:
-        logging.exception("BOT1 ADMIN NOTIFICATION FAILED")
-
-
-def clip_format_size(size):
-    try:
-        return f"{int(size or 0) / (1024 * 1024):.2f} MB"
-    except Exception:
-        return "Unknown"
-
-
-def clip_user_name(user):
     parts = [
         getattr(user, "first_name", "") or "",
         getattr(user, "last_name", "") or ""
     ]
 
     return " ".join(
-        x.strip() for x in parts if x.strip()
+        item.strip()
+        for item in parts
+        if item.strip()
     ) or "Unknown"
 
 
-def clip_user_tag(user):
+def clip_get_user_tag(user):
+
     username = getattr(user, "username", None)
 
     return f"@{username}" if username else "Babu username"
 
 
-def clip_is_private(message):
-    return bool(
-        message.chat
-        and message.chat.type == "private"
-        and message.from_user
-        and not message.from_user.is_bot
-    )
-
-
-# ============================================================
-# VIDEO INFORMATION
-# ============================================================
-
 def clip_get_video_info(message):
 
     if message.video:
+
         item = message.video
 
         return {
             "file_id": item.file_id,
             "file_unique_id": item.file_unique_id,
+            "file_size": int(item.file_size or 0),
             "file_name": None,
             "mime_type": item.mime_type or "video/mp4",
-            "file_size": int(item.file_size or 0),
             "file_type": "video"
         }
 
     if message.document:
+
         item = message.document
 
-        if not (
-            item.mime_type or ""
-        ).lower().startswith("video/"):
+        mime = (item.mime_type or "").lower()
+
+        if not mime.startswith("video/"):
             return None
 
         return {
             "file_id": item.file_id,
             "file_unique_id": item.file_unique_id,
+            "file_size": int(item.file_size or 0),
             "file_name": item.file_name,
             "mime_type": item.mime_type,
-            "file_size": int(item.file_size or 0),
             "file_type": "document_video"
         }
 
     return None
 
 
-# ============================================================
-# SAVE CUSTOMER
-# ============================================================
+def clip_format_size(size):
 
-def clip_save_customer(user):
-
-    conn = clip_db_connection()
-
-    try:
-        cur = conn.cursor()
-
-        cur.execute("""
-            INSERT INTO customers (
-                user_id,
-                username,
-                first_name,
-                last_name,
-                last_interaction_at
-            )
-            VALUES (%s, %s, %s, %s, NOW())
-
-            ON CONFLICT (user_id)
-            DO UPDATE SET
-                username = EXCLUDED.username,
-                first_name = EXCLUDED.first_name,
-                last_name = EXCLUDED.last_name,
-                last_interaction_at = NOW(),
-                updated_at = NOW()
-        """, (
-            user.id,
-            user.username,
-            user.first_name,
-            user.last_name
-        ))
-
-        conn.commit()
-
-    except Exception:
-        conn.rollback()
-        raise
-
-    finally:
-        conn.close()
+    return f"{int(size or 0) / (1024 * 1024):.2f} MB"
 
 
 # ============================================================
-# CREATE TASK
+# ADULT CONTENT CAPTION CHECK
 # ============================================================
 
-def clip_create_task(message, video_info):
+CLIP_ADULT_KEYWORDS = [
 
-    conn = clip_db_connection()
+    # English
+    "porn",
+    "pornography",
+    "xxx",
+    "sex film",
+    "sex video",
+    "adult video",
+    "adult movie",
+    "nude",
+    "nudity",
+    "erotic",
+    "hentai",
+    "sexual content",
+    "18+ adult",
 
-    try:
-        cur = conn.cursor()
-        user = message.from_user
+    # Hausa
+    "batsa",
+    "finafinan batsa",
+    "fim din batsa",
+    "bidiyon batsa",
+    "tsiraici",
+    "tsiraici",
+    "lalata",
+]
 
-        now = datetime.now(timezone.utc)
 
-        payload = {
-            "source_bot": BOT1_WORKER_ID,
+def clip_is_adult_caption(caption):
 
-            "source_user_id": int(user.id),
-            "source_user_name": clip_user_name(user),
-            "source_user_tag": clip_user_tag(user),
+    caption = (caption or "").lower()
 
-            "source_chat_id": int(message.chat.id),
-            "source_message_id": int(message.message_id),
+    normalized = re.sub(
+        r"[\W_]+",
+        " ",
+        caption
+    )
 
-            "source_file_id": video_info["file_id"],
-            "source_file_unique_id": video_info["file_unique_id"],
+    for keyword in CLIP_ADULT_KEYWORDS:
 
-            "file_type": video_info["file_type"],
-            "file_name": video_info["file_name"],
-            "mime_type": video_info["mime_type"],
-            "file_size": video_info["file_size"],
+        keyword = keyword.lower()
 
-            "storage_channel_id": int(CLIP_CHANNEL_VIDEO),
-            "storage_message_id": None,
+        if keyword in normalized:
+            return True
 
-            "submitted_at": now.isoformat(),
-
-            # Bot 2 sets these when it actually starts.
-            "bot2_processing_started_at": None,
-            "bot2_processing_deadline_at": None,
-
-            "bot2_download_started_at": None,
-            "bot2_download_completed_at": None,
-
-            "bot2_frames_completed_at": None,
-
-            "bot2_gemini_started_at": None,
-            "bot2_gemini_completed_at": None,
-
-            "bot2_db_saved_at": None,
-
-            "bot2_total_processing_seconds": None,
-            "bot2_download_seconds": None,
-            "bot2_frames_seconds": None,
-            "bot2_gemini_seconds": None
-        }
-
-        cur.execute("""
-            INSERT INTO tasks (
-                user_id,
-                task_type,
-                status,
-                priority,
-                payload
-            )
-            VALUES (
-                %s,
-                %s,
-                'waiting_storage',
-                5,
-                %s::jsonb
-            )
-            RETURNING task_id
-        """, (
-            user.id,
-            CLIP_TASK_TYPE,
-            json.dumps(payload)
-        ))
-
-        task_id = str(cur.fetchone()[0])
-
-        cur.execute("""
-            INSERT INTO chat_messages (
-                user_id,
-                task_id,
-                telegram_chat_id,
-                telegram_message_id,
-                direction,
-                sender_type,
-                message_type,
-                content,
-                file_id,
-                file_unique_id,
-                file_name,
-                mime_type,
-                file_size
-            )
-            VALUES (
-                %s, %s, %s, %s,
-                'incoming',
-                'user',
-                'video',
-                %s, %s, %s, %s, %s, %s
-            )
-        """, (
-            user.id,
-            task_id,
-            message.chat.id,
-            message.message_id,
-            f"Video submitted by {payload['source_user_name']}",
-            video_info["file_id"],
-            video_info["file_unique_id"],
-            video_info["file_name"],
-            video_info["mime_type"],
-            video_info["file_size"]
-        ))
-
-        conn.commit()
-        return task_id
-
-    except Exception:
-        conn.rollback()
-        raise
-
-    finally:
-        conn.close()
+    return False
 
 
 # ============================================================
-# STORAGE CHANNEL CAPTION
+# REPORT ADULT CONTENT TO ADMIN REPORT CHANNEL
 # ============================================================
 
-def clip_build_storage_caption(message, task_id, video_info):
+def clip_send_adult_report(message, video_info):
 
     user = message.from_user
 
+    full_name = clip_get_user_name(user)
+    username = clip_get_user_tag(user)
+
     caption = (
-        "🎬 CLIP MOVIE IDENTIFICATION\n"
+        "🚨 VIDEO CONTENT REPORT\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
+        f"User Full Name: {full_name}\n"
+        f"Username: {username}\n"
         f"User ID: {user.id}\n"
-        f"Name: {clip_user_name(user)}\n"
-        f"Tag: {clip_user_tag(user)}\n"
-        f"Task ID: {task_id}\n"
-        f"Source Chat ID: {message.chat.id}\n"
-        f"Source Message ID: {message.message_id}\n"
-        f"File Size: {clip_format_size(video_info['file_size'])}\n"
+        f"Chat ID: {message.chat.id}\n"
+        f"Message ID: {message.message_id}\n"
+        f"Video Size: {clip_format_size(video_info['file_size'])}\n"
+        f"File Name: {video_info['file_name'] or 'Unknown'}\n"
         f"File Unique ID: {video_info['file_unique_id']}\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "STATUS: WAITING FOR BOT 2"
+        f"User Caption:\n{message.caption or 'No caption'}\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"Report Time: {datetime.now(timezone.utc).isoformat()}"
     )
-
-    return caption[:1024]
-
-
-# ============================================================
-# COPY VIDEO TO STORAGE
-# ============================================================
-
-def clip_send_to_storage(message, task_id, video_info):
-
-    caption = clip_build_storage_caption(
-        message,
-        task_id,
-        video_info
-    )
-
-    copied = bot.copy_message(
-        chat_id=CLIP_CHANNEL_VIDEO,
-        from_chat_id=message.chat.id,
-        message_id=message.message_id,
-        caption=caption
-    )
-
-    storage_message_id = int(copied.message_id)
-
-    conn = clip_db_connection()
 
     try:
-        cur = conn.cursor()
 
-        cur.execute("""
-            UPDATE tasks
-            SET payload = payload ||
-                jsonb_build_object(
-                    'storage_channel_id', %s::bigint,
-                    'storage_message_id', %s::bigint
-                ),
-                status = 'pending',
-                updated_at = NOW(),
-                heartbeat_at = NOW()
-            WHERE task_id = %s
-              AND task_type = %s
-              AND status = 'waiting_storage'
-            RETURNING task_id
-        """, (
-            int(CLIP_CHANNEL_VIDEO),
-            storage_message_id,
-            task_id,
-            CLIP_TASK_TYPE
-        ))
-
-        if not cur.fetchone():
-            raise RuntimeError(
-                "TASK_STORAGE_DATABASE_UPDATE_FAILED"
-            )
-
-        cur.execute("""
-            UPDATE chat_messages
-            SET storage_channel_id = %s,
-                storage_message_id = %s
-            WHERE task_id = %s
-              AND direction = 'incoming'
-        """, (
-            CLIP_CHANNEL_VIDEO,
-            storage_message_id,
-            task_id
-        ))
-
-        conn.commit()
-        return storage_message_id
+        # Send the actual video with its report details.
+        bot.copy_message(
+            chat_id=AD_REPORT,
+            from_chat_id=message.chat.id,
+            message_id=message.message_id,
+            caption=caption[:1024]
+        )
 
     except Exception:
-        conn.rollback()
-        raise
 
-    finally:
-        conn.close()
+        logging.exception(
+            "CLIP ADULT REPORT VIDEO COPY FAILED"
+        )
+
+        # Still send the report details if video copy fails.
+        bot.send_message(
+            AD_REPORT,
+            caption[:3900]
+        )
+
+
+# ============================================================
+# ADULT CONTENT RESPONSE
+# ============================================================
+
+def clip_reply_adult_content(message):
+
+    bot.reply_to(
+        message,
+        "Anan muna siyar da fina-finan da aka fassara zuwa harshen Hausa kawai.\n"
+        "Bamu da alaka da fina-finan batsa."
+    )
+
+
+# ============================================================
+# GET CLIP GROUP INVITE LINK
+# ============================================================
+
+def clip_create_group_invite(user_id):
+
+    with _CLIP_LINK_LOCK:
+
+        invite = bot.create_chat_invite_link(
+            chat_id=CLIP_CHANNEL_VIDEO,
+            name=f"clip-user-{user_id}",
+            member_limit=1
+        )
+
+        return invite.invite_link
+
+
+# ============================================================
+# SEND GROUP BUTTON TO USER
+# ============================================================
+
+def clip_send_group_button(message):
+
+    user_id = int(message.from_user.id)
+
+    invite_link = clip_create_group_invite(
+        user_id
+    )
+
+    keyboard = InlineKeyboardMarkup()
+
+    keyboard.add(
+        InlineKeyboardButton(
+            "🎬 SHIGA GROUP KA AIKA VIDEO",
+            url=invite_link
+        )
+    )
+
+    bot.reply_to(
+        message,
+        "Wannan short video ka tura min shi a wannan group idan kana son Full dinsa\n"
+        "Zan binciko maka shi\n"
+        "Ga Group din nawa\n"
+        "👇👇👇👇👇",
+        reply_markup=keyboard
+    )
 
 
 # ============================================================
 # MAIN VIDEO RECEIVER
+# PRIVATE USERS ONLY
 # ============================================================
 
 @bot.message_handler(
     content_types=["video", "document"],
-    func=lambda message: clip_is_private(message)
+    func=lambda message: clip_is_private_user(message)
 )
-def bot1_clip_video_handler(message):
+def bot1_clip_video_receiver(message):
+
+    # --------------------------------------------------------
+    # 1. ACCEPT VIDEO ONLY
+    # --------------------------------------------------------
 
     video_info = clip_get_video_info(message)
 
     if not video_info:
         return
 
+    # --------------------------------------------------------
+    # 2. CHECK VIDEO SIZE
+    # --------------------------------------------------------
+
     if video_info["file_size"] <= 0:
+
         bot.reply_to(
             message,
-            "❌ Ba a iya karanta girman video ɗin ba."
+            "❌ Ba a iya karanta girman bidiyon ba."
         )
+
         return
 
     if video_info["file_size"] > CLIP_MAX_SIZE:
+
         bot.reply_to(
             message,
-            "❌ Video bai kamata ya wuce 50MB ba.\n"
-            "The video must not exceed 50MB."
+            "Kayi hakuri bidiyon daka turo yayi bazan sarraba bidiyon da ya hausa 50MB ba😔\n\n"
+            "Rage bidiyon ka turo minti kadan daga ciki😊\n\n"
+            "Sorry, the video you sent is larger than my 50MB limit.😔\n\n"
+            "Please trim it to a shorter clip and send it again.😊"
         )
+
         return
 
-    task_id = None
+    # --------------------------------------------------------
+    # 3. CHECK CAPTION FOR ADULT CONTENT
+    # --------------------------------------------------------
+
+    caption = message.caption or ""
+
+    if clip_is_adult_caption(caption):
+
+        try:
+
+            clip_send_adult_report(
+                message,
+                video_info
+            )
+
+        except Exception:
+
+            logging.exception(
+                "CLIP ADULT REPORT FAILED"
+            )
+
+        clip_reply_adult_content(
+            message
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # 4. GET GROUP INVITE AND SEND BUTTON
+    # --------------------------------------------------------
 
     try:
-        clip_save_customer(message.from_user)
 
-        task_id = clip_create_task(
-            message,
-            video_info
-        )
-
-        storage_message_id = clip_send_to_storage(
-            message,
-            task_id,
-            video_info
-        )
-
-        bot.reply_to(
-            message,
-            "✅ An karɓi video ɗinka.\n"
-            "Ana fara bincike. Ka jira.\n\n"
-            "Your video has been received. Processing will start shortly."
-        )
-
-        clip_admin_notify(
-            "📥 BOT 1 — VIDEO STORED\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            f"Task ID: {task_id}\n"
-            f"User ID: {message.from_user.id}\n"
-            f"Name: {clip_user_name(message.from_user)}\n"
-            f"Tag: {clip_user_tag(message.from_user)}\n"
-            f"Source Chat: {message.chat.id}\n"
-            f"Source Message: {message.message_id}\n"
-            f"Storage Channel: {CLIP_CHANNEL_VIDEO}\n"
-            f"Storage Message: {storage_message_id}\n"
-            f"Size: {clip_format_size(video_info['file_size'])}\n"
-            "DB Status: pending"
+        clip_send_group_button(
+            message
         )
 
     except Exception as error:
 
-        logging.exception("BOT1 VIDEO RECEIVER FAILED")
-
-        if task_id:
-            conn = None
-
-            try:
-                conn = clip_db_connection()
-                cur = conn.cursor()
-
-                cur.execute("""
-                    UPDATE tasks
-                    SET status = 'failed',
-                        error_message = %s,
-                        updated_at = NOW()
-                    WHERE task_id = %s
-                      AND status NOT IN (
-                          'completed',
-                          'delivered'
-                      )
-                """, (
-                    str(error)[:2000],
-                    task_id
-                ))
-
-                conn.commit()
-
-            except Exception:
-                if conn:
-                    conn.rollback()
-                logging.exception(
-                    "BOT1 could not save failure"
-                )
-
-            finally:
-                if conn:
-                    conn.close()
-
-        try:
-            bot.reply_to(
-                message,
-                "❌ An samu matsala wajen karɓar video ɗin. Ka sake gwadawa."
-            )
-        except Exception:
-            pass
-
-        clip_admin_notify(
-            "❌ BOT 1 RECEIVER ERROR\n"
-            f"Task: {task_id or 'Not created'}\n"
-            f"Error: {str(error)[:1200]}"
+        logging.exception(
+            "CLIP GROUP INVITE FAILED"
         )
 
-
-# ============================================================
-# GET ACTIVE TASKS
-# ============================================================
-
-def clip_get_active_tasks():
-
-    conn = clip_db_connection()
-
-    try:
-        cur = conn.cursor()
-
-        cur.execute("""
-            SELECT
-                task_id,
-                user_id,
-                payload,
-                status,
-                created_at,
-                error_message
-            FROM tasks
-            WHERE task_type = %s
-              AND status IN (
-                  'waiting_storage',
-                  'pending',
-                  'processing',
-                  'downloading',
-                  'extracting_frames',
-                  'identifying',
-                  'completed',
-                  'failed',
-                  'timed_out',
-                  'delivering'
-              )
-            ORDER BY created_at ASC
-            LIMIT %s
-        """, (
-            CLIP_TASK_TYPE,
-            CLIP_MAX_ACTIVE_TASKS
-        ))
-
-        return cur.fetchall()
-
-    finally:
-        conn.close()
-
-
-# ============================================================
-# CHECK BOT 2 PROCESSING DEADLINE
-# ============================================================
-
-def clip_task_expired(payload):
-
-    deadline = payload.get(
-        "bot2_processing_deadline_at"
-    )
-
-    if not deadline:
-        return False
-
-    try:
-        dt = datetime.fromisoformat(
-            deadline.replace("Z", "+00:00")
-        )
-
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-
-        return (
-            datetime.now(timezone.utc) >= dt
-        )
-
-    except Exception:
-        logging.exception("BOT1 INVALID BOT2 DEADLINE")
-        return False
-
-
-# ============================================================
-# TIMEOUT TASK
-# ============================================================
-
-def clip_timeout_task(task_id, user_id, payload):
-
-    conn = clip_db_connection()
-    changed = False
-
-    try:
-        cur = conn.cursor()
-
-        cur.execute("""
-            UPDATE tasks
-            SET status = 'timed_out',
-                error_message =
-                    'Bot 2 exceeded its 30-minute processing deadline.',
-                updated_at = NOW()
-            WHERE task_id = %s
-              AND status IN (
-                  'processing',
-                  'downloading',
-                  'extracting_frames',
-                  'identifying'
-              )
-            RETURNING task_id
-        """, (task_id,))
-
-        changed = bool(cur.fetchone())
-        conn.commit()
-
-    except Exception:
-        conn.rollback()
-        raise
-
-    finally:
-        conn.close()
-
-    if not changed:
-        return False
-
-    try:
-        bot.send_message(
-            int(user_id),
-            "⏰ Binciken video ya ɗauki lokaci fiye da minti 30. "
+        bot.reply_to(
+            message,
+            "❌ An samu matsala wajen samun link din Group.\n"
             "Don Allah ka sake gwadawa anjima."
         )
-    except Exception:
-        logging.exception(
-            "BOT1 timeout user notification failed"
+
+        logging.error(
+            "CLIP GROUP LINK ERROR: %s",
+            str(error)
         )
 
-    clip_admin_notify(
-        "⏰ BOT 1 TASK TIMEOUT\n"
-        f"Task: {task_id}\n"
-        f"User: {user_id}\n"
-        f"Name: {payload.get('source_user_name', 'Unknown')}"
-    )
+        return
+
+
+# ============================================================
+
+
+# ============================================================
+# BOT 1 — PHOTO RECEIVER SYSTEM
+# PRIVATE DM ONLY
+# ============================================================
+
+import re
+import logging
+
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+# ================= PHOTO FILTER =================
+
+PHOTO_ADULT_KEYWORDS = (
+    "porn", "porno", "pornography", "xxx",
+    "sex film", "sex video", "adult video",
+    "nude", "nudes", "naked", "blowjob",
+    "hentai", "onlyfans", "erotic",
+    "batsa", "tsiraici", "karuwanci",
+    "iskanci", "bidiyon batsa", "hotunan batsa",
+)
+
+
+def photo_is_private_user(message):
+    """Private DM kawai; a sauran wurare shiru."""
+
+    if not message:
+        return False
+
+    if not message.chat or message.chat.type != "private":
+        return False
+
+    if not message.from_user:
+        return False
+
+    if message.from_user.is_bot:
+        return False
+
+    user_id = message.from_user.id
+
+    if user_id in DONT_TALK:
+        return False
+
+    # Kada ya shiga harkokin Admin
+    try:
+        if user_id == int(ADMIN_ID):
+            return False
+    except (TypeError, ValueError, NameError):
+        pass
 
     return True
 
 
-# ============================================================
-# FAILED TASK NOTIFICATION
-# ============================================================
+# ================= USER INFORMATION =================
 
-def clip_notify_failed_task(task_id, user_id, payload, error):
+def photo_user_name(message):
+    user = message.from_user
 
-    key = str(task_id)
-
-    with _CLIP1_LOCK:
-        if key in _CLIP1_NOTIFIED_FAILURES:
-            return
-
-        _CLIP1_NOTIFIED_FAILURES.add(key)
-
-    try:
-        bot.send_message(
-            int(user_id),
-            "❌ An samu matsala yayin binciken video ɗinka. "
-            "Ka yi haƙuri, ka sake gwadawa anjima."
-        )
-    except Exception:
-        logging.exception(
-            "BOT1 failed-task user notification failed"
-        )
-
-    clip_admin_notify(
-        "❌ BOT 1 — TASK FAILED\n"
-        f"Task: {task_id}\n"
-        f"User: {user_id}\n"
-        f"Name: {payload.get('source_user_name', 'Unknown')}\n"
-        f"Error: {str(error or 'Unknown')[:1200]}"
+    full_name = " ".join(
+        part for part in [
+            user.first_name,
+            user.last_name
+        ] if part
     )
 
+    return full_name or "Unknown"
 
-# ============================================================
-# DELIVER RESULT TO ORIGINAL USER
-# ============================================================
 
-def clip_deliver_completed_task(task_id):
+def photo_user_tag(message):
+    username = message.from_user.username
 
-    conn = clip_db_connection()
+    if username:
+        return f"@{username}"
+
+    return "Babu username"
+
+
+# ================= PHOTO INFORMATION =================
+
+def photo_get_info(message):
+    if not message.photo:
+        return None
+
+    photo = message.photo[-1]
+
+    return {
+        "file_id": photo.file_id,
+        "file_unique_id": photo.file_unique_id,
+        "width": photo.width,
+        "height": photo.height,
+        "file_size": photo.file_size or 0,
+    }
+
+
+# ================= CAPTION PROTECTION =================
+
+def photo_is_adult_caption(caption):
+    if not caption:
+        return False
+
+    caption = caption.lower()
+
+    for keyword in PHOTO_ADULT_KEYWORDS:
+        pattern = (
+            r"(?<![a-z0-9])"
+            + re.escape(keyword)
+            + r"(?![a-z0-9])"
+        )
+
+        if re.search(pattern, caption):
+            return True
+
+    return False
+
+
+# ================= ADULT REPORT =================
+
+def photo_send_adult_report(message):
+
+    user_name = photo_user_name(message)
+    user_tag = photo_user_tag(message)
+    user_id = message.from_user.id
+
+    caption = message.caption or "Babu caption"
+
+    report_text = (
+        "🚨 PHOTO CONTENT REPORT\n\n"
+        f"👤 Name: {user_name}\n"
+        f"🆔 User ID: {user_id}\n"
+        f"🔗 Username: {user_tag}\n"
+        f"💬 Original Caption: {caption[:2500]}\n\n"
+        f"📍 Chat ID: {message.chat.id}\n"
+        f"📩 Message ID: {message.message_id}\n"
+        f"🖼 Photo File ID:\n{message.photo[-1].file_id}\n"
+        f"🆔 Unique File ID:\n{message.photo[-1].file_unique_id}\n"
+    )
 
     try:
-        cur = conn.cursor()
-
-        cur.execute("""
-            UPDATE tasks
-            SET status = 'delivering',
-                updated_at = NOW()
-            WHERE task_id = %s
-              AND task_type = %s
-              AND status = 'completed'
-            RETURNING user_id, payload, result_json
-        """, (
-            task_id,
-            CLIP_TASK_TYPE
-        ))
-
-        row = cur.fetchone()
-
-        if not row:
-            conn.commit()
-            return
-
-        user_id, raw_payload, raw_result = row
-
-        payload = clip_json(raw_payload)
-        result = clip_json(raw_result)
-
-        source_user_id = int(
-            payload.get("source_user_id", 0)
+        # Aika hoton da aka yi report dinsa
+        bot.copy_message(
+            chat_id=AD_REPORT,
+            from_chat_id=message.chat.id,
+            message_id=message.message_id
         )
 
-        if int(user_id) != source_user_id:
-            raise RuntimeError(
-                "SECURITY_USER_ID_MISMATCH"
-            )
-
-        source_chat_id = int(
-            payload.get("source_chat_id", 0)
-        )
-
-        source_message_id = int(
-            payload.get("source_message_id", 0)
-        )
-
-        original_file_id = payload.get(
-            "source_file_id"
-        )
-
-        if not original_file_id:
-            raise RuntimeError(
-                "ORIGINAL_VIDEO_FILE_ID_MISSING"
-            )
-
-        movie_name = str(
-            result.get("movie_name")
-            or "Ba a gano sunan fim ɗin ba"
-        ).strip()
-
-        movie_year = result.get("movie_year")
-        main_actor = result.get("main_actor")
-
-        successful_model = result.get(
-            "gemini_model",
-            "Unknown"
-        )
-
-        caption = (
-            "🎬 ASALIN SUNAN FIM:\n"
-            f"{movie_name}\n\n"
-            f"📅 Shekara: {movie_year or 'Unknown'}\n"
-            f"⭐ Babban Jarumi: {main_actor or 'Unknown'}"
-        )[:1024]
-
-        conn.commit()
-
-        # Send the exact original video to the original user.
-        sent = bot.send_video(
-            chat_id=source_user_id,
-            video=original_file_id,
-            caption=caption
-        )
-
-        # Delete original message only after successful delivery.
-        original_deleted = False
-
-        try:
-            bot.delete_message(
-                chat_id=source_chat_id,
-                message_id=source_message_id
-            )
-            original_deleted = True
-
-        except Exception:
-            logging.exception(
-                "BOT1 COULD NOT DELETE ORIGINAL VIDEO: %s",
-                task_id
-            )
-
-        cur.execute("""
-            UPDATE tasks
-            SET status = 'delivered',
-                completed_at = NOW(),
-                updated_at = NOW(),
-                error_message = NULL
-            WHERE task_id = %s
-              AND status = 'delivering'
-        """, (task_id,))
-
-        if cur.rowcount != 1:
-            raise RuntimeError(
-                "TASK_DELIVERED_STATUS_UPDATE_FAILED"
-            )
-
-        cur.execute("""
-            UPDATE chat_messages
-            SET telegram_deleted = %s,
-                deleted_at = CASE
-                    WHEN %s = TRUE THEN NOW()
-                    ELSE deleted_at
-                END
-            WHERE task_id = %s
-              AND direction = 'incoming'
-        """, (
-            original_deleted,
-            original_deleted,
-            task_id
-        ))
-
-        cur.execute("""
-            INSERT INTO chat_messages (
-                user_id,
-                task_id,
-                telegram_chat_id,
-                telegram_message_id,
-                direction,
-                sender_type,
-                message_type,
-                content,
-                file_id
-            )
-            VALUES (
-                %s, %s, %s, %s,
-                'outgoing',
-                'bot',
-                'video',
-                %s,
-                %s
-            )
-        """, (
-            source_user_id,
-            task_id,
-            source_user_id,
-            sent.message_id,
-            caption,
-            original_file_id
-        ))
-
-        conn.commit()
-
-        clip_admin_notify(
-            "✅ BOT 1 — RESULT DELIVERED\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            f"Task: {task_id}\n"
-            f"User: {source_user_id}\n"
-            f"Movie: {movie_name}\n"
-            f"Year: {movie_year or 'Unknown'}\n"
-            f"Main Actor: {main_actor or 'Unknown'}\n"
-            f"Model: {successful_model}\n"
-            f"Original video deleted: {original_deleted}\n"
-            f"Delivered Message ID: {sent.message_id}"
+        # Sannan aika bayanan report
+        bot.send_message(
+            AD_REPORT,
+            report_text
         )
 
     except Exception as error:
-
-        conn.rollback()
-
         logging.exception(
-            "BOT1 DELIVERY FAILED: %s",
-            task_id
+            "PHOTO REPORT ERROR: %s",
+            error
         )
 
         try:
-            cur = conn.cursor()
-
-            cur.execute("""
-                UPDATE tasks
-                SET status = 'completed',
-                    error_message = %s,
-                    updated_at = NOW()
-                WHERE task_id = %s
-                  AND status = 'delivering'
-            """, (
-                str(error)[:2000],
-                task_id
-            ))
-
-            conn.commit()
-
+            bot.send_message(
+                AD_REPORT,
+                report_text
+            )
         except Exception:
-            conn.rollback()
             logging.exception(
-                "BOT1 COULD NOT RESET DELIVERY STATUS"
+                "PHOTO REPORT FALLBACK FAILED"
             )
 
-        clip_admin_notify(
-            "⚠️ BOT 1 DELIVERY ERROR\n"
-            f"Task: {task_id}\n"
-            f"Error: {str(error)[:1000]}"
-        )
 
-    finally:
-        conn.close()
+# ================= ADULT REPLY =================
 
+def photo_reply_adult(message):
 
-# ============================================================
-# ADMIN STATUS MONITOR
-# ============================================================
-
-def clip_admin_status_update(
-    task_id,
-    user_id,
-    payload,
-    status,
-    error=None
-):
-
-    key = str(task_id)
-
-    with _CLIP1_LOCK:
-        if _CLIP1_LAST_STATUS.get(key) == status:
-            return
-
-        _CLIP1_LAST_STATUS[key] = status
-
-    names = {
-        "waiting_storage": "Bot 1 yana ajiye video",
-        "pending": "Video yana jiran Bot 2",
-        "processing": "Bot 2 ya karɓi aikin",
-        "downloading": "Bot 2 yana sauke cikakken video",
-        "extracting_frames": "Ana fitar da frames 10",
-        "identifying": "Ana bincike da Gemini",
-        "completed": "An gano fim",
-        "failed": "Aikin ya gaza",
-        "timed_out": "Lokacin aikin ya ƙare"
-    }
-
-    clip_admin_notify(
-        "📡 CLIP TASK STATUS\n"
-        f"Task: {task_id}\n"
-        f"User: {user_id}\n"
-        f"Name: {payload.get('source_user_name', 'Unknown')}\n"
-        f"Status: {status}\n"
-        f"Bayani: {names.get(status, status)}"
-        + (
-            f"\nError: {str(error)[:800]}"
-            if error else ""
-        )
+    bot.reply_to(
+        message,
+        "Anan muna siyar da fina-finan da aka fassara zuwa harshen Hausa kawai\n\n"
+        "Bamu da alaka da fina-finan batsa"
     )
 
 
-# ============================================================
-# CONTINUOUS DATABASE POLLER
-# ============================================================
+# ================= GROUP INVITE =================
 
-def bot1_clip_result_poller():
+def photo_create_group_invite(user_id):
 
-    logging.info("BOT1 CLIP RESULT POLLER STARTED")
-
-    clip_admin_notify(
-        "🟢 BOT 1 DATABASE POLLER STARTED\n"
-        "Database check: Every 2 seconds\n"
-        "Bot 2 processing timeout: 30 minutes\n"
-        "Result delivery: Automatic"
+    invite = bot.create_chat_invite_link(
+        chat_id=CLIP_CHANNEL_VIDEO,
+        name=f"photo-user-{user_id}",
+        member_limit=1
     )
 
-    while True:
+    return invite.invite_link
 
-        try:
-            rows = clip_get_active_tasks()
 
-            for row in rows:
+# ================= NORMAL PHOTO REPLY =================
 
-                (
-                    task_id,
-                    user_id,
-                    raw_payload,
-                    status,
-                    created_at,
-                    error
-                ) = row
+def photo_send_group_button(message):
 
-                task_id = str(task_id)
-                payload = clip_json(raw_payload)
+    try:
+        group_link = photo_create_group_invite(
+            message.from_user.id
+        )
 
-                if status == "completed":
-                    clip_deliver_completed_task(task_id)
-                    continue
+        keyboard = InlineKeyboardMarkup()
 
-                if status == "failed":
-                    clip_notify_failed_task(
-                        task_id,
-                        user_id,
-                        payload,
-                        error
-                    )
-                    continue
-
-                if status == "timed_out":
-                    continue
-
-                if clip_task_expired(payload):
-                    clip_timeout_task(
-                        task_id,
-                        user_id,
-                        payload
-                    )
-                    continue
-
-                clip_admin_status_update(
-                    task_id,
-                    user_id,
-                    payload,
-                    status,
-                    error
-                )
-
-        except Exception:
-            logging.exception("BOT1 RESULT POLLER ERROR")
-
-            clip_admin_notify(
-                "⚠️ BOT 1 DATABASE POLLER ERROR\n"
-                "Zai sake dubawa bayan seconds 2."
+        keyboard.add(
+            InlineKeyboardButton(
+                text="🎬 SHIGA GROUP KA AIKA VIDEO",
+                url=group_link
             )
+        )
 
-        time.sleep(CLIP_RESULT_POLL_SECONDS)
+        bot.reply_to(
+            message,
+            "Har zuwa yanzu ba'a bani izinin duba hoto ba\n\n"
+            "Idan wani fim kake nema zaka iya aika min gajeren video din zuwa wannan Group din\n"
+            "👇👇👇👇👇👇",
+            reply_markup=keyboard
+        )
 
-
-# ============================================================
-# START POLLER ONCE
-# ============================================================
-
-if not globals().get(
-    "_BOT1_CLIP_POLLER_STARTED",
-    False
-):
-
-    _BOT1_CLIP_POLLER_STARTED = True
-
-    threading.Thread(
-        target=bot1_clip_result_poller,
-        daemon=True,
-        name="bot1-clip-result-poller"
-    ).start()
-
-    logging.info("BOT1 CLIP POLLER THREAD STARTED")
+    except Exception as error:
+        logging.exception(
+            "PHOTO GROUP INVITE ERROR: %s",
+            error
+        )
 
 
-# ============================================================
-# END BOT 1 Message Video 
-# ============================================================
+# ================= MAIN PHOTO HANDLER =================
 
-
-
-# ============================================================
-# TEMPORARY ADMIN COMMAND: /dtask
-# DELETE ALL CHAT SYSTEM DATA
-# ============================================================
-
-@bot.message_handler(commands=["dtask"])
-def delete_all_chat_data(message):
-
-    if int(message.from_user.id) != int(ADMIN_ID):
-        return
-
-    conn = None
-    cur = None
+@bot.message_handler(
+    content_types=["photo"],
+    func=lambda message: photo_is_private_user(message)
+)
+def bot1_photo_receiver(message):
 
     try:
 
-        conn = get_all_chat_db_conn()
-        cur = conn.cursor()
+        # Tabbatar da cewa hoto ne
+        photo_info = photo_get_info(message)
 
-        cur.execute("""
-            TRUNCATE TABLE
-                chat_messages,
-                tasks,
-                customers,
-                workers
-            RESTART IDENTITY
-        """)
+        if not photo_info:
+            return
 
-        conn.commit()
+        # Binciken caption kawai
+        caption = message.caption or ""
 
-        bot.reply_to(
-            message,
-            "✅ ALL CHAT DATA DELETED SUCCESSFULLY.\n\n"
-            "Customers: CLEARED\n"
-            "Tasks: CLEARED\n"
-            "Chat Messages: CLEARED\n"
-            "Workers: CLEARED\n\n"
-            "Database tables preserved.\n"
-            "Ready for fresh testing."
+        if photo_is_adult_caption(caption):
+
+            photo_send_adult_report(message)
+
+            photo_reply_adult(message)
+
+            return
+
+        # Idan komai ya yi kyau
+        photo_send_group_button(message)
+
+    except Exception as error:
+
+        logging.exception(
+            "PHOTO RECEIVER ERROR: %s",
+            error
         )
 
-    except Exception as e:
 
-        if conn:
-            conn.rollback()
-
-        bot.reply_to(
-            message,
-            f"❌ DATABASE CLEANUP FAILED:\n{str(e)[:1000]}"
-        )
-
-    finally:
-
-        if cur:
-            cur.close()
-
-        if conn:
-            conn.close()
-
+# END BOT 1 VIDEO & PHOTO RECEIVER
 # ============================================================
-# END TEMPORARY CLEANUP
-# ============================================================
+
+
 
 
 import time
@@ -4173,1354 +3569,6 @@ def deliver_items(call):
         user_id,
         order_id
     )
-
-
-
-# ============================================================
-# CHAT MESSAGE SYSTEM - PART 1
-# CONFIGURATION
-# ============================================================
-
-import re
-import time
-import json
-import logging
-import threading
-import unicodedata
-
-from psycopg2.extras import RealDictCursor
-from telebot.apihelper import ApiTelegramException
-
-
-CHAT_LOGGER = logging.getLogger("CHAT_MESSAGE_SYSTEM")
-CHAT_LOGGER.setLevel(logging.INFO)
-
-# Duba database duk bayan dakika 2
-CHAT_RESPONSE_POLL_SECONDS = 2
-
-# Minti 5 kacal ake jiran Worker
-CHAT_MAX_WAIT_SECONDS = 300
-
-CHAT_STOP_EVENT = threading.Event()
-
-CHAT_MESSAGE_SYSTEM_LOCK = threading.Lock()
-CHAT_MESSAGE_SYSTEM_RUNNING = False
-
-
-def chat_log(message, *args):
-    CHAT_LOGGER.info(message, *args)
-
-
-def chat_error(message, *args):
-    CHAT_LOGGER.exception(message, *args)
-
-
-# ============================================================
-# END PART 1
-# ============================================================
-
-
-# ============================================================
-# CHAT MESSAGE SYSTEM - PART 2
-# TEXT FILTER + DATABASE INSERT
-# ============================================================
-
-CHAT_MAX_TEXT_LENGTH = 500
-
-CHAT_BLOCKED_TERMS = {
-    "porn",
-    "pornography",
-    "xxx",
-    "nude",
-    "naked",
-    "sexvideo",
-    "adultvideo",
-}
-
-
-def chat_normalize_text(text):
-
-    text = unicodedata.normalize("NFKC", text)
-    text = text.lower()
-
-    cleaned = []
-
-    for char in text:
-        category = unicodedata.category(char)
-
-        if category == "Cf":
-            continue
-
-        if category.startswith("M"):
-            continue
-
-        cleaned.append(char)
-
-    normalized = "".join(cleaned)
-
-    compact = re.sub(
-        r"[\W_]+",
-        "",
-        normalized,
-        flags=re.UNICODE
-    )
-
-    return normalized, compact
-
-
-CHAT_LINK_PATTERN = re.compile(
-    r"("
-    r"https?://|"
-    r"www\.|"
-    r"t\.me/|"
-    r"telegram\.me/|"
-    r"facebook\.com|"
-    r"fb\.watch|"
-    r"fb\.com|"
-    r"tiktok\.com|"
-    r"vm\.tiktok\.com|"
-    r"youtube\.com|"
-    r"youtu\.be|"
-    r"\b[a-z0-9-]+\.(com|net|org|ng|co|app|io)\b"
-    r")",
-    re.IGNORECASE
-)
-
-
-def chat_contains_link(text):
-
-    normalized, compact = chat_normalize_text(text)
-
-    if CHAT_LINK_PATTERN.search(normalized):
-        return True
-
-    no_spaces = re.sub(r"\s+", "", normalized)
-
-    if CHAT_LINK_PATTERN.search(no_spaces):
-        return True
-
-    return False
-
-
-def chat_contains_blocked_content(text):
-
-    normalized, compact = chat_normalize_text(text)
-
-    for term in CHAT_BLOCKED_TERMS:
-
-        term_clean = re.sub(
-            r"[\W_]+",
-            "",
-            term.lower()
-        )
-
-        if term_clean and term_clean in compact:
-            return True
-
-    return False
-
-
-# ------------------------------------------------------------
-# GET USER LANGUAGE
-# ------------------------------------------------------------
-
-def chat_get_user_language(user_id, telegram_language_code=None):
-
-    language = None
-    conn = None
-    cur = None
-
-    try:
-
-        conn = get_all_chat_db_conn()
-        cur = conn.cursor()
-
-        cur.execute("""
-            SELECT preferred_language, detected_language
-            FROM customers
-            WHERE user_id = %s
-        """, (user_id,))
-
-        row = cur.fetchone()
-
-        if row:
-
-            preferred_language, detected_language = row
-
-            if preferred_language in ("ha", "en"):
-                language = preferred_language
-
-            elif detected_language in ("ha", "en"):
-                language = detected_language
-
-    except Exception as e:
-
-        chat_error("Could not get user language")
-
-    finally:
-
-        if cur:
-            cur.close()
-
-        if conn:
-            conn.close()
-
-    if language:
-        return language
-
-    if telegram_language_code:
-
-        if telegram_language_code.lower().startswith("en"):
-            return "en"
-
-    return "ha"
-
-
-# ------------------------------------------------------------
-# CREATE CUSTOMER + TASK + INCOMING MESSAGE
-# ------------------------------------------------------------
-
-def chat_create_user_task(message):
-
-    conn = None
-    cur = None
-
-    user_id = message.from_user.id
-
-    try:
-
-        chat_log(
-            "Connecting to Chat Database for INSERT. User: %s",
-            user_id
-        )
-
-        conn = get_all_chat_db_conn()
-
-        cur = conn.cursor()
-
-        # Create customer if not already present
-        cur.execute("""
-            INSERT INTO customers (
-                user_id,
-                username,
-                first_name,
-                last_name,
-                last_interaction_at,
-                updated_at
-            )
-            VALUES (%s, %s, %s, %s, NOW(), NOW())
-
-            ON CONFLICT (user_id)
-            DO UPDATE SET
-                username = EXCLUDED.username,
-                first_name = EXCLUDED.first_name,
-                last_name = EXCLUDED.last_name,
-                last_interaction_at = NOW(),
-                updated_at = NOW()
-        """, (
-            user_id,
-            message.from_user.username,
-            message.from_user.first_name,
-            message.from_user.last_name
-        ))
-
-        # Lock customer row
-        cur.execute("""
-            SELECT user_id
-            FROM customers
-            WHERE user_id = %s
-            FOR UPDATE
-        """, (user_id,))
-
-        cur.fetchone()
-
-        # Check unfinished task
-        cur.execute("""
-            SELECT task_id
-            FROM tasks
-            WHERE user_id = %s
-              AND status IN (
-                  'pending',
-                  'processing',
-                  'answer_ready'
-              )
-            LIMIT 1
-        """, (user_id,))
-
-        active_task = cur.fetchone()
-
-        if active_task:
-
-            conn.commit()
-
-            return "busy", None, None
-
-        # Create new task
-        cur.execute("""
-            INSERT INTO tasks (
-                user_id,
-                task_type,
-                status,
-                priority,
-                payload,
-                created_at,
-                updated_at
-            )
-            VALUES (
-                %s,
-                'text_message',
-                'pending',
-                5,
-                %s::jsonb,
-                NOW(),
-                NOW()
-            )
-            RETURNING task_id
-        """, (
-            user_id,
-            json.dumps({
-                "text": message.text,
-                "telegram_chat_id": message.chat.id,
-                "telegram_message_id": message.message_id
-            })
-        ))
-
-        task_id = cur.fetchone()[0]
-
-        # Save incoming Telegram message
-        cur.execute("""
-            INSERT INTO chat_messages (
-                user_id,
-                task_id,
-                telegram_chat_id,
-                telegram_message_id,
-                direction,
-                sender_type,
-                message_type,
-                content,
-                language_code,
-                expires_at
-            )
-            VALUES (
-                %s, %s, %s, %s,
-                'incoming',
-                'user',
-                'text',
-                %s,
-                %s,
-                NOW() + INTERVAL '12 hours'
-            )
-            RETURNING id
-        """, (
-            user_id,
-            task_id,
-            message.chat.id,
-            message.message_id,
-            message.text,
-            message.from_user.language_code
-        ))
-
-        message_row_id = cur.fetchone()[0]
-
-        # Increase accepted message count
-        cur.execute("""
-            UPDATE customers
-            SET total_messages = total_messages + 1,
-                last_interaction_at = NOW(),
-                updated_at = NOW()
-            WHERE user_id = %s
-        """, (user_id,))
-
-        conn.commit()
-
-        chat_log(
-            "Task inserted successfully: %s",
-            task_id
-        )
-
-        return "created", str(task_id), message_row_id
-
-    except Exception as e:
-
-        if conn:
-            conn.rollback()
-
-        chat_error("CHAT DATABASE INSERT FAILED")
-
-        raise
-
-    finally:
-
-        if cur:
-            cur.close()
-
-        if conn:
-            conn.close()
-
-
-# ============================================================
-# END PART 2
-# ============================================================
-
-
-# ============================================================
-# CHAT MESSAGE SYSTEM - PART 3
-# TYPING + WORKER ANSWER CHECKER
-# ============================================================
-
-
-def chat_save_typing_message(
-    user_id,
-    task_id,
-    chat_id,
-    telegram_message_id
-):
-
-    conn = get_all_chat_db_conn()
-    cur = None
-
-    try:
-
-        cur = conn.cursor()
-
-        cur.execute("""
-            INSERT INTO chat_messages (
-                user_id,
-                task_id,
-                telegram_chat_id,
-                telegram_message_id,
-                direction,
-                sender_type,
-                message_type,
-                content,
-                expires_at
-            )
-            VALUES (
-                %s, %s, %s, %s,
-                'outgoing',
-                'bot',
-                'text',
-                'Typing...',
-                NOW() + INTERVAL '12 hours'
-            )
-            RETURNING id
-        """, (
-            user_id,
-            task_id,
-            chat_id,
-            telegram_message_id
-        ))
-
-        row_id = cur.fetchone()[0]
-
-        conn.commit()
-
-        return row_id
-
-    except Exception as e:
-
-        conn.rollback()
-        raise
-
-    finally:
-
-        if cur:
-            cur.close()
-
-        conn.close()
-
-
-# ------------------------------------------------------------
-# GET TASK RESULT
-# ------------------------------------------------------------
-
-def chat_get_task_result(task_id):
-
-    conn = get_all_chat_db_conn()
-
-    try:
-
-        cur = conn.cursor(cursor_factory=RealDictCursor)
-
-        cur.execute("""
-            SELECT
-                task_id,
-                user_id,
-                status,
-                result_json,
-                error_message
-            FROM tasks
-            WHERE task_id = %s
-        """, (task_id,))
-
-        return cur.fetchone()
-
-    finally:
-
-        cur.close()
-        conn.close()
-
-
-# ------------------------------------------------------------
-# EDIT TYPING MESSAGE
-# ------------------------------------------------------------
-
-def chat_edit_typing(chat_id, message_id, text):
-
-    try:
-
-        bot.edit_message_text(
-            text,
-            chat_id,
-            message_id
-        )
-
-        return True
-
-    except ApiTelegramException as e:
-
-        error_text = str(e).lower()
-
-        if "message is not modified" in error_text:
-            return True
-
-        chat_log(
-            "Typing edit failed: %s",
-            str(e)
-        )
-
-        return False
-
-    except Exception:
-
-        chat_error("Typing edit error")
-        return False
-
-
-# ------------------------------------------------------------
-# UPDATE BOT MESSAGE CONTENT IN DATABASE
-# ------------------------------------------------------------
-
-def chat_update_bot_message(
-    chat_id,
-    telegram_message_id,
-    answer
-):
-
-    conn = get_all_chat_db_conn()
-    cur = None
-
-    try:
-
-        cur = conn.cursor()
-
-        cur.execute("""
-            UPDATE chat_messages
-            SET content = %s
-            WHERE telegram_chat_id = %s
-              AND telegram_message_id = %s
-              AND sender_type = 'bot'
-              AND direction = 'outgoing'
-        """, (
-            answer,
-            chat_id,
-            telegram_message_id
-        ))
-
-        conn.commit()
-
-    except Exception:
-
-        conn.rollback()
-        raise
-
-    finally:
-
-        if cur:
-            cur.close()
-
-        conn.close()
-
-
-# ------------------------------------------------------------
-# COMPLETE TASK AFTER USER RECEIVES ANSWER
-# ------------------------------------------------------------
-
-def chat_mark_task_delivered(task_id):
-
-    conn = get_all_chat_db_conn()
-    cur = None
-
-    try:
-
-        cur = conn.cursor()
-
-        cur.execute("""
-            UPDATE tasks
-            SET status = 'delivered',
-                completed_at = NOW(),
-                updated_at = NOW()
-            WHERE task_id = %s
-              AND status = 'answer_ready'
-        """, (task_id,))
-
-        conn.commit()
-
-    except Exception:
-
-        conn.rollback()
-        raise
-
-    finally:
-
-        if cur:
-            cur.close()
-
-        conn.close()
-
-
-# ------------------------------------------------------------
-# MARK TASK TIMEOUT
-# ------------------------------------------------------------
-
-def chat_mark_task_timeout(task_id):
-
-    conn = get_all_chat_db_conn()
-    cur = None
-
-    try:
-
-        cur = conn.cursor()
-
-        cur.execute("""
-            UPDATE tasks
-            SET status = 'failed',
-                error_message = %s,
-                completed_at = NOW(),
-                updated_at = NOW()
-            WHERE task_id = %s
-              AND status IN ('pending', 'processing')
-        """, (
-            "Worker response timeout after 5 minutes",
-            task_id
-        ))
-
-        conn.commit()
-
-    except Exception:
-
-        conn.rollback()
-        chat_error("Could not mark task timeout")
-
-    finally:
-
-        if cur:
-            cur.close()
-
-        conn.close()
-
-
-# ------------------------------------------------------------
-# WAIT FOR WORKER
-# Checks database every 2 seconds.
-# Stops after 5 minutes.
-# ------------------------------------------------------------
-
-def chat_wait_for_worker(
-    task_id,
-    user_id,
-    chat_id,
-    typing_message_id
-):
-
-    started_at = time.monotonic()
-    last_debug_time = started_at
-    language = chat_get_user_language(user_id)
-
-    while not CHAT_STOP_EVENT.is_set():
-
-        elapsed = time.monotonic() - started_at
-
-        # --------------------------------------------
-        # FIVE-MINUTE TIMEOUT
-        # --------------------------------------------
-
-        if elapsed >= CHAT_MAX_WAIT_SECONDS:
-
-            if language == "en":
-
-                timeout_reply = (
-                    "Sorry, I can't provide an answer right now. "
-                    "Please contact me again later."
-                )
-
-            else:
-
-                timeout_reply = (
-                    "Yi haƙuri, ba zan iya ba ka amsa a yanzu ba. "
-                    "Don Allah ka tuntube ni anjima."
-                )
-
-            try:
-
-                bot.edit_message_text(
-                    timeout_reply,
-                    chat_id,
-                    typing_message_id
-                )
-
-                chat_update_bot_message(
-                    chat_id,
-                    typing_message_id,
-                    timeout_reply
-                )
-
-                chat_mark_task_timeout(task_id)
-
-            except Exception as e:
-
-                chat_error("Could not deliver timeout message")
-
-            return
-
-        # --------------------------------------------
-        # CHECK DATABASE
-        # --------------------------------------------
-
-        try:
-
-            task = chat_get_task_result(task_id)
-
-        except Exception as e:
-
-            chat_error("Could not check task result")
-
-            now = time.monotonic()
-
-            if now - last_debug_time >= 30:
-
-                last_debug_time = now
-
-            time.sleep(CHAT_RESPONSE_POLL_SECONDS)
-            continue
-
-        if task is None:
-
-            chat_log(
-                "Task not found during polling: %s",
-                task_id
-            )
-
-            time.sleep(CHAT_RESPONSE_POLL_SECONDS)
-            continue
-
-        status = task["status"]
-
-        # --------------------------------------------
-        # WORKER ANSWER READY
-        # --------------------------------------------
-
-        if status == "answer_ready":
-
-            result = task["result_json"] or {}
-
-            if isinstance(result, str):
-
-                try:
-                    result = json.loads(result)
-
-                except Exception:
-                    result = {"answer": result}
-
-            answer = result.get("answer")
-
-            if not answer:
-
-                answer = (
-                    "Yi haƙuri, ba a samu amsa mai inganci ba."
-                    if language == "ha"
-                    else
-                    "Sorry, no valid answer was received."
-                )
-
-            try:
-
-                # Edit original Typing message
-                bot.edit_message_text(
-                    str(answer),
-                    chat_id,
-                    typing_message_id
-                )
-
-                chat_update_bot_message(
-                    chat_id,
-                    typing_message_id,
-                    str(answer)
-                )
-
-                chat_mark_task_delivered(task_id)
-
-                chat_log(
-                    "Task delivered successfully: %s",
-                    task_id
-                )
-
-                return
-
-            except Exception as e:
-
-                chat_error(
-                    "Answer delivery failed for task %s",
-                    task_id
-                )
-
-                time.sleep(CHAT_RESPONSE_POLL_SECONDS)
-                continue
-
-        # --------------------------------------------
-        # WORKER FAILED
-        # --------------------------------------------
-
-        if status in ("failed", "rejected"):
-
-            if language == "en":
-
-                error_reply = (
-                    "Sorry, something went wrong while processing "
-                    "your message. Please try again later."
-                )
-
-            else:
-
-                error_reply = (
-                    "Yi haƙuri, an samu matsala wajen "
-                    "sarrafa saƙonka. Ka sake gwadawa daga baya."
-                )
-
-            try:
-
-                bot.edit_message_text(
-                    error_reply,
-                    chat_id,
-                    typing_message_id
-                )
-
-                chat_update_bot_message(
-                    chat_id,
-                    typing_message_id,
-                    error_reply
-                )
-
-                return
-
-            except Exception:
-
-                chat_error("Could not show task failure")
-                return
-
-        # --------------------------------------------
-        # PERIODIC WORKER STATUS
-        # Every 30 seconds
-        # --------------------------------------------
-
-        now = time.monotonic()
-
-        if now - last_debug_time >= 30:
-
-            last_debug_time = now
-
-        # Wait 2 seconds before checking again
-        time.sleep(CHAT_RESPONSE_POLL_SECONDS)
-
-
-# ============================================================
-# END PART 3
-# ============================================================
-
-
-# ============================================================
-# CHAT MESSAGE SYSTEM - PART 4
-# TELEGRAM HANDLERS + SYSTEM START
-# ============================================================
-
-
-# ------------------------------------------------------------
-# LANGUAGE MESSAGES
-# ------------------------------------------------------------
-
-def chat_get_text(language, message_type):
-
-    messages = {
-        "ha": {
-            "too_long": (
-                "Don Allah ka yi magana a taƙaice. "
-                "Saƙonka ya yi tsawo sosai."
-            ),
-            "busy": (
-                "Don Allah ka jira. Har yanzu ina kan "
-                "aikin saƙonka na baya."
-            ),
-            "link": (
-                "Yi haƙuri, ba ma karɓar links a nan. "
-                "Don Allah ka turo saƙon rubutu kawai."
-            ),
-            "blocked": (
-                "Yi haƙuri, ba a yarda da irin wannan saƙon ba."
-            ),
-            "database_error": (
-                "Yi haƙuri, an samu matsala wajen karɓar saƙonka. "
-                "Ka sake gwadawa."
-            ),
-            "media": (
-                "Yi haƙuri, a halin yanzu muna karɓar "
-                "saƙon rubutu kawai."
-            )
-        },
-
-        "en": {
-            "too_long": (
-                "Please keep your message short. "
-                "Your message is too long."
-            ),
-            "busy": (
-                "Please wait. I'm still working on your previous message."
-            ),
-            "link": (
-                "Sorry, links are not accepted here. "
-                "Please send a text message only."
-            ),
-            "blocked": (
-                "Sorry, this type of message is not allowed."
-            ),
-            "database_error": (
-                "Sorry, there was a problem receiving your message. "
-                "Please try again."
-            ),
-            "media": (
-                "Sorry, only text messages are accepted at the moment."
-            )
-        }
-    }
-
-    return messages.get(language, messages["ha"]).get(
-        message_type,
-        messages["ha"]["database_error"]
-    )
-
-
-# ------------------------------------------------------------
-# SAVE TYPING MESSAGE IN DATABASE
-# ------------------------------------------------------------
-
-def chat_save_typing_message(
-    user_id,
-    task_id,
-    chat_id,
-    telegram_message_id
-):
-
-    conn = get_all_chat_db_conn()
-    cur = None
-
-    try:
-
-        cur = conn.cursor()
-
-        cur.execute("""
-            INSERT INTO chat_messages (
-                user_id,
-                task_id,
-                telegram_chat_id,
-                telegram_message_id,
-                direction,
-                sender_type,
-                message_type,
-                content,
-                expires_at
-            )
-            VALUES (
-                %s, %s, %s, %s,
-                'outgoing',
-                'bot',
-                'text',
-                'Typing...',
-                NOW() + INTERVAL '12 hours'
-            )
-        """, (
-            user_id,
-            task_id,
-            chat_id,
-            telegram_message_id
-        ))
-
-        conn.commit()
-
-    except Exception as e:
-
-        conn.rollback()
-        raise
-
-    finally:
-
-        if cur:
-            cur.close()
-
-        conn.close()
-
-
-# ------------------------------------------------------------
-# UPDATE BOT MESSAGE CONTENT
-# ------------------------------------------------------------
-
-def chat_update_bot_message(
-    chat_id,
-    telegram_message_id,
-    answer
-):
-
-    conn = get_all_chat_db_conn()
-    cur = None
-
-    try:
-
-        cur = conn.cursor()
-
-        cur.execute("""
-            UPDATE chat_messages
-            SET content = %s
-            WHERE telegram_chat_id = %s
-              AND telegram_message_id = %s
-              AND sender_type = 'bot'
-              AND direction = 'outgoing'
-        """, (
-            answer,
-            chat_id,
-            telegram_message_id
-        ))
-
-        conn.commit()
-
-    except Exception:
-
-        conn.rollback()
-        raise
-
-    finally:
-
-        if cur:
-            cur.close()
-
-        conn.close()
-
-
-# ------------------------------------------------------------
-# MARK TASK FAILED
-# ------------------------------------------------------------
-
-def chat_mark_task_failed(task_id, error_message):
-
-    conn = get_all_chat_db_conn()
-    cur = None
-
-    try:
-
-        cur = conn.cursor()
-
-        cur.execute("""
-            UPDATE tasks
-            SET status = 'failed',
-                error_message = %s,
-                completed_at = NOW(),
-                updated_at = NOW()
-            WHERE task_id = %s
-              AND status = 'pending'
-        """, (
-            str(error_message)[:1000],
-            task_id
-        ))
-
-        conn.commit()
-
-    except Exception:
-
-        conn.rollback()
-        chat_error("Could not mark task as failed")
-
-    finally:
-
-        if cur:
-            cur.close()
-
-        conn.close()
-
-
-# ------------------------------------------------------------
-# TEXT MESSAGE HANDLER
-# ------------------------------------------------------------
-
-@bot.message_handler(
-    content_types=["text"],
-    func=lambda message: True
-)
-def chat_receive_text(message):
-
-    text = message.text or ""
-
-    if not text.strip():
-        return
-
-    user_id = message.from_user.id
-
-    language = chat_get_user_language(
-        user_id,
-        message.from_user.language_code
-    )
-
-    # 1. Reject messages that exceed the character limit
-    if len(text) > CHAT_MAX_TEXT_LENGTH:
-
-        try:
-            bot.reply_to(
-                message,
-                chat_get_text(language, "too_long")
-            )
-        except Exception:
-            chat_error("Could not send long-message rejection")
-
-        return
-
-    # 2. Reject links
-    if chat_contains_link(text):
-
-        try:
-            bot.reply_to(
-                message,
-                chat_get_text(language, "link")
-            )
-        except Exception:
-            chat_error("Could not send link rejection")
-
-        return
-
-    # 3. Basic adult content filter
-    if chat_contains_blocked_content(text):
-
-        try:
-            bot.reply_to(
-                message,
-                chat_get_text(language, "blocked")
-            )
-        except Exception:
-            chat_error("Could not send moderation rejection")
-
-        return
-
-    # 4. Save message and create task
-    try:
-
-        result, task_id, message_row_id = chat_create_user_task(
-            message
-        )
-
-    except Exception as e:
-
-        chat_error("Could not save incoming message")
-
-        try:
-
-            bot.reply_to(
-                message,
-                chat_get_text(language, "database_error")
-            )
-
-        except Exception:
-
-            chat_error("Could not send database error message")
-
-        return
-
-    # 5. If user already has unfinished work
-    if result == "busy":
-
-        try:
-
-            bot.reply_to(
-                message,
-                chat_get_text(language, "busy")
-            )
-
-        except Exception:
-
-            chat_error("Could not send busy response")
-
-        return
-
-    # 6. Send Typing placeholder
-    try:
-
-        typing_message = bot.send_message(
-            message.chat.id,
-            "Typing..."
-        )
-
-    except Exception as e:
-
-        chat_error("Could not send typing message")
-
-        try:
-
-            chat_mark_task_failed(task_id, repr(e))
-
-        except Exception:
-
-            chat_error("Could not update failed task")
-
-        return
-
-    # 7. Save Telegram ID of Typing message
-    try:
-
-        chat_save_typing_message(
-            user_id=user_id,
-            task_id=task_id,
-            chat_id=message.chat.id,
-            telegram_message_id=typing_message.message_id
-        )
-
-    except Exception:
-
-        chat_error("Could not save typing message in DB")
-
-        try:
-
-            bot.delete_message(
-                message.chat.id,
-                typing_message.message_id
-            )
-
-        except Exception:
-            pass
-
-        try:
-
-            chat_mark_task_failed(
-                task_id,
-                "Could not save Typing message in database"
-            )
-
-        except Exception:
-
-            chat_error("Could not mark task failed")
-
-        return
-
-    # 8. Start thread to wait for Worker
-    try:
-
-        waiting_thread = threading.Thread(
-            target=chat_wait_for_worker,
-            args=(
-                task_id,
-                user_id,
-                message.chat.id,
-                typing_message.message_id
-            ),
-            daemon=True
-        )
-
-        waiting_thread.start()
-
-        chat_log(
-            "Incoming text accepted. Task ID: %s",
-            task_id
-        )
-
-    except Exception as e:
-
-        chat_error("Could not start response checker thread")
-
-        try:
-
-            chat_mark_task_failed(
-                task_id,
-                "Response checker thread could not start"
-            )
-
-        except Exception:
-            pass
-
-
-# ------------------------------------------------------------
-# REJECT NON-TEXT MESSAGES
-# ------------------------------------------------------------
-
-@bot.message_handler(
-    content_types=[
-        "photo",
-        "video",
-        "document",
-        "audio",
-        "voice",
-        "video_note",
-        "animation",
-        "sticker",
-        "contact",
-        "location",
-        "venue",
-        "dice",
-        "poll"
-    ]
-)
-def chat_reject_non_text(message):
-
-    language = chat_get_user_language(
-        message.from_user.id,
-        message.from_user.language_code
-    )
-
-    try:
-
-        bot.reply_to(
-            message,
-            chat_get_text(language, "media")
-        )
-
-    except Exception:
-
-        chat_error("Could not reject non-text message")
-
-
-# ============================================================
-# START CHAT MESSAGE SYSTEM
-# ============================================================
-
-def start_chat_message_system():
-
-    global CHAT_MESSAGE_SYSTEM_RUNNING
-
-    with CHAT_MESSAGE_SYSTEM_LOCK:
-
-        if CHAT_MESSAGE_SYSTEM_RUNNING:
-            chat_log("Chat message system already running")
-            return
-
-        CHAT_MESSAGE_SYSTEM_RUNNING = True
-
-    CHAT_STOP_EVENT.clear()
-
-    chat_log("Chat message handlers are ready")
-
-
-# ============================================================
-# RUN START FUNCTION
-# ============================================================
-
-start_chat_message_system()
-
-# ============================================================
-# END PART 4
-# ============================================================
-
 
 
 
@@ -6560,7 +4608,7 @@ def vip_group_info(call):
 • Fim na musamman  
 Ba tare da sake biyan wani ƙarin kuɗi ba.
 ━━━━━━━━━━━━━━━━━━
-🔒 <b>VIP SUBSCRIPTION</b>
+?? <b>VIP SUBSCRIPTION</b>
 👇👇👇👇👇👇👇
 """
 
@@ -7622,8 +5670,13 @@ Zabi adadin da zaka deposit zuwa wallet din ka👇👇
 
 
 
-
 from datetime import datetime, timedelta
+import html
+
+def clean_html(text):
+    if not text:
+        return ""
+    return html.escape(str(text))
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("walletpay:"))
 def wallet_pay_handler(call):
@@ -7772,6 +5825,9 @@ def wallet_pay_handler(call):
     except:
         tg_username = "unknown"
 
+    safe_full_name = clean_html(full_name)
+    safe_tg_username = clean_html(tg_username)
+
     # ================= FETCH ITEMS =================
     cur.execute(
         """
@@ -7804,6 +5860,7 @@ def wallet_pay_handler(call):
             lines.append(f"{g['title']}")
 
     titles_text = ", ".join(lines) if lines else "N/A"
+    safe_titles_text = clean_html(titles_text)
 
     item_count = sum(g["count"] for g in groups.values())
 
@@ -7819,28 +5876,28 @@ def wallet_pay_handler(call):
     kb.add(
         InlineKeyboardButton(
             "⬇️ DOWNLOAD NOW",
-            callback_data=f"deliver:{order_id}"
+            callback_data=f"deliver:{order_id}",
+            style="success"
         )
+    )
+
+    success_text = (
+        f"🎉 <b>PAYMENT SUCCESSFUL!</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"Mun Gode {safe_full_name}\n\n"
+        f"💳 <b>Payment Method:</b> Wallet Balance\n"
+        f"🎬 <b>Film:</b> {safe_titles_text}\n"
+        f"📦 <b>Items Count:</b> {item_count}\n"
+        f"💵 <b>Amount Paid:</b> ₦{amount}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"✅ Biyan ya kammala ta wallet! 😊\n"
+        f"Danna DOWNLOAD domin sauke fim din\n"
+        f"👇👇👇"
     )
 
     bot.send_message(
         user_id,
-        f"""🎉 <b>PAYMENT SUCCESSFUL</b>
-You used wallet balance
-
-👤 Name: {full_name}
-🆔 User ID: <code>{user_id}</code>
-
-📦 Items: {item_count}
-🎬 Films: {titles_text}
-
-🗃 Order ID:
-<code>{order_id}</code>
-
-💰 Amount Paid: ₦{amount}
-⏰ Time: {now}
-
-⬇️ DOWNLOAD NOW""",
+        success_text,
         parse_mode="HTML",
         reply_markup=kb
     )
@@ -7850,20 +5907,17 @@ You used wallet balance
 
         bot.send_message(
             PAYMENT_NOTIFY_GROUP_WALLET,
-            f"""✅ <b>NEW PAYMENT SUCCESSFUL</b>
+            f"""✅ <b>NEW PAYMENT RECEIVED (WALLET)</b>
 
-👤 <b>User Full Name:</b> {full_name}
-🔗 <b>User Tag:</b> {tg_username}
+👤 <b>Name:</b> {safe_full_name}
+🔗 <b>Username:</b> {safe_tg_username}
+🆔 <b>User ID:</b> <code>{user_id}</code>
 
-🗃 <b>Order ID:</b>
-<code>{order_id}</code>
+🎬 <b>Items:</b> {safe_titles_text}
+🗃 <b>Order ID:</b> <code>{order_id}</code>
 
 💳 <b>Payment Method:</b> Wallet
-
-🎬 <b>Films:</b> {titles_text}
-
 💰 <b>Amount:</b> ₦{amount}
-
 ⏰ <b>Time:</b> {now}
 """,
             parse_mode="HTML"
@@ -8742,7 +6796,7 @@ def howto_update_flow(m):
         state["stage"] = "media"
         bot.send_message(
             m.chat.id,
-            "🎬 Turo <b>VIDEO / DOCUMENT / PHOTO</b>:",
+            "?? Turo <b>VIDEO / DOCUMENT / PHOTO</b>:",
             parse_mode="HTML"
         )
         return
@@ -10811,242 +8865,6 @@ def start_handler(msg):
     bot.send_message(msg.chat.id, "Welcome!")
 
 
-# ========= BUYD (ITEM ONLY | DEEP LINK → DM) =========
-from psycopg2.extras import RealDictCursor
-import uuid
-import time
-import re
-
-@bot.message_handler(func=lambda m: m.text and m.text.startswith("/start groupitem_"))
-def groupitem_deeplink_handler(msg):
-    uid = msg.from_user.id
-    user_name = msg.from_user.first_name or "Customer"
-
-    # ========= PARSE ITEM IDS + GROUP KEYS =========
-    try:
-        raw = msg.text.split("groupitem_", 1)[1]
-        tokens = [x.strip() for x in re.split(r"[_,\s]+", raw) if x.strip()]
-    except Exception:
-        return
-
-    if not tokens:
-        return
-
-    # ✅ SAFE CONNECTION
-    conn = get_conn()
-    if not conn:
-        return
-    cur = conn.cursor(cursor_factory=RealDictCursor)
-
-    item_ids = []
-
-    try:
-        for token in tokens:
-            # ==== IF ID ====
-            if token.isdigit():
-                item_ids.append(int(token))
-
-            # ==== IF GROUP KEY ====
-            else:
-                cur.execute(
-                    "SELECT id FROM items WHERE group_key=%s",
-                    (token,)
-                )
-                rows = cur.fetchall()
-                item_ids.extend([r["id"] for r in rows])
-
-    except Exception:
-        cur.close()
-        conn.close()
-        return
-
-    if not item_ids:
-        cur.close()
-        conn.close()
-        return
-
-    # ========= FETCH ITEMS =========
-    try:
-        placeholders = ",".join(["%s"] * len(item_ids))
-        cur.execute(
-            f"""
-            SELECT id, title, price, file_id, group_key
-            FROM items
-            WHERE id IN ({placeholders})
-            """,
-            tuple(item_ids)
-        )
-        items = cur.fetchall()
-    except Exception:
-        cur.close()
-        conn.close()
-        return
-
-    if not items:
-        cur.close()
-        conn.close()
-        return
-
-    # ========= FILE_ID REQUIRED =========
-    items = [i for i in items if i.get("file_id")]
-    if not items:
-        cur.close()
-        conn.close()
-        return
-
-    item_ids_clean = [i["id"] for i in items]
-
-    # ========= OWNERSHIP CHECK =========
-    try:
-        cur.execute(
-            f"""
-            SELECT 1 FROM user_movies
-            WHERE user_id=%s
-              AND item_id IN ({",".join(["%s"] * len(item_ids_clean))})
-            LIMIT 1
-            """,
-            (uid, *item_ids_clean)
-        )
-        owned = cur.fetchone()
-    except Exception:
-        cur.close()
-        conn.close()
-        return
-
-    if owned:
-        kb = InlineKeyboardMarkup()
-        kb.add(InlineKeyboardButton("📽 PAID MOVIES", callback_data="my_movies"))
-        bot.send_message(
-            uid,
-            "✅ You have already purchased this movie.\n\n"
-            "Please check your *Paid Movies* to download it again.",
-            parse_mode="Markdown",
-            reply_markup=kb
-        )
-        cur.close()
-        conn.close()
-        return
-
-    # ========= GROUP_KEY PRICING =========
-    groups = {}
-    for i in items:
-        key = i["group_key"] or f"single_{i['id']}"
-        if key not in groups:
-            groups[key] = int(i["price"] or 0)
-
-    total = sum(groups.values())
-    item_count = len(items)
-
-    if total <= 0:
-        cur.close()
-        conn.close()
-        return
-
-    # ========= REUSE / CREATE ORDER =========
-    try:
-        cur.execute(
-            f"""
-            SELECT o.id
-            FROM orders o
-            JOIN order_items oi ON oi.order_id = o.id
-            WHERE o.user_id=%s
-              AND o.paid=0
-              AND oi.item_id IN ({",".join(["%s"] * len(item_ids_clean))})
-            GROUP BY o.id
-            HAVING COUNT(DISTINCT oi.item_id)=%s
-            LIMIT 1
-            """,
-            (uid, *item_ids_clean, len(item_ids_clean))
-        )
-        row = cur.fetchone()
-    except Exception:
-        cur.close()
-        conn.close()
-        return
-
-    if row:
-        order_id = row["id"]
-    else:
-        order_id = str(uuid.uuid4())
-        try:
-            cur.execute(
-                "INSERT INTO orders (id, user_id, amount, paid, type) VALUES (%s,%s,%s,0,'film')",
-                (order_id, uid, total)
-            )
-            for i in items:
-                cur.execute(
-                    """
-                    INSERT INTO order_items (order_id, item_id, file_id, price)
-                    VALUES (%s,%s,%s,%s)
-                    """,
-                    (order_id, i["id"], i["file_id"], int(i["price"] or 0))
-                )
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            cur.close()
-            conn.close()
-            return
-
-    # ========= FLUTTERWAVE (An sauya daga Paystack) =========
-    display_title = f"{item_count} film(s)"
-    # Mun kira sabon function din mu na Flutterwave
-    pay_url = create_flutterwave_payment(uid, order_id, total, display_title)
-
-    if not pay_url:
-        bot.send_message(uid, "❌ Sorry, payment gateway is down. Try again later.")
-        cur.close()
-        conn.close()
-        return
-
-    # ========= FIXED TITLE DISPLAY =========
-    unique_titles = [
-        i["title"]
-        for _, i in {
-            (i["group_key"] or f"single_{i['id']}"): i
-            for i in items
-        }.items()
-    ]
-
-    # ========= FINAL UI =========
-    kb = InlineKeyboardMarkup()
-
-    # PAY NOW (TOP ROW)
-    kb.add(
-        InlineKeyboardButton("💳 PAY NOW", url=pay_url)
-    )
-
-    # SECOND ROW
-    kb.row(
-        InlineKeyboardButton("💵Pay with wallet", callback_data=f"walletpay:{order_id}"),
-        InlineKeyboardButton("❌ Cancel", callback_data=f"cancel:{order_id}")
-    )
-
-    sent = bot.send_message(
-        uid,
-        f"""🧺 <b>Your order created 🎉</b>
-
-🎬 <b>You will buy:</b>
-{", ".join(unique_titles)}
-
-📦 Films: {item_count}
-💵 Total amount: ₦{total}
-
-👤 <b>Your name is:</b> {user_name}
-🆔 <b>Order ID:</b>
-<code>{order_id}</code>
-""",
-        parse_mode="HTML",
-        reply_markup=kb
-    )
-
-    # ===== STORE MESSAGE FOR AUTO DELETE AFTER PAYMENT =====
-    ORDER_MESSAGES[order_id] = (sent.chat.id, sent.message_id)
-
-    cur.close()
-    conn.close()
-
-
    
 
 
@@ -11278,13 +9096,11 @@ Tura <b>/sendall</b> domin a sake tura items.""",
             conn.close()
 
 
-
-
 import uuid
 import traceback
 from psycopg2.extras import RealDictCursor
 
-# ========= PAY ALL UNPAID (SAFE | GROUP-AWARE | CLEAN VERSION) =========
+# ========= PAY ALL UNPAID (SAFE | GROUP-AWARE | MODERN EDIT FORMAT) =========
 @bot.callback_query_handler(func=lambda c: c.data == "payall:")
 def pay_all_unpaid(call):
     uid = call.from_user.id
@@ -11343,7 +9159,7 @@ def pay_all_unpaid(call):
         if owned_ids:
             kb_owned = InlineKeyboardMarkup()
             kb_owned.add(
-                InlineKeyboardButton("📽 PAID MOVIES", callback_data="my_movies")
+                InlineKeyboardButton("📽 PAID MOVIES", callback_data="my_movies", style="primary")
             )
 
             bot.send_message(
@@ -11392,7 +9208,6 @@ def pay_all_unpaid(call):
         # ==================================================
         order_id = str(uuid.uuid4())
 
-        # Mun saka type='film' domin webhook ya gane
         cur.execute(
             """
             INSERT INTO orders (id, user_id, amount, paid, type)
@@ -11437,7 +9252,7 @@ def pay_all_unpaid(call):
             conn.commit()
 
         # ==================================================
-        # 6️⃣ FLUTTERWAVE (An sauya daga Paystack)
+        # 6️⃣ FLUTTERWAVE PAYMENT LINK
         # ==================================================
         pay_url = create_flutterwave_payment(
             uid,
@@ -11451,7 +9266,7 @@ def pay_all_unpaid(call):
             return
 
         # ==================================================
-        # 7️⃣ DISPLAY
+        # 7️⃣ DISPLAY (MODERN STYLE WITH EDIT MESSAGE)
         # ==================================================
         unique_titles = []
         seen = set()
@@ -11463,45 +9278,57 @@ def pay_all_unpaid(call):
                 unique_titles.append(title)
                 seen.add(key)
 
+        safe_user_name = clean_html(user_name)
+        safe_titles_text = clean_html(", ".join(unique_titles) if unique_titles else "N/A")
+
         kb = InlineKeyboardMarkup()
 
-        # PAY NOW
+        # PAY NOW (CREDIT CARD / FLUTTERWAVE)
         kb.add(
-            InlineKeyboardButton("💳 PAY NOW", url=pay_url)
+            InlineKeyboardButton("💳 PAY NOW 💳", url=pay_url, style="success")
         )
 
-        # NEW WALLET BUTTON (LIKE GROUPITEM)
+        # WALLET & CANCEL BUTTONS (WITH COLOR STYLES)
         kb.row(
-            InlineKeyboardButton("💵Pay with wallet", callback_data=f"walletpay:{order_id}"),
-            InlineKeyboardButton("❌ Cancel", callback_data=f"cancel:{order_id}")
+            InlineKeyboardButton("💰 Pay with Wallet", callback_data=f"walletpay:{order_id}", style="primary"),
+            InlineKeyboardButton("❌ Cancel Order", callback_data=f"cancel:{order_id}", style="danger")
         )
 
-        sent = bot.send_message(
-            uid,
-            f"""🧺 <b>PAY ALL UNPAID ORDERS</b>
-
-👤 <b>Your name is:</b> {user_name}
-
-🎬 <b>Films:</b>
-{", ".join(unique_titles)}
-
-📦 <b>Films:</b> {len(item_ids)}
-🗂 <b>G-orders:</b> {len(groups)}
-
-💵 <b>Total amount:</b> ₦{total_amount}
-
-🆔 <b>Order ID:</b>
-<code>{order_id}</code>
-""",
-            parse_mode="HTML",
-            reply_markup=kb
+        payment_text = (
+            "💳⚡ <b>FLUTTERWAVE SIMPLE PAYMENT</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"Barka {safe_user_name}\n"
+            "You want buy these movies\n\n"
+            f"🎬 <b>Films:</b> {safe_titles_text}\n\n"
+            f"📦 <b>TOTAL FILMS:</b> {len(item_ids)}\n"
+            f"🗃 <b>GROUPS:</b> {len(groups)}\n"
+            f"💵 <b>TOTAL PRICE:</b> ₦{total_amount}\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "Danna Pay now da ke kasa don biya nan take.\n"
+            "Click pay now 👇"
         )
 
-        # ===== STORE MESSAGE FOR AUTO DELETE AFTER PAYMENT =====
-        ORDER_MESSAGES[order_id] = (sent.chat.id, sent.message_id)
+        try:
+            # Yi edit na tsohon saƙo maimakon tura sabo
+            bot.edit_message_text(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                text=payment_text,
+                parse_mode="HTML",
+                reply_markup=kb
+            )
+            ORDER_MESSAGES[order_id] = (call.message.chat.id, call.message.message_id)
+        except:
+            # Idan edit ɗin bai yiwu ba, zai tura sabon saƙo a matsayin madadi
+            sent = bot.send_message(
+                uid,
+                payment_text,
+                parse_mode="HTML",
+                reply_markup=kb
+            )
+            ORDER_MESSAGES[order_id] = (sent.chat.id, sent.message_id)
 
     except Exception:
-        # Don kiyaye bot din daga tsayawa idan akwai error
         print(traceback.format_exc())
         pass
 
@@ -11511,6 +9338,259 @@ def pay_all_unpaid(call):
             conn.close()
         except:
             pass
+
+
+
+# ==================================================
+# CHECKOUT HANDLER (INDEPENDENT FUNCTION)
+# ==================================================
+@bot.callback_query_handler(func=lambda c: c.data == "checkout")
+def handle_checkout_callback(c):
+    try:
+        uid = c.from_user.id
+        user_name = c.from_user.first_name or "Customer"
+    except:
+        return
+
+    try:
+        rows = get_cart(uid)
+
+        if not rows:
+            bot.answer_callback_query(c.id, "❌ Cart ɗinka babu komai.")
+            return
+
+        groups = {}
+        total = 0
+
+        for item_id, title, price, file_id, group_key in rows:
+
+            if not file_id:
+                continue
+
+            p = int(price or 0)
+            if p <= 0:
+                continue
+
+            key = group_key if group_key else f"single_{item_id}"
+
+            if key not in groups:
+                groups[key] = {
+                    "price": p,
+                    "items": []
+                }
+
+            groups[key]["items"].append((item_id, title, file_id))
+
+        if not groups:
+            bot.answer_callback_query(c.id, "❌ Babu item mai delivery a cart.")
+            return
+
+        # ==================================================
+        # REMOVE OWNED MOVIES
+        # ==================================================
+        conn = None
+        cur = None
+
+        try:
+            conn = get_conn()
+            cur = conn.cursor(cursor_factory=RealDictCursor)
+
+            all_ids = []
+            for g in groups.values():
+                for item_id, _, _ in g["items"]:
+                    all_ids.append(item_id)
+
+            if all_ids:
+                cur.execute(
+                    f"""
+                    SELECT item_id FROM user_movies
+                    WHERE user_id=%s
+                    AND item_id IN ({",".join(["%s"]*len(all_ids))})
+                    """,
+                    (uid, *all_ids)
+                )
+
+                owned_ids = {r["item_id"] for r in cur.fetchall()}
+            else:
+                owned_ids = set()
+
+            if owned_ids:
+                kb_owned = InlineKeyboardMarkup()
+                kb_owned.add(
+                    InlineKeyboardButton(
+                        "📽 PAID MOVIES",
+                        callback_data="my_movies",
+                        style="primary"
+                    )
+                )
+
+                bot.send_message(
+                    uid,
+                    "You have already purchased this movie.\n\nYou can view or download it again below 👇",
+                    reply_markup=kb_owned
+                )
+                bot.answer_callback_query(c.id)
+                return
+
+        except:
+            return
+
+        finally:
+            try:
+                if cur:
+                    cur.close()
+                if conn:
+                    conn.close()
+            except:
+                pass
+
+        # ==================================================
+        # CALCULATE TOTAL
+        # ==================================================
+        for g in groups.values():
+            total += g["price"]
+
+        if total <= 0:
+            bot.answer_callback_query(c.id, "❌ Farashi bai dace ba.")
+            return
+
+        order_id = str(uuid.uuid4())
+
+        # ==================================================
+        # CREATE ORDER
+        # ==================================================
+        conn = None
+        cur = None
+
+        try:
+            conn = get_conn()
+            cur = conn.cursor(cursor_factory=RealDictCursor)
+
+            cur.execute(
+                "INSERT INTO orders (id,user_id,amount,paid,type) VALUES (%s,%s,%s,0,'film')",
+                (order_id, uid, total)
+            )
+
+            for g in groups.values():
+                for item_id, title, file_id in g["items"]:
+                    cur.execute(
+                        """
+                        INSERT INTO order_items
+                        (order_id,item_id,file_id,price)
+                        VALUES (%s,%s,%s,%s)
+                        """,
+                        (order_id, item_id, file_id, g["price"])
+                    )
+
+            conn.commit()
+
+        except:
+            if conn:
+                conn.rollback()
+            return
+
+        finally:
+            try:
+                if cur:
+                    cur.close()
+                if conn:
+                    conn.close()
+            except:
+                pass
+
+        # ==================================================
+        # CLEAR CART
+        # ==================================================
+        try:
+            clear_cart(uid)
+        except:
+            pass
+
+        # ==================================================
+        # FLUTTERWAVE PAYMENT
+        # ==================================================
+        try:
+            pay_url = create_flutterwave_payment(
+                uid,
+                order_id,
+                total,
+                "Cart Order"
+            )
+        except:
+            return
+
+        if not pay_url:
+            return
+
+        # ==================================================
+        # FORMAT DISPLAY (MODERN STYLE WITH EDIT MESSAGE)
+        # ==================================================
+        unique_titles = []
+        seen = set()
+
+        for key, g in groups.items():
+            first_item = g["items"][0]
+            title = first_item[1]
+            if key not in seen:
+                unique_titles.append(title)
+                seen.add(key)
+
+        item_count = sum(len(g["items"]) for g in groups.values())
+
+        safe_user_name = clean_html(user_name)
+        safe_titles_text = clean_html(", ".join(unique_titles) if unique_titles else "N/A")
+
+        kb = InlineKeyboardMarkup()
+
+        # PAY NOW (CREDIT CARD / FLUTTERWAVE)
+        kb.add(
+            InlineKeyboardButton("💳 PAY NOW 💳", url=pay_url, style="success")
+        )
+
+        # WALLET & CANCEL BUTTONS (WITH COLOR STYLES)
+        kb.row(
+            InlineKeyboardButton("💰 Pay with Wallet", callback_data=f"walletpay:{order_id}", style="primary"),
+            InlineKeyboardButton("❌ Cancel Order", callback_data=f"cancel:{order_id}", style="danger")
+        )
+
+        payment_text = (
+            "💳⚡ <b>FLUTTERWAVE SIMPLE PAYMENT</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"Barka {safe_user_name}\n"
+            "You want buy these movies\n\n"
+            f"🎬 <b>Films:</b> {safe_titles_text}\n\n"
+            f"📦 <b>TOTAL FILMS:</b> {item_count}\n"
+            f"🗃 <b>GROUPS:</b> {len(groups)}\n"
+            f"💵 <b>TOTAL PRICE:</b> ₦{total}\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "Danna Pay now da ke kasa don biya nan take.\n"
+            "Click pay now 👇"
+        )
+
+        try:
+            bot.edit_message_text(
+                chat_id=c.message.chat.id,
+                message_id=c.message.message_id,
+                text=payment_text,
+                parse_mode="HTML",
+                reply_markup=kb
+            )
+            ORDER_MESSAGES[order_id] = (c.message.chat.id, c.message.message_id)
+        except:
+            sent = bot.send_message(
+                uid,
+                payment_text,
+                parse_mode="HTML",
+                reply_markup=kb
+            )
+            ORDER_MESSAGES[order_id] = (sent.chat.id, sent.message_id)
+
+        bot.answer_callback_query(c.id)
+
+    except Exception:
+        print(traceback.format_exc())
+        pass
+
 
 
 
@@ -12423,241 +10503,6 @@ def handle_callback(c):
         return
 
     
-
-
-    from psycopg2.extras import RealDictCursor
-    import uuid
-
-    # ==================================================
-    # CHECKOUT (CART)
-    # ==================================================
-    if data == "checkout":
-
-        rows = get_cart(uid)
-
-        if not rows:
-            bot.answer_callback_query(c.id, "❌ Cart ɗinka babu komai.")
-            return
-
-        groups = {}
-        total = 0
-
-        for item_id, title, price, file_id, group_key in rows:
-
-            if not file_id:
-                continue
-
-            p = int(price or 0)
-            if p <= 0:
-                continue
-
-            key = group_key if group_key else f"single_{item_id}"
-
-            if key not in groups:
-                groups[key] = {
-                    "price": p,
-                    "items": []
-                }
-
-            groups[key]["items"].append((item_id, title, file_id))
-
-        if not groups:
-            bot.answer_callback_query(c.id, "❌ Babu item mai delivery a cart.")
-            return
-
-        # ==================================================
-        # REMOVE OWNED MOVIES
-        # ==================================================
-        conn = None
-        cur = None
-
-        try:
-            conn = get_conn()
-            cur = conn.cursor(cursor_factory=RealDictCursor)
-
-            all_ids = []
-            for g in groups.values():
-                for item_id, _, _ in g["items"]:
-                    all_ids.append(item_id)
-
-            if all_ids:
-                cur.execute(
-                    f"""
-                    SELECT item_id FROM user_movies
-                    WHERE user_id=%s
-                    AND item_id IN ({",".join(["%s"]*len(all_ids))})
-                    """,
-                    (uid, *all_ids)
-                )
-
-                owned_ids = {r["item_id"] for r in cur.fetchall()}
-            else:
-                owned_ids = set()
-
-            if owned_ids:
-                kb_owned = InlineKeyboardMarkup()
-                kb_owned.add(
-                    InlineKeyboardButton(
-                        "📽 PAID MOVIES",
-                        callback_data="my_movies"
-                    )
-                )
-
-                bot.send_message(
-                    uid,
-                    "You have already purchased this movie.\n\nYou can view or download it again below 👇",
-                    reply_markup=kb_owned
-                )
-                return
-
-        except:
-            return
-
-        finally:
-            try:
-                if cur:
-                    cur.close()
-                if conn:
-                    conn.close()
-            except:
-                pass
-
-        # ==================================================
-        # CALCULATE TOTAL
-        # ==================================================
-        for g in groups.values():
-            total += g["price"]
-
-        if total <= 0:
-            bot.answer_callback_query(c.id, "❌ Farashi bai dace ba.")
-            return
-
-        order_id = str(uuid.uuid4())
-
-        # ==================================================
-        # CREATE ORDER
-        # ==================================================
-        conn = None
-        cur = None
-
-        try:
-            conn = get_conn()
-            cur = conn.cursor(cursor_factory=RealDictCursor)
-
-            # Mun kara type='film' domin Flutterwave Webhook ya gane
-            cur.execute(
-                "INSERT INTO orders (id,user_id,amount,paid,type) VALUES (%s,%s,%s,0,'film')",
-                (order_id, uid, total)
-            )
-
-            for g in groups.values():
-                for item_id, title, file_id in g["items"]:
-                    cur.execute(
-                        """
-                        INSERT INTO order_items
-                        (order_id,item_id,file_id,price)
-                        VALUES (%s,%s,%s,%s)
-                        """,
-                        (order_id, item_id, file_id, g["price"])
-                    )
-
-            conn.commit()
-
-        except:
-            if conn:
-                conn.rollback()
-            return
-
-        finally:
-            try:
-                if cur:
-                    cur.close()
-                if conn:
-                    conn.close()
-            except:
-                pass
-
-        # ==================================================
-        # CLEAR CART
-        # ==================================================
-        try:
-            clear_cart(uid)
-        except:
-            pass
-
-        # ==================================================
-        # FLUTTERWAVE (An sauya daga Paystack)
-        # ==================================================
-        try:
-            # An yi amfani da create_flutterwave_payment yadda ka bukata
-            pay_url = create_flutterwave_payment(
-                uid,
-                order_id,
-                total,
-                "Cart Order"
-            )
-        except:
-            return
-
-        if not pay_url:
-            return
-
-        # ==================================================
-        # FORMAT DISPLAY (LIKE PAYALL)
-        # ==================================================
-        unique_titles = []
-        seen = set()
-
-        for key, g in groups.items():
-            first_item = g["items"][0]
-            title = first_item[1]
-            if key not in seen:
-                unique_titles.append(title)
-                seen.add(key)
-
-        item_count = sum(len(g["items"]) for g in groups.values())
-
-        kb = InlineKeyboardMarkup()
-
-        # TOP ROW
-        kb.add(
-            InlineKeyboardButton("💳 PAY NOW", url=pay_url)
-        )
-
-        # SECOND ROW (NEW WALLET SYSTEM ADDED)
-        kb.row(
-            InlineKeyboardButton("💵Pay with wallet", callback_data=f"walletpay:{order_id}"),
-            InlineKeyboardButton("❌ Cancel", callback_data=f"cancel:{order_id}")
-        )
-
-        sent = bot.send_message(
-            uid,
-            f"""🧺 <b>CART CHECKOUT</b>
-
-👤 <b>Your name is:</b> {user_name}
-
-🎬 <b>Films:</b>
-{", ".join(unique_titles)}
-
-📦 <b>Films:</b> {item_count}
-🗂 <b>G-orders:</b> {len(groups)}
-
-💵 <b>Total amount:</b> ₦{total}
-
-🆔 <b>Order ID:</b>
-<code>{order_id}</code>
-""",
-            parse_mode="HTML",
-            reply_markup=kb
-        )
-
-        # ===== NEW: STORE MESSAGE FOR WEBHOOK AUTO DELETE =====
-        ORDER_MESSAGES[order_id] = (sent.chat.id, sent.message_id)
-
-        bot.answer_callback_query(c.id)
-        return
-
-
 
 
     
