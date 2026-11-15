@@ -1112,6 +1112,9 @@ AD_REPORT = -1004433789999
 # Wannan shi ne GROUP ID din da ake tura short videos
 CLIP_CHANNEL_VIDEO = -1004449824546
 
+GROUP_MEMBER = "https://t.me/+0vrVTDXxXx82Mzk8"
+
+
 
 # ========= CONFIG =========
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -1996,6 +1999,7 @@ def telegram_webhook():
 
 
 
+
 # ============================================================
 # BOT 1 — VIDEO RECEIVER SYSTEM
 # PRIVATE DM ONLY
@@ -2021,7 +2025,6 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 # ============================================================
 
 CLIP_MAX_SIZE = 50 * 1024 * 1024
-
 
 
 # Admin must remain unaffected by this system.
@@ -2244,13 +2247,23 @@ def clip_create_group_invite(user_id):
 
     with _CLIP_LINK_LOCK:
 
-        invite = bot.create_chat_invite_link(
-            chat_id=CLIP_CHANNEL_VIDEO,
-            name=f"clip-user-{user_id}",
-            member_limit=1
-        )
+        try:
 
-        return invite.invite_link
+            invite = bot.create_chat_invite_link(
+                chat_id=CLIP_CHANNEL_VIDEO,
+                name=f"clip-user-{user_id}",
+                member_limit=1
+            )
+
+            return invite.invite_link
+
+        except Exception:
+
+            logging.exception(
+                "CLIP GROUP INVITE FAILED — USING GROUP_MEMBER"
+            )
+
+            return GROUP_MEMBER
 
 
 # ============================================================
@@ -2571,13 +2584,23 @@ def photo_reply_adult(message):
 
 def photo_create_group_invite(user_id):
 
-    invite = bot.create_chat_invite_link(
-        chat_id=CLIP_CHANNEL_VIDEO,
-        name=f"photo-user-{user_id}",
-        member_limit=1
-    )
+    try:
 
-    return invite.invite_link
+        group_link = bot.create_chat_invite_link(
+            chat_id=CLIP_CHANNEL_VIDEO,
+            name=f"photo-user-{user_id}",
+            member_limit=1
+        )
+
+        return group_link.invite_link
+
+    except Exception:
+
+        logging.exception(
+            "PHOTO GROUP INVITE FAILED — USING GROUP_MEMBER"
+        )
+
+        return GROUP_MEMBER
 
 
 # ================= NORMAL PHOTO REPLY =================
@@ -2653,6 +2676,7 @@ def bot1_photo_receiver(message):
 
 # END BOT 1 VIDEO & PHOTO RECEIVER
 # ============================================================
+
 
 
 
