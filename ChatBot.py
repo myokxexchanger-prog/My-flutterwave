@@ -2029,6 +2029,100 @@ def clean_database(message):
         bot.reply_to(message, f"❌ Database cleaning failed:\n{e}")
 
 
+# ==========================================
+# /dbcheck — CHECK LATEST CLIP TASK
+# ADMIN ONLY
+# ==========================================
+
+@bot.message_handler(commands=['dbcheck'])
+def clip_dbcheck(message):
+
+    if message.from_user.id != int(ADMIN_ID):
+        return
+
+    conn = None
+
+    try:
+        conn = get_all_chat_db_conn()
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT
+                task_id,
+                user_id,
+                status,
+                assigned_worker,
+                attempts,
+                error_message,
+                payload,
+                result_json,
+                created_at,
+                started_at,
+                completed_at,
+                heartbeat_at,
+                lease_until
+            FROM tasks
+            WHERE task_type = %s
+            ORDER BY created_at DESC
+            LIMIT 1
+        """, (CLIP_TASK_TYPE,))
+
+        row = cur.fetchone()
+
+        if not row:
+            return bot.reply_to(message, "❌ Babu task a database.")
+
+        (
+            task_id, user_id, status, worker, attempts,
+            error, payload, result, created, started,
+            completed, heartbeat, lease
+        ) = row
+
+        payload = clip_json(payload)
+        result = clip_json(result)
+
+        text = (
+            "🔍 DATABASE CHECK\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"Task ID: {task_id}\n"
+            f"User ID: {user_id}\n"
+            f"Status: {status}\n"
+            f"Worker: {worker or 'Not assigned'}\n"
+            f"Attempts: {attempts}\n\n"
+            "📦 STORAGE\n"
+            f"Channel: {payload.get('storage_channel_id')}\n"
+            f"Message: {payload.get('storage_message_id')}\n\n"
+            "⚙️ BOT 2 PROCESSING\n"
+            f"Started: {payload.get('bot2_processing_started_at')}\n"
+            f"Download started: {payload.get('bot2_download_started_at')}\n"
+            f"Download completed: {payload.get('bot2_download_completed_at')}\n"
+            f"Frames completed: {payload.get('bot2_frames_completed_at')}\n"
+            f"Gemini started: {payload.get('bot2_gemini_started_at')}\n"
+            f"Gemini completed: {payload.get('bot2_gemini_completed_at')}\n\n"
+            "🎬 RESULT\n"
+            f"Movie: {result.get('movie_name', 'Not available')}\n"
+            f"Year: {result.get('movie_year', 'Unknown')}\n"
+            f"Actor: {result.get('main_actor', 'Unknown')}\n\n"
+            "🕒 DATABASE TIMES\n"
+            f"Created: {created}\n"
+            f"Started: {started}\n"
+            f"Completed: {completed}\n"
+            f"Heartbeat: {heartbeat}\n"
+            f"Lease: {lease}\n\n"
+            f"❌ Error: {error or 'None'}"
+        )
+
+        bot.reply_to(message, text[:4000])
+
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        bot.reply_to(message, f"❌ DB CHECK ERROR:\n{str(e)[:1500]}")
+
+    finally:
+        if conn:
+            conn.close()
+
 
 # ============================================================
 # BOT 1 — CLIP RECEIVER + STORAGE + RESULT DELIVERY
