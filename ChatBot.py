@@ -2001,6 +2001,1086 @@ def telegram_webhook():
 
 
 # ============================================================
+# BOT VIDEO GROUP → PRIVATE DM TEST
+# ALL GROUPS — NO DATABASE — NO DOWNLOAD
+# ============================================================
+
+import logging
+
+@bot.message_handler(
+    content_types=["video", "document"],
+    func=lambda message: (
+        message.chat.type in ("group", "supergroup")
+        and message.from_user is not None
+        and not message.from_user.is_bot
+    )
+)
+def clip_video_group_test(message):
+
+    try:
+        user_id = message.from_user.id
+
+        # Accept actual video or video document only.
+        video = message.video
+
+        if not video and message.document:
+            mime = (
+                message.document.mime_type or ""
+            ).lower()
+
+            if mime.startswith("video/"):
+                video = message.document
+
+        if not video:
+            return
+
+        # Send confirmation directly to the person.
+        bot.send_message(
+            user_id,
+            "✅ AN KARƁI BIDIYON KA!\n\n"
+            "Bot ya samu bidiyon da ka turo a group.\n"
+            "Ana iya ci gaba da gwajin."
+        )
+
+        logging.info(
+            "VIDEO GROUP TEST SUCCESS: user=%s chat=%s message=%s file_unique_id=%s",
+            user_id,
+            message.chat.id,
+            message.message_id,
+            video.file_unique_id
+        )
+
+    except Exception as error:
+
+        logging.exception(
+            "VIDEO GROUP TEST FAILED"
+        )
+
+        try:
+            bot.reply_to(
+                message,
+                "❌ Ban iya turo maka DM ba. "
+                "Ka fara bot ta hanyar danna /start, "
+                "sannan ka sake tura bidiyon."
+            )
+        except Exception:
+            logging.exception(
+                "GROUP TEST ERROR REPLY FAILED"
+            )
+
+# ============================================================
+# END VIDEO GROUP TEST
+# ============================================================
+
+
+
+# ============================================================
+# BOT 1 — GROUP VIDEO RECEIVER SYSTEM
+# GROUP ONLY
+# USER ONLY — ADMIN EXCLUDED
+# CAPTION PROTECTION
+# DELETE + REPORT + 24H RESTRICTION
+# 50MB VIDEO SIZE PROTECTION
+# CUSTOMER DM VERIFICATION
+# TASK CREATION
+# CONTINUOUS BOT 2 RESULT DELIVERY
+# ============================================================
+
+import re
+import json
+import time
+import logging
+import threading
+import unicodedata
+
+from datetime import datetime, timezone
+from telebot.types import ChatPermissions
+
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+CLIP_CHANNEL_VIDEO = -1004449824546
+
+CLIP_ADMIN_ID = int(ADMIN_ID)
+
+CLIP_REPORT_ID = AD_REPORT
+
+CLIP_MAX_SIZE = 50 * 1024 * 1024
+
+CLIP_BAN_SECONDS = 24 * 60 * 60
+
+# Check database every 2 seconds forever.
+CLIP_RESULT_CHECK_INTERVAL = 2
+
+CLIP_RESULT_THREAD_STARTED = False
+
+_CLIP_RESULT_LOCK = threading.Lock()
+
+_CLIP_RESULT_DELIVERY_LOCK = threading.Lock()
+
+
+# ============================================================
+# GROUP AND USER FILTER
+# ============================================================
+
+def group_clip_is_valid(message):
+
+    if not message or not message.chat:
+        return False
+
+    if message.chat.id != CLIP_CHANNEL_VIDEO:
+        return False
+
+    if message.chat.type not in ("group", "supergroup"):
+        return False
+
+    if not message.from_user:
+        return False
+
+    if message.from_user.is_bot:
+        return False
+
+    if int(message.from_user.id) == CLIP_ADMIN_ID:
+        return False
+
+    return True
+
+
+# ============================================================
+# USER INFORMATION
+# ============================================================
+
+def group_clip_user_name(user):
+
+    parts = [
+        getattr(user, "first_name", "") or "",
+        getattr(user, "last_name", "") or ""
+    ]
+
+    return " ".join(
+        item.strip()
+        for item in parts
+        if item.strip()
+    ) or "Unknown"
+
+
+def group_clip_username(user):
+
+    username = getattr(user, "username", None)
+
+    return f"@{username}" if username else "Babu username"
+
+
+# ============================================================
+# VIDEO INFORMATION
+# ============================================================
+
+def group_clip_get_video(message):
+
+    if message.video:
+
+        item = message.video
+
+        return {
+            "file_id": item.file_id,
+            "file_unique_id": item.file_unique_id,
+            "file_size": int(item.file_size or 0),
+            "file_name": None,
+            "mime_type": item.mime_type or "video/mp4",
+            "file_type": "video"
+        }
+
+    if message.document:
+
+        item = message.document
+
+        mime = (item.mime_type or "").lower()
+
+        if not mime.startswith("video/"):
+            return None
+
+        return {
+            "file_id": item.file_id,
+            "file_unique_id": item.file_unique_id,
+            "file_size": int(item.file_size or 0),
+            "file_name": item.file_name,
+            "mime_type": item.mime_type,
+            "file_type": "document_video"
+        }
+
+    return None
+
+
+# ============================================================
+# 50MB SIZE PROTECTION
+# DELETE FROM GROUP — DM USER — NO DATABASE
+# ============================================================
+
+def group_clip_oversize_video(message):
+
+    # Copy the video BEFORE deleting the group message.
+    # If DM is unavailable, still delete the group message.
+
+    try:
+
+        bot.copy_message(
+            chat_id=message.from_user.id,
+            from_chat_id=message.chat.id,
+            message_id=message.message_id
+        )
+
+        bot.send_message(
+            message.from_user.id,
+            "Wannan Video daka tura a group yayi girma\n"
+            "Bani da izinin sarrarfa video da ya wuce 50MB\n\n"
+            "Ka rage girmasa ka sake aiko minti kadan a Group din☺️\n\n"
+            "Mun gode"
+        )
+
+    except Exception:
+
+        logging.info(
+            "OVERSIZE VIDEO: USER DM UNAVAILABLE — SKIPPED"
+        )
+
+    finally:
+
+        try:
+
+            bot.delete_message(
+                chat_id=message.chat.id,
+                message_id=message.message_id
+            )
+
+        except Exception:
+
+            logging.exception(
+                "OVERSIZE VIDEO GROUP DELETE FAILED"
+            )
+
+    return False
+
+
+# ============================================================
+# CAPTION PROTECTION
+# ============================================================
+
+GROUP_CLIP_ADULT_KEYWORDS = (
+
+    # English
+    "porn",
+    "porno",
+    "pornography",
+    "xxx",
+    "sex",
+    "sexual",
+    "sex video",
+    "sex film",
+    "adult",
+    "adult video",
+    "adult movie",
+    "nude",
+    "nudes",
+    "nudity",
+    "naked",
+    "erotic",
+    "hentai",
+    "blowjob",
+    "handjob",
+    "onlyfans",
+    "milf",
+    "rape",
+    "incest",
+    "orgasm",
+    "masturbation",
+
+    # Hausa
+    "batsa",
+    "tsiraici",
+    "iskanci",
+    "karuwanci",
+    "lalata",
+    "bidiyon batsa",
+    "hotunan batsa",
+    "finafinan batsa",
+    "fim din batsa",
+)
+
+
+def group_clip_normalize_caption(caption):
+
+    caption = unicodedata.normalize(
+        "NFKC",
+        caption or ""
+    ).lower()
+
+    caption = "".join(
+        char for char in unicodedata.normalize("NFKD", caption)
+        if not unicodedata.combining(char)
+    )
+
+    substitutions = {
+        "@": "a",
+        "0": "o",
+        "1": "i",
+        "!": "i",
+        "3": "e",
+        "4": "a",
+        "5": "s",
+        "$": "s",
+        "7": "t",
+        "8": "b",
+    }
+
+    for old, new in substitutions.items():
+        caption = caption.replace(old, new)
+
+    caption = re.sub(
+        r"[^a-z0-9]+",
+        "",
+        caption
+    )
+
+    return caption
+
+
+def group_clip_is_adult_caption(caption):
+
+    normalized = group_clip_normalize_caption(
+        caption
+    )
+
+    for keyword in GROUP_CLIP_ADULT_KEYWORDS:
+
+        keyword_normalized = group_clip_normalize_caption(
+            keyword
+        )
+
+        if keyword_normalized and keyword_normalized in normalized:
+            return True
+
+    return False
+
+
+# ============================================================
+# REPORT ADULT CONTENT
+# ============================================================
+
+def group_clip_send_report(message, video_info):
+
+    user = message.from_user
+
+    report_text = (
+        "🚨 GROUP VIDEO CONTENT REPORT\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"Name: {group_clip_user_name(user)}\n"
+        f"Username: {group_clip_username(user)}\n"
+        f"User ID: {user.id}\n"
+        f"Group ID: {message.chat.id}\n"
+        f"Message ID: {message.message_id}\n"
+        f"File Size: {video_info['file_size']}\n"
+        f"File Name: {video_info['file_name'] or 'Unknown'}\n"
+        f"File Unique ID: {video_info['file_unique_id']}\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"Original Caption:\n{message.caption or 'No caption'}\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"Report Time: {datetime.now(timezone.utc).isoformat()}"
+    )
+
+    try:
+
+        bot.copy_message(
+            chat_id=CLIP_REPORT_ID,
+            from_chat_id=message.chat.id,
+            message_id=message.message_id
+        )
+
+    except Exception:
+
+        logging.exception(
+            "GROUP CLIP REPORT VIDEO COPY FAILED"
+        )
+
+    bot.send_message(
+        CLIP_REPORT_ID,
+        report_text[:3900]
+    )
+
+
+# ============================================================
+# DELETE MESSAGE AND RESTRICT USER FOR 24 HOURS
+# ============================================================
+
+def group_clip_remove_and_restrict(message):
+
+    try:
+
+        bot.delete_message(
+            chat_id=message.chat.id,
+            message_id=message.message_id
+        )
+
+    except Exception:
+
+        logging.exception(
+            "GROUP CLIP DELETE FAILED"
+        )
+
+    try:
+
+        bot.restrict_chat_member(
+            chat_id=message.chat.id,
+            user_id=message.from_user.id,
+            until_date=int(time.time()) + CLIP_BAN_SECONDS,
+            permissions=ChatPermissions(
+                can_send_messages=False,
+                can_send_audios=False,
+                can_send_documents=False,
+                can_send_photos=False,
+                can_send_videos=False,
+                can_send_video_notes=False,
+                can_send_voice_notes=False,
+                can_send_polls=False,
+                can_send_other_messages=False,
+                can_add_web_page_previews=False
+            )
+        )
+
+    except Exception:
+
+        logging.exception(
+            "GROUP CLIP 24H RESTRICTION FAILED"
+        )
+
+
+# ============================================================
+# CUSTOMER DM ACKNOWLEDGEMENT
+# ============================================================
+
+def group_clip_send_acknowledgement(user_id):
+
+    return bot.send_message(
+        user_id,
+        "MADALLA NA KARBI BIDIYONKA INA BINCIKAWA 😊\n\n"
+        "Dan allah ka jira idan na samu video din zan sanar da kai🤗"
+    )
+
+
+# ============================================================
+# USER COULD NOT RECEIVE PRIVATE MESSAGE
+# ============================================================
+
+def group_clip_private_message_failed(message):
+
+    user = message.from_user
+
+    try:
+
+        bot.delete_message(
+            chat_id=message.chat.id,
+            message_id=message.message_id
+        )
+
+    except Exception:
+
+        logging.exception(
+            "GROUP VIDEO DELETE FAILED"
+        )
+
+    mention = (
+        f'<a href="tg://user?id={user.id}">'
+        f'{group_clip_user_name(user)}</a>'
+    )
+
+    try:
+
+        bot.send_message(
+            message.chat.id,
+            (
+                f"Yi hakuri malam {mention}\n\n"
+                "Aikin ka bazai kammala ba\n"
+                "Da bukatar kaje Algaitabot ka taba &lt;start&gt;\n"
+                "Sannan kazo ka turo video din anan group\n\n"
+                "Mun gode🙏"
+            ),
+            parse_mode="HTML"
+        )
+
+    except Exception:
+
+        logging.exception(
+            "GROUP PRIVATE MESSAGE FAILURE NOTICE FAILED"
+        )
+
+
+# ============================================================
+# CREATE CUSTOMER AND TASK
+# ============================================================
+
+def group_clip_create_task(message, video_info, ack_message):
+
+    user = message.from_user
+
+    conn = get_all_chat_db_conn()
+    cur = None
+
+    try:
+
+        cur = conn.cursor()
+
+        # CHECK DUPLICATE TELEGRAM MESSAGE
+
+        cur.execute(
+            """
+            SELECT id
+            FROM chat_messages
+            WHERE telegram_chat_id = %s
+              AND telegram_message_id = %s
+            LIMIT 1
+            """,
+            (
+                message.chat.id,
+                message.message_id
+            )
+        )
+
+        if cur.fetchone():
+
+            conn.rollback()
+            return None
+
+        # SAVE CUSTOMER
+
+        cur.execute(
+            """
+            INSERT INTO customers (
+                user_id,
+                username,
+                first_name,
+                last_name,
+                first_seen_at,
+                last_interaction_at,
+                total_messages,
+                updated_at
+            )
+            VALUES (%s, %s, %s, %s, NOW(), NOW(), 1, NOW())
+
+            ON CONFLICT (user_id)
+            DO UPDATE SET
+                username = EXCLUDED.username,
+                first_name = EXCLUDED.first_name,
+                last_name = EXCLUDED.last_name,
+                last_interaction_at = NOW(),
+                total_messages = customers.total_messages + 1,
+                updated_at = NOW()
+            """,
+            (
+                user.id,
+                user.username,
+                user.first_name,
+                user.last_name
+            )
+        )
+
+        # CREATE TASK
+
+        payload = {
+            "source": "telegram_group",
+            "telegram_chat_id": message.chat.id,
+            "telegram_message_id": message.message_id,
+            "file_id_bot1": video_info["file_id"],
+            "file_unique_id": video_info["file_unique_id"],
+            "file_size": video_info["file_size"],
+            "file_name": video_info["file_name"],
+            "mime_type": video_info["mime_type"],
+            "file_type": video_info["file_type"],
+            "caption": message.caption or "",
+            "username": user.username,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "ack_chat_id": ack_message.chat.id,
+            "ack_message_id": ack_message.message_id,
+            "bot1_delivered": False
+        }
+
+        cur.execute(
+            """
+            INSERT INTO tasks (
+                user_id,
+                task_type,
+                status,
+                priority,
+                payload
+            )
+            VALUES (
+                %s,
+                'movie_identification',
+                'pending',
+                5,
+                %s::jsonb
+            )
+            RETURNING task_id
+            """,
+            (
+                user.id,
+                json.dumps(payload)
+            )
+        )
+
+        task_id = cur.fetchone()[0]
+
+        # SAVE INCOMING VIDEO MESSAGE
+
+        cur.execute(
+            """
+            INSERT INTO chat_messages (
+                user_id,
+                task_id,
+                telegram_chat_id,
+                telegram_message_id,
+                direction,
+                sender_type,
+                message_type,
+                content,
+                file_id,
+                file_unique_id,
+                file_name,
+                mime_type,
+                file_size,
+                language_code
+            )
+            VALUES (
+                %s, %s, %s, %s,
+                'incoming',
+                'user',
+                'video',
+                %s,
+                %s, %s, %s, %s, %s, %s
+            )
+            """,
+            (
+                user.id,
+                task_id,
+                message.chat.id,
+                message.message_id,
+                message.caption or "",
+                video_info["file_id"],
+                video_info["file_unique_id"],
+                video_info["file_name"],
+                video_info["mime_type"],
+                video_info["file_size"],
+                getattr(user, "language_code", None)
+            )
+        )
+
+        conn.commit()
+
+        logging.info(
+            "GROUP VIDEO TASK CREATED: %s",
+            task_id
+        )
+
+        return str(task_id)
+
+    except Exception:
+
+        conn.rollback()
+
+        logging.exception(
+            "GROUP VIDEO TASK CREATION FAILED"
+        )
+
+        raise
+
+    finally:
+
+        if cur:
+            cur.close()
+
+        conn.close()
+
+
+# ============================================================
+# RESULT DELIVERY — BOT 2 WRITES result_json
+# ============================================================
+
+def group_clip_format_result(result):
+
+    if not isinstance(result, dict):
+        result = {}
+
+    title = (
+        result.get("movie_title")
+        or result.get("title")
+        or "Ba a samu sunan fim ba"
+    )
+
+    year = (
+        result.get("movie_year")
+        or result.get("year")
+        or "Ba a sani ba"
+    )
+
+    actor = (
+        result.get("lead_actor")
+        or result.get("main_actor")
+        or "Ba a sani ba"
+    )
+
+    return (
+        "✅ AN KAMMALA BINCIKE!\n\n"
+        f"🎬 Sunan Fim: {title}\n"
+        f"📅 Shekara: {year}\n"
+        f"⭐ Babban Jarumi: {actor}\n\n"
+        "Mun gode da amfani da AlgaitaBot 🙏"
+    )
+
+
+# ============================================================
+# CHECK ALL COMPLETED TASKS
+# RUNS EVERY 2 SECONDS
+# ============================================================
+
+def group_clip_check_completed_tasks():
+
+    # Prevent two local threads from processing same rows.
+    if not _CLIP_RESULT_DELIVERY_LOCK.acquire(
+        blocking=False
+    ):
+        return
+
+    try:
+
+        conn = get_all_chat_db_conn()
+        cur = None
+
+        try:
+
+            cur = conn.cursor()
+
+            cur.execute(
+                """
+                SELECT
+                    task_id,
+                    payload,
+                    result_json
+                FROM tasks
+                WHERE status = 'completed'
+                  AND task_type = 'movie_identification'
+                  AND COALESCE(
+                        payload->>'bot1_delivered',
+                        'false'
+                      ) != 'true'
+                ORDER BY completed_at ASC NULLS LAST,
+                         created_at ASC
+                LIMIT 100
+                """
+            )
+
+            rows = cur.fetchall()
+
+        finally:
+
+            if cur:
+                cur.close()
+
+            conn.close()
+
+        # Process every completed task returned by DB.
+
+        for task_id, payload, result_json in rows:
+
+            try:
+
+                payload = payload or {}
+                result_json = result_json or {}
+
+                if isinstance(payload, str):
+                    payload = json.loads(payload)
+
+                if isinstance(result_json, str):
+                    result_json = json.loads(result_json)
+
+                if not isinstance(payload, dict):
+                    raise ValueError("Invalid task payload")
+
+                if not isinstance(result_json, dict):
+                    raise ValueError("Invalid task result_json")
+
+                # Ignore tasks without a result.
+                if not result_json:
+                    continue
+
+                user_id = int(
+                    payload["ack_chat_id"]
+                )
+
+                ack_message_id = int(
+                    payload["ack_message_id"]
+                )
+
+                result_text = group_clip_format_result(
+                    result_json
+                )
+
+                # EDIT ORIGINAL ACKNOWLEDGEMENT IN USER DM.
+
+                bot.edit_message_text(
+                    chat_id=user_id,
+                    message_id=ack_message_id,
+                    text=result_text
+                )
+
+                # ONLY MARK DELIVERED AFTER SUCCESSFUL EDIT.
+
+                update_conn = get_all_chat_db_conn()
+                update_cur = None
+
+                try:
+
+                    update_cur = update_conn.cursor()
+
+                    update_cur.execute(
+                        """
+                        UPDATE tasks
+                        SET payload = payload ||
+                            '{"bot1_delivered": true}'::jsonb,
+                            updated_at = NOW()
+                        WHERE task_id = %s
+                          AND status = 'completed'
+                          AND COALESCE(
+                                payload->>'bot1_delivered',
+                                'false'
+                              ) != 'true'
+                        """,
+                        (str(task_id),)
+                    )
+
+                    update_conn.commit()
+
+                finally:
+
+                    if update_cur:
+                        update_cur.close()
+
+                    update_conn.close()
+
+                logging.info(
+                    "RESULT DELIVERED TO USER: TASK %s",
+                    task_id
+                )
+
+            except Exception:
+
+                # Keep bot1_delivered false.
+                # The checker will retry this task next time.
+                logging.exception(
+                    "GROUP VIDEO RESULT DELIVERY FAILED: %s",
+                    task_id
+                )
+
+    finally:
+
+        _CLIP_RESULT_DELIVERY_LOCK.release()
+
+
+# ============================================================
+# BACKGROUND RESULT CHECKER — NEVER STOPS
+# ============================================================
+
+def group_clip_result_worker():
+
+    logging.info(
+        "GROUP CLIP RESULT WORKER STARTED — CHECKING EVERY 2 SECONDS"
+    )
+
+    while True:
+
+        try:
+
+            group_clip_check_completed_tasks()
+
+        except Exception:
+
+            logging.exception(
+                "GROUP CLIP RESULT WORKER ERROR — WILL RETRY"
+            )
+
+        # It will continue forever, even after errors.
+        time.sleep(
+            CLIP_RESULT_CHECK_INTERVAL
+        )
+
+
+def group_clip_start_result_worker():
+
+    global CLIP_RESULT_THREAD_STARTED
+
+    with _CLIP_RESULT_LOCK:
+
+        if CLIP_RESULT_THREAD_STARTED:
+            return
+
+        thread = threading.Thread(
+            target=group_clip_result_worker,
+            daemon=True,
+            name="GroupClipResultWorker"
+        )
+
+        thread.start()
+
+        CLIP_RESULT_THREAD_STARTED = True
+
+        logging.info(
+            "GROUP CLIP RESULT WORKER STARTED SUCCESSFULLY"
+        )
+
+
+# ============================================================
+# MAIN GROUP VIDEO HANDLER
+# ============================================================
+
+@bot.message_handler(
+    content_types=["video", "document"],
+    func=lambda message: group_clip_is_valid(message)
+)
+def bot1_group_video_receiver(message):
+
+    video_info = group_clip_get_video(message)
+
+    if not video_info:
+        return
+
+    # --------------------------------------------------------
+    # 1. CHECK VIDEO SIZE FIRST
+    # --------------------------------------------------------
+
+    if video_info["file_size"] > CLIP_MAX_SIZE:
+
+        group_clip_oversize_video(
+            message
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # 2. ADULT CAPTION CHECK
+    # --------------------------------------------------------
+
+    caption = message.caption or ""
+
+    if group_clip_is_adult_caption(caption):
+
+        try:
+
+            group_clip_send_report(
+                message,
+                video_info
+            )
+
+        except Exception:
+
+            logging.exception(
+                "GROUP ADULT REPORT FAILED"
+            )
+
+        group_clip_remove_and_restrict(
+            message
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # 3. SEND PRIVATE ACKNOWLEDGEMENT FIRST
+    # --------------------------------------------------------
+
+    try:
+
+        ack_message = group_clip_send_acknowledgement(
+            message.from_user.id
+        )
+
+    except Exception:
+
+        logging.exception(
+            "CANNOT SEND GROUP VIDEO ACKNOWLEDGEMENT"
+        )
+
+        group_clip_private_message_failed(
+            message
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # 4. CREATE DATABASE TASK
+    # --------------------------------------------------------
+
+    try:
+
+        task_id = group_clip_create_task(
+            message,
+            video_info,
+            ack_message
+        )
+
+        if not task_id:
+
+            logging.warning(
+                "DUPLICATE GROUP VIDEO MESSAGE: %s",
+                message.message_id
+            )
+
+            return
+
+        logging.info(
+            "GROUP VIDEO ACCEPTED — TASK ID: %s",
+            task_id
+        )
+
+    except Exception:
+
+        logging.exception(
+            "GROUP VIDEO TASK SAVE FAILED"
+        )
+
+        try:
+
+            bot.edit_message_text(
+                chat_id=ack_message.chat.id,
+                message_id=ack_message.message_id,
+                text=(
+                    "Yi hakuri, an samu matsala wajen ajiye bidiyonka.\n"
+                    "Don Allah ka sake gwadawa anjima."
+                )
+            )
+
+        except Exception:
+
+            logging.exception(
+                "GROUP VIDEO TASK FAILURE NOTICE FAILED"
+            )
+
+        return
+
+
+# ============================================================
+# START RESULT WORKER
+# CALL THIS ONCE AFTER BOT INITIALIZATION
+# ============================================================
+
+group_clip_start_result_worker()
+
+
+# ============================================================
+# END BOT 1 CREAT TASK GROUP VIDEO SYSTEM
+# ============================================================
+
+
+
+# ============================================================
 # BOT 1 — VIDEO RECEIVER SYSTEM
 # PRIVATE DM ONLY
 # VIDEO ONLY — NO IMAGE SYSTEM YET
