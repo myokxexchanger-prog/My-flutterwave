@@ -2007,12 +2007,14 @@ def telegram_webhook():
 # 50MB VIDEO SIZE PROTECTION
 # CUSTOMER DM VERIFICATION
 # TASK CREATION
-# RANDOM VIDEO + CAPTION GROUP REPLIES
+# RANDOM TEXT-ONLY GROUP REPLIES
 # 2 HOURS GROUP RESTRICTION AFTER ACCEPTED VIDEO
 # ADMIN NOTIFICATION FOR RESTRICTION SUCCESS / FAILURE
 # ADMIN ONLY /unban COMMAND
 # VIDEO + RESULT CAPTION PRIVATE DELIVERY
 # CONTINUOUS BOT 2 RESULT DELIVERY — EVERY 2 SECONDS
+# ALL BOT TEXT MESSAGES BOLD
+# ALL VISIBLE IDS ARE COPYABLE USING <code>
 # ============================================================
 
 import re
@@ -2022,6 +2024,7 @@ import random
 import logging
 import threading
 import unicodedata
+import html
 
 from datetime import datetime, timezone
 from telebot.types import ChatPermissions
@@ -2054,6 +2057,7 @@ _CLIP_RESULT_DELIVERY_LOCK = threading.Lock()
 
 # ============================================================
 # RANDOM GROUP REPLY MESSAGES
+# TEXT ONLY — DO NOT COPY VIDEO INTO GROUP
 # ============================================================
 
 GROUP_CLIP_REPLY_MESSAGES = (
@@ -2084,18 +2088,20 @@ def group_clip_send_random_group_reply(message):
         or "Aboki"
     )
 
+    name = html.escape(name)
+
     reply_text = random.choice(
         GROUP_CLIP_REPLY_MESSAGES
     ).format(name=name)
 
-    # Aika kwafin ainihin bidiyon user tare da sakon a matsayin caption.
-    # Zai zama reply ga sakon bidiyon da user ya turo.
+    # IMPORTANT:
+    # SEND TEXT ONLY AS A REPLY TO USER'S VIDEO.
+    # DO NOT COPY OR RESEND THE VIDEO INTO THE GROUP.
 
-    return bot.copy_message(
+    return bot.send_message(
         chat_id=message.chat.id,
-        from_chat_id=message.chat.id,
-        message_id=message.message_id,
-        caption=reply_text,
+        text=f"<b>{reply_text}</b>",
+        parse_mode="HTML",
         reply_to_message_id=message.message_id
     )
 
@@ -2103,6 +2109,7 @@ def group_clip_send_random_group_reply(message):
 # ============================================================
 # RESTRICT USER FOR 2 HOURS AFTER ACCEPTED VIDEO
 # ADMIN NOTIFICATION ON SUCCESS OR FAILURE
+# ALL TEXT BOLD — USER ID COPYABLE
 # ============================================================
 
 def group_clip_restrict_user_2_hours(message):
@@ -2138,15 +2145,16 @@ def group_clip_restrict_user_2_hours(message):
         bot.send_message(
             CLIP_ADMIN_ID,
             (
-                "✅ AN DAKATAR DA USER NA TSAYIN 2 HOURS\n"
+                "<b>✅ AN DAKATAR DA USER NA TSAYIN 2 HOURS</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━\n"
-                f"User : {user_name}\n"
-                f"User id: {user_id}\n"
-                "An dakatar 2h kafin sake turo sako\n"
-                f"Group ID: {group_id}\n"
-                f"Message ID: {message.message_id}\n"
+                f"<b>User: {html.escape(user_name)}</b>\n"
+                f"<b>User ID: <code>{user_id}</code></b>\n"
+                "<b>An dakatar da user na tsawon awa 2.</b>\n"
+                f"<b>Group ID: <code>{group_id}</code></b>\n"
+                f"<b>Message ID: <code>{message.message_id}</code></b>\n"
                 "━━━━━━━━━━━━━━━━━━━━"
-            )
+            ),
+            parse_mode="HTML"
         )
 
         return True
@@ -2160,16 +2168,17 @@ def group_clip_restrict_user_2_hours(message):
             bot.send_message(
                 CLIP_ADMIN_ID,
                 (
-                    "❌ AN KASA DAKATAR DA USER\n"
+                    "<b>❌ AN KASA DAKATAR DA USER</b>\n"
                     "━━━━━━━━━━━━━━━━━━━━\n"
-                    f"User : {user_name}\n"
-                    f"User id: {user_id}\n"
-                    f"Group ID: {group_id}\n"
-                    f"Message ID: {message.message_id}\n"
-                    "An kasa dakatar da user\n\n"
-                    f"Dalili: {error_reason[:2500]}\n"
+                    f"<b>User: {html.escape(user_name)}</b>\n"
+                    f"<b>User ID: <code>{user_id}</code></b>\n"
+                    f"<b>Group ID: <code>{group_id}</code></b>\n"
+                    f"<b>Message ID: <code>{message.message_id}</code></b>\n"
+                    "<b>An kasa dakatar da user.</b>\n\n"
+                    f"<b>Dalili: {html.escape(error_reason[:2500])}</b>\n"
                     "━━━━━━━━━━━━━━━━━━━━"
-                )
+                ),
+                parse_mode="HTML"
             )
 
         except Exception:
@@ -2188,18 +2197,16 @@ def group_clip_restrict_user_2_hours(message):
 # ============================================================
 # ADMIN ONLY — /unban USER_ID
 # OPEN USER IMMEDIATELY IN THE GROUP
+# ALL TEXT BOLD — IDS COPYABLE
 # ============================================================
 
 @bot.message_handler(commands=["unban"])
 def group_clip_admin_unban(message):
 
-    # Admin kawai zai iya amfani da wannan command.
-
     if not message.from_user:
         return
 
     if int(message.from_user.id) != CLIP_ADMIN_ID:
-
         return
 
     try:
@@ -2210,8 +2217,13 @@ def group_clip_admin_unban(message):
 
             bot.reply_to(
                 message,
-                "Amfani:\n/unban USER_ID\n\n"
-                "Misali:\n/unban 9383838383"
+                (
+                    "<b>Amfani:</b>\n"
+                    "<code>/unban USER_ID</code>\n\n"
+                    "<b>Misali:</b>\n"
+                    "<code>/unban 9383838383</code>"
+                ),
+                parse_mode="HTML"
             )
 
             return
@@ -2222,13 +2234,11 @@ def group_clip_admin_unban(message):
 
             bot.reply_to(
                 message,
-                "❌ User ID bai dace ba."
+                "<b>❌ User ID bai dace ba.</b>",
+                parse_mode="HTML"
             )
 
             return
-
-        # Cire restriction din user a group din.
-        # An mayar da duk permissions na aika sako zuwa True.
 
         bot.restrict_chat_member(
             chat_id=CLIP_CHANNEL_VIDEO,
@@ -2250,22 +2260,26 @@ def group_clip_admin_unban(message):
         bot.reply_to(
             message,
             (
-                "✅ AN BUƊE USER NASARA!\n"
+                "<b>✅ AN BUƊE USER NASARA!</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━\n"
-                f"User ID: {target_user_id}\n"
-                f"Group ID: {CLIP_CHANNEL_VIDEO}\n"
-                "An cire dakatarwar user.\n"
-                "Zai iya sake turo sako yanzu.\n"
+                f"<b>User ID: <code>{target_user_id}</code></b>\n"
+                f"<b>Group ID: <code>{CLIP_CHANNEL_VIDEO}</code></b>\n"
+                "<b>An cire dakatarwar user.</b>\n"
+                "<b>Zai iya sake turo sako yanzu.</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━"
-            )
+            ),
+            parse_mode="HTML"
         )
 
     except ValueError:
 
         bot.reply_to(
             message,
-            "❌ User ID bai dace ba.\n"
-            "Misali: /unban 9383838383"
+            (
+                "<b>❌ User ID bai dace ba.</b>\n"
+                "<b>Misali:</b> <code>/unban 9383838383</code>"
+            ),
+            parse_mode="HTML"
         )
 
     except Exception as error:
@@ -2277,10 +2291,11 @@ def group_clip_admin_unban(message):
         bot.reply_to(
             message,
             (
-                "❌ AN KASA BUƊE USER\n"
-                f"User ID: {parts[1] if len(parts) > 1 else 'Unknown'}\n\n"
-                f"Dalili: {str(error)[:2500]}"
-            )
+                "<b>❌ AN KASA BUƊE USER</b>\n"
+                f"<b>User ID: <code>{html.escape(parts[1] if len(parts) > 1 else 'Unknown')}</code></b>\n\n"
+                f"<b>Dalili: {html.escape(str(error)[:2500])}</b>"
+            ),
+            parse_mode="HTML"
         )
 
 
@@ -2379,6 +2394,7 @@ def group_clip_get_video(message):
 # ============================================================
 # 50MB SIZE PROTECTION
 # DELETE FROM GROUP — DM USER — NO DATABASE
+# ALL BOT TEXT BOLD
 # ============================================================
 
 def group_clip_oversize_video(message):
@@ -2393,10 +2409,13 @@ def group_clip_oversize_video(message):
 
         bot.send_message(
             message.from_user.id,
-            "Wannan Video daka tura a group yayi girma\n"
-            "Bani da izinin sarrarfa video da ya wuce 50MB\n\n"
-            "Ka rage girmasa ka sake aiko minti kadan a Group din☺️\n\n"
-            "Mun gode"
+            (
+                "<b>Wannan Video daka tura a group yayi girma.</b>\n"
+                "<b>Bani da izinin sarrafa video da ya wuce 50MB.</b>\n\n"
+                "<b>Ka rage girmansa ka sake aiko shi a Group din☺️</b>\n\n"
+                "<b>Mun gode.</b>"
+            ),
+            parse_mode="HTML"
         )
 
     except Exception:
@@ -2524,6 +2543,7 @@ def group_clip_is_adult_caption(caption):
 
 # ============================================================
 # REPORT ADULT CONTENT
+# IDS COPYABLE — ALL REPORT TEXT BOLD
 # ============================================================
 
 def group_clip_send_report(message, video_info):
@@ -2531,20 +2551,21 @@ def group_clip_send_report(message, video_info):
     user = message.from_user
 
     report_text = (
-        "🚨 GROUP VIDEO CONTENT REPORT\n"
+        "<b>🚨 GROUP VIDEO CONTENT REPORT</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        f"Name: {group_clip_user_name(user)}\n"
-        f"Username: {group_clip_username(user)}\n"
-        f"User ID: {user.id}\n"
-        f"Group ID: {message.chat.id}\n"
-        f"Message ID: {message.message_id}\n"
-        f"File Size: {video_info['file_size']}\n"
-        f"File Name: {video_info['file_name'] or 'Unknown'}\n"
-        f"File Unique ID: {video_info['file_unique_id']}\n"
+        f"<b>Name: {html.escape(group_clip_user_name(user))}</b>\n"
+        f"<b>Username: {html.escape(group_clip_username(user))}</b>\n"
+        f"<b>User ID: <code>{user.id}</code></b>\n"
+        f"<b>Group ID: <code>{message.chat.id}</code></b>\n"
+        f"<b>Message ID: <code>{message.message_id}</code></b>\n"
+        f"<b>File Size: <code>{video_info['file_size']}</code></b>\n"
+        f"<b>File Name: {html.escape(str(video_info['file_name'] or 'Unknown'))}</b>\n"
+        f"<b>File Unique ID: <code>{html.escape(str(video_info['file_unique_id']))}</code></b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        f"Original Caption:\n{message.caption or 'No caption'}\n"
+        f"<b>Original Caption:</b>\n"
+        f"<b>{html.escape(message.caption or 'No caption')}</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        f"Report Time: {datetime.now(timezone.utc).isoformat()}"
+        f"<b>Report Time: {datetime.now(timezone.utc).isoformat()}</b>"
     )
 
     try:
@@ -2563,7 +2584,8 @@ def group_clip_send_report(message, video_info):
 
     bot.send_message(
         CLIP_REPORT_ID,
-        report_text[:3900]
+        report_text[:3900],
+        parse_mode="HTML"
     )
 
 
@@ -2615,19 +2637,34 @@ def group_clip_remove_and_restrict(message):
 
 # ============================================================
 # CUSTOMER DM ACKNOWLEDGEMENT
+# SEND ORIGINAL VIDEO WITH BOLD CAPTION
 # ============================================================
 
-def group_clip_send_acknowledgement(user_id):
+def group_clip_send_acknowledgement(message):
 
-    return bot.send_message(
-        user_id,
-        "MADALLA NA KARBI BIDIYONKA INA BINCIKAWA 😊\n\n"
-        "Dan allah ka jira idan na samu video din zan sanar da kai🤗"
+    user_id = message.from_user.id
+
+    caption = (
+        "<b>MADALLA NA KARBI BIDIYONKA INA BINCIKAWA 😊</b>\n\n"
+        "<b>Dan Allah ka jira idan na samu video din zan sanar da kai🤗</b>"
+    )
+
+    # COPY ORIGINAL VIDEO TO USER PRIVATE DM ONLY.
+    # ACKNOWLEDGEMENT TEXT IS THE VIDEO CAPTION.
+    # NO VIDEO COPY IS SENT BY THIS FUNCTION INTO THE GROUP.
+
+    return bot.copy_message(
+        chat_id=user_id,
+        from_chat_id=message.chat.id,
+        message_id=message.message_id,
+        caption=caption,
+        parse_mode="HTML"
     )
 
 
 # ============================================================
 # USER COULD NOT RECEIVE PRIVATE MESSAGE
+# ALL BOT TEXT BOLD
 # ============================================================
 
 def group_clip_private_message_failed(message):
@@ -2649,7 +2686,7 @@ def group_clip_private_message_failed(message):
 
     mention = (
         f'<a href="tg://user?id={user.id}">'
-        f'{group_clip_user_name(user)}</a>'
+        f'{html.escape(group_clip_user_name(user))}</a>'
     )
 
     try:
@@ -2657,11 +2694,11 @@ def group_clip_private_message_failed(message):
         bot.send_message(
             message.chat.id,
             (
-                f"Yi hakuri malam {mention}\n\n"
-                "Aikin ka bazai kammala ba\n"
-                "Da bukatar kaje Algaitabot ka taba &lt;start&gt;\n"
-                "Sannan kazo ka turo video din anan group\n\n"
-                "Mun gode🙏"
+                f"<b>Yi hakuri malam {mention}</b>\n\n"
+                "<b>Aikin ka bazai kammala ba.</b>\n"
+                "<b>Da bukatar kaje AlgaitaBot ka taba &lt;start&gt;.</b>\n"
+                "<b>Sannan kazo ka turo video din anan group.</b>\n\n"
+                "<b>Mun gode🙏</b>"
             ),
             parse_mode="HTML"
         )
@@ -2753,7 +2790,7 @@ def group_clip_create_task(message, video_info, ack_message):
             "first_name": user.first_name,
             "last_name": user.last_name,
             "user_id": user.id,
-            "ack_chat_id": ack_message.chat.id,
+            "ack_chat_id": user.id,
             "ack_message_id": ack_message.message_id,
             "bot1_delivered": False
         }
@@ -2881,18 +2918,18 @@ def group_clip_format_result(result):
     )
 
     return (
-        "✅ AN KAMMALA BINCIKE!\n\n"
-        f"🎬 Sunan Fim: {title}\n"
-        f"📅 Shekara: {year}\n"
-        f"⭐ Babban Jarumi: {actor}\n\n"
-        "Mun gode da amfani da AlgaitaBot 🙏"
+        "<b>✅ AN KAMMALA BINCIKE!</b>\n\n"
+        f"<b>🎬 Sunan Fim: {html.escape(str(title))}</b>\n"
+        f"<b>📅 Shekara: {html.escape(str(year))}</b>\n"
+        f"<b>⭐ Babban Jarumi: {html.escape(str(actor))}</b>\n\n"
+        "<b>Mun gode da amfani da AlgaitaBot 🙏</b>"
     )
 
 
 # ============================================================
 # CHECK ALL COMPLETED TASKS
 # RUNS EVERY 2 SECONDS
-# SEND ORIGINAL VIDEO WITH RESULT CAPTION
+# SEND ORIGINAL VIDEO WITH RESULT CAPTION TO USER DM ONLY
 # ============================================================
 
 def group_clip_check_completed_tasks():
@@ -2984,11 +3021,15 @@ def group_clip_check_completed_tasks():
                     result_json
                 )
 
+                # SEND THE ORIGINAL VIDEO WITH RESULT CAPTION
+                # TO USER PRIVATE DM ONLY.
+
                 bot.copy_message(
                     chat_id=user_id,
                     from_chat_id=source_chat_id,
                     message_id=source_message_id,
-                    caption=result_text
+                    caption=result_text,
+                    parse_mode="HTML"
                 )
 
                 update_conn = get_all_chat_db_conn()
@@ -3022,6 +3063,9 @@ def group_clip_check_completed_tasks():
                         update_cur.close()
 
                     update_conn.close()
+
+                # DELETE THE OLD ACKNOWLEDGEMENT VIDEO
+                # AFTER THE RESULT VIDEO HAS BEEN SENT.
 
                 try:
 
@@ -3164,13 +3208,14 @@ def bot1_group_video_receiver(message):
             return
 
         # ----------------------------------------------------
-        # 3. SEND PRIVATE ACKNOWLEDGEMENT FIRST
+        # 3. SEND ORIGINAL VIDEO TO USER PRIVATE DM
+        # WITH BOLD ACKNOWLEDGEMENT CAPTION
         # ----------------------------------------------------
 
         try:
 
             ack_message = group_clip_send_acknowledgement(
-                message.from_user.id
+                message
             )
 
         except Exception:
@@ -3219,13 +3264,14 @@ def bot1_group_video_receiver(message):
 
             try:
 
-                bot.edit_message_text(
-                    chat_id=ack_message.chat.id,
+                bot.edit_message_caption(
+                    chat_id=message.from_user.id,
                     message_id=ack_message.message_id,
-                    text=(
-                        "Yi hakuri, an samu matsala wajen ajiye bidiyonka.\n"
-                        "Don Allah ka sake gwadawa anjima."
-                    )
+                    caption=(
+                        "<b>Yi hakuri, an samu matsala wajen ajiye bidiyonka.</b>\n"
+                        "<b>Don Allah ka sake gwadawa anjima.</b>"
+                    ),
+                    parse_mode="HTML"
                 )
 
             except Exception:
@@ -3237,7 +3283,8 @@ def bot1_group_video_receiver(message):
             return
 
         # ----------------------------------------------------
-        # 5. SEND ORIGINAL VIDEO WITH RANDOM CAPTION REPLY
+        # 5. REPLY WITH RANDOM TEXT ONLY IN GROUP
+        # DO NOT COPY OR RESEND VIDEO INTO GROUP
         # ----------------------------------------------------
 
         try:
@@ -3249,7 +3296,7 @@ def bot1_group_video_receiver(message):
         except Exception:
 
             logging.exception(
-                "RANDOM GROUP VIDEO REPLY FAILED"
+                "RANDOM GROUP TEXT REPLY FAILED"
             )
 
         # ----------------------------------------------------
