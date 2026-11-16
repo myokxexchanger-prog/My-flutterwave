@@ -1999,18 +1999,17 @@ def telegram_webhook():
 
 
 
-
 # ============================================================
-# BOT VIDEO GROUP → PRIVATE DM TEST
-# ALL GROUPS — NO DATABASE — NO DOWNLOAD
+# BOT 1 — VIDEO GROUP RECEIVER TEST
+# ONLY THE SPECIFIED GROUP
+# ALL OTHER GROUPS AND PRIVATE CHATS: SILENT
 # ============================================================
-
-import logging
 
 @bot.message_handler(
     content_types=["video", "document"],
     func=lambda message: (
         message.chat.type in ("group", "supergroup")
+        and message.chat.id == int(CLIP_CHANNEL_VIDEO)
         and message.from_user is not None
         and not message.from_user.is_bot
     )
@@ -2018,9 +2017,8 @@ import logging
 def clip_video_group_test(message):
 
     try:
-        user_id = message.from_user.id
+        user_id = int(message.from_user.id)
 
-        # Accept actual video or video document only.
         video = message.video
 
         if not video and message.document:
@@ -2034,42 +2032,42 @@ def clip_video_group_test(message):
         if not video:
             return
 
-        # Send confirmation directly to the person.
         bot.send_message(
             user_id,
             "✅ AN KARƁI BIDIYON KA!\n\n"
-            "Bot ya samu bidiyon da ka turo a group.\n"
+            "Bot ya samu bidiyon da ka turo "
+            "a SHORT VIDEO ALGAITABOT group.\n"
             "Ana iya ci gaba da gwajin."
         )
 
         logging.info(
-            "VIDEO GROUP TEST SUCCESS: user=%s chat=%s message=%s file_unique_id=%s",
+            "CLIP GROUP TEST SUCCESS: "
+            "user=%s chat=%s message=%s unique_id=%s",
             user_id,
             message.chat.id,
             message.message_id,
             video.file_unique_id
         )
 
-    except Exception as error:
+    except Exception:
 
         logging.exception(
-            "VIDEO GROUP TEST FAILED"
+            "CLIP GROUP VIDEO TEST FAILED"
         )
 
         try:
             bot.reply_to(
                 message,
-                "❌ Ban iya turo maka DM ba. "
-                "Ka fara bot ta hanyar danna /start, "
+                "❌ Ka fara bot a private chat da /start, "
                 "sannan ka sake tura bidiyon."
             )
         except Exception:
             logging.exception(
-                "GROUP TEST ERROR REPLY FAILED"
+                "CLIP GROUP ERROR REPLY FAILED"
             )
 
 # ============================================================
-# END VIDEO GROUP TEST
+# END
 # ============================================================
 
 
