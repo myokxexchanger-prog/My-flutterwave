@@ -17,6 +17,10 @@ if not DATABASE_URL:
     
 def get_conn():
     try:
+
+
+# ============================================================
+# BOT 1 — GROUP
         c = psycopg2.connect(
             DATABASE_URL,
             connect_timeout=5,
@@ -2009,7 +2013,7 @@ def telegram_webhook():
 # CUSTOMER DM VERIFICATION
 # TASK CREATION
 # CONTINUOUS BOT 2 RESULT DELIVERY
-# FULL ADMIN DEBUG — EVERY STAGE
+# FULL ADMIN DEBUG — EVENT BASED
 # ============================================================
 
 import re
@@ -2045,6 +2049,10 @@ CLIP_RESULT_THREAD_STARTED = False
 _CLIP_RESULT_LOCK = threading.Lock()
 
 _CLIP_RESULT_DELIVERY_LOCK = threading.Lock()
+
+# Prevent repeated admin error notifications.
+_CLIP_DEBUG_ERROR_LOCK = threading.Lock()
+_CLIP_DEBUG_LAST_ERRORS = {}
 
 
 # ============================================================
@@ -2113,6 +2121,27 @@ def group_clip_debug_exception(stage, error, message=None):
     )
 
 
+def group_clip_debug_worker_error(stage, error):
+
+    key = f"{stage}:{type(error).__name__}:{str(error)[:200]}"
+    now = time.time()
+
+    with _CLIP_DEBUG_ERROR_LOCK:
+
+        previous = _CLIP_DEBUG_LAST_ERRORS.get(key, 0)
+
+        # Same repeated error: notify admin at most once per 5 minutes.
+        if now - previous < 300:
+            return
+
+        _CLIP_DEBUG_LAST_ERRORS[key] = now
+
+    group_clip_debug_exception(
+        stage,
+        error
+    )
+
+
 # ============================================================
 # GROUP AND USER FILTER
 # ============================================================
@@ -2122,60 +2151,28 @@ def group_clip_is_valid(message):
     if not message or not message.chat:
         return False
 
-    # Telegram update reached this handler's filter.
-    group_clip_debug(
-        "MESSAGE RECEIVED BY GROUP VIDEO FILTER",
-        message
-    )
-
+    # Other groups and private messages are ignored silently.
     if message.chat.id != CLIP_CHANNEL_VIDEO:
-
-        group_clip_debug(
-            "REJECTED — WRONG GROUP ID",
-            message,
-            details=f"Expected: {CLIP_CHANNEL_VIDEO}"
-        )
-
         return False
 
     if message.chat.type not in ("group", "supergroup"):
-
-        group_clip_debug(
-            "REJECTED — NOT A GROUP",
-            message
-        )
-
         return False
 
     if not message.from_user:
-
         group_clip_debug(
             "REJECTED — NO FROM_USER",
             message
         )
-
         return False
 
     if message.from_user.is_bot:
-
-        group_clip_debug(
-            "REJECTED — SENDER IS BOT",
-            message
-        )
-
         return False
 
     if int(message.from_user.id) == CLIP_ADMIN_ID:
-
-        group_clip_debug(
-            "REJECTED — ADMIN EXCLUDED",
-            message
-        )
-
         return False
 
     group_clip_debug(
-        "FILTER PASSED — CORRECT GROUP AND USER",
+        "MESSAGE RECEIVED BY CORRECT GROUP FILTER",
         message
     )
 
@@ -2451,8 +2448,7 @@ def group_clip_is_adult_caption(caption):
             return True
 
     group_clip_debug(
-        "CAPTION PASSED — NO ADULT KEYWORD",
-        details=f"Normalized caption: {normalized[:300]}"
+        "CAPTION PASSED — NO ADULT KEYWORD"
     )
 
     return False
@@ -2714,8 +2710,6 @@ def group_clip_create_task(message, video_info, ack_message):
             message
         )
 
-        # CHECK DUPLICATE TELEGRAM MESSAGE
-
         cur.execute(
             """
             SELECT id
@@ -2730,11 +2724,6 @@ def group_clip_create_task(message, video_info, ack_message):
             )
         )
 
-        group_clip_debug(
-            "DATABASE DUPLICATE CHECK COMPLETED",
-            message
-        )
-
         if cur.fetchone():
 
             conn.rollback()
@@ -2746,7 +2735,10 @@ def group_clip_create_task(message, video_info, ack_message):
 
             return None
 
-        # SAVE CUSTOMER
+        group_clip_debug(
+            "DATABASE DUPLICATE CHECK COMPLETED",
+            message
+        )
 
         group_clip_debug(
             "CUSTOMER DATABASE INSERT STARTED",
@@ -2788,8 +2780,6 @@ def group_clip_create_task(message, video_info, ack_message):
             "CUSTOMER DATABASE INSERT SUCCESSFUL",
             message
         )
-
-        # CREATE TASK
 
         payload = {
             "source": "telegram_group",
@@ -2848,8 +2838,6 @@ def group_clip_create_task(message, video_info, ack_message):
             message,
             details=f"Task ID: {task_id}"
         )
-
-        # SAVE INCOMING VIDEO MESSAGE
 
         group_clip_debug(
             "CHAT_MESSAGES INSERT STARTED",
@@ -2982,6 +2970,7 @@ def group_clip_format_result(result):
 # ============================================================
 # CHECK ALL COMPLETED TASKS
 # RUNS EVERY 2 SECONDS
+# NO ADMIN MESSAGE WHEN DATABASE IS EMPTY
 # ============================================================
 
 def group_clip_check_completed_tasks():
@@ -2992,10 +2981,6 @@ def group_clip_check_completed_tasks():
         return
 
     try:
-
-        group_clip_debug(
-            "RESULT CHECKER — DATABASE QUERY STARTING"
-        )
 
         conn = get_all_chat_db_conn()
         cur = None
@@ -3025,17 +3010,22 @@ def group_clip_check_completed_tasks():
 
             rows = cur.fetchall()
 
-            group_clip_debug(
-                "RESULT CHECKER — DATABASE QUERY SUCCESSFUL",
-                details=f"Completed tasks awaiting delivery: {len(rows)}"
-            )
-
         finally:
 
             if cur:
                 cur.close()
 
             conn.close()
+
+        # Empty database result is normal.
+        # Do not send admin messages for every polling cycle.
+        if not rows:
+            return
+
+        group_clip_debug(
+            "COMPLETED TASKS FOUND — RESULT DELIVERY STARTING",
+            details=f"Tasks awaiting delivery: {len(rows)}"
+        )
 
         for task_id, payload, result_json in rows:
 
@@ -3164,10 +3154,6 @@ def group_clip_result_worker():
         "GROUP CLIP RESULT WORKER STARTED — CHECKING EVERY 2 SECONDS"
     )
 
-    group_clip_debug(
-        "RESULT WORKER THREAD STARTED"
-    )
-
     while True:
 
         try:
@@ -3176,8 +3162,9 @@ def group_clip_result_worker():
 
         except Exception as error:
 
-            group_clip_debug_exception(
-                "RESULT WORKER LOOP ERROR — WILL RETRY",
+            # Repeated identical DB errors are rate-limited.
+            group_clip_debug_worker_error(
+                "RESULT WORKER DATABASE / LOOP ERROR",
                 error
             )
 
@@ -3197,9 +3184,6 @@ def group_clip_start_result_worker():
     with _CLIP_RESULT_LOCK:
 
         if CLIP_RESULT_THREAD_STARTED:
-            group_clip_debug(
-                "RESULT WORKER ALREADY STARTED"
-            )
             return
 
         thread = threading.Thread(
@@ -3258,6 +3242,15 @@ def bot1_group_video_receiver(message):
                 f"Unique ID: {video_info['file_unique_id']}"
             )
         )
+
+        if video_info["file_size"] <= 0:
+
+            group_clip_debug(
+                "VIDEO REJECTED — FILE SIZE UNKNOWN",
+                message
+            )
+
+            return
 
         # ----------------------------------------------------
         # 1. CHECK VIDEO SIZE FIRST
@@ -3448,7 +3441,9 @@ group_clip_debug(
         f"Admin excluded: {CLIP_ADMIN_ID}\n"
         "Video handler: REGISTERED\n"
         "Photo handler: NOT REGISTERED HERE\n"
-        "Result worker: STARTED"
+        "Result worker: STARTED\n"
+        "Database polling: EVERY 2 SECONDS, SILENT WHEN EMPTY\n"
+        "Admin debug: EVENT BASED"
     )
 )
 
@@ -3457,7 +3452,7 @@ group_clip_debug(
 # END BOT 1 CREAT TASK GROUP VIDEO SYSTEM
 # ============================================================
 
-
+ 
 # ============================================================
 # BOT 1 — VIDEO RECEIVER SYSTEM
 # PRIVATE DM ONLY
