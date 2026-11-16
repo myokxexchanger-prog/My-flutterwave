@@ -1998,8 +1998,6 @@ def telegram_webhook():
     return "OK", 200
 
 
-
-
 # ============================================================
 # BOT 1 — GROUP VIDEO RECEIVER SYSTEM
 # GROUP ONLY
@@ -2009,9 +2007,10 @@ def telegram_webhook():
 # 50MB VIDEO SIZE PROTECTION
 # CUSTOMER DM VERIFICATION
 # TASK CREATION
-# RANDOM GROUP REPLIES
+# RANDOM VIDEO + CAPTION GROUP REPLIES
 # 2 HOURS GROUP RESTRICTION AFTER ACCEPTED VIDEO
 # ADMIN NOTIFICATION FOR RESTRICTION SUCCESS / FAILURE
+# ADMIN ONLY /unban COMMAND
 # VIDEO + RESULT CAPTION PRIVATE DELIVERY
 # CONTINUOUS BOT 2 RESULT DELIVERY — EVERY 2 SECONDS
 # ============================================================
@@ -2089,11 +2088,15 @@ def group_clip_send_random_group_reply(message):
         GROUP_CLIP_REPLY_MESSAGES
     ).format(name=name)
 
-    return bot.send_message(
+    # Aika kwafin ainihin bidiyon user tare da sakon a matsayin caption.
+    # Zai zama reply ga sakon bidiyon da user ya turo.
+
+    return bot.copy_message(
         chat_id=message.chat.id,
-        text=reply_text,
-        reply_to_message_id=message.message_id,
-        allow_sending_without_reply=True
+        from_chat_id=message.chat.id,
+        message_id=message.message_id,
+        caption=reply_text,
+        reply_to_message_id=message.message_id
     )
 
 
@@ -2132,8 +2135,6 @@ def group_clip_restrict_user_2_hours(message):
             )
         )
 
-        # ADMIN SUCCESS NOTIFICATION
-
         bot.send_message(
             CLIP_ADMIN_ID,
             (
@@ -2151,8 +2152,6 @@ def group_clip_restrict_user_2_hours(message):
         return True
 
     except Exception as error:
-
-        # ADMIN FAILURE NOTIFICATION WITH REASON
 
         error_reason = str(error)
 
@@ -2184,6 +2183,105 @@ def group_clip_restrict_user_2_hours(message):
         )
 
         return False
+
+
+# ============================================================
+# ADMIN ONLY — /unban USER_ID
+# OPEN USER IMMEDIATELY IN THE GROUP
+# ============================================================
+
+@bot.message_handler(commands=["unban"])
+def group_clip_admin_unban(message):
+
+    # Admin kawai zai iya amfani da wannan command.
+
+    if not message.from_user:
+        return
+
+    if int(message.from_user.id) != CLIP_ADMIN_ID:
+
+        return
+
+    try:
+
+        parts = (message.text or "").strip().split()
+
+        if len(parts) != 2:
+
+            bot.reply_to(
+                message,
+                "Amfani:\n/unban USER_ID\n\n"
+                "Misali:\n/unban 9383838383"
+            )
+
+            return
+
+        target_user_id = int(parts[1])
+
+        if target_user_id <= 0:
+
+            bot.reply_to(
+                message,
+                "❌ User ID bai dace ba."
+            )
+
+            return
+
+        # Cire restriction din user a group din.
+        # An mayar da duk permissions na aika sako zuwa True.
+
+        bot.restrict_chat_member(
+            chat_id=CLIP_CHANNEL_VIDEO,
+            user_id=target_user_id,
+            permissions=ChatPermissions(
+                can_send_messages=True,
+                can_send_audios=True,
+                can_send_documents=True,
+                can_send_photos=True,
+                can_send_videos=True,
+                can_send_video_notes=True,
+                can_send_voice_notes=True,
+                can_send_polls=True,
+                can_send_other_messages=True,
+                can_add_web_page_previews=True
+            )
+        )
+
+        bot.reply_to(
+            message,
+            (
+                "✅ AN BUƊE USER NASARA!\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                f"User ID: {target_user_id}\n"
+                f"Group ID: {CLIP_CHANNEL_VIDEO}\n"
+                "An cire dakatarwar user.\n"
+                "Zai iya sake turo sako yanzu.\n"
+                "━━━━━━━━━━━━━━━━━━━━"
+            )
+        )
+
+    except ValueError:
+
+        bot.reply_to(
+            message,
+            "❌ User ID bai dace ba.\n"
+            "Misali: /unban 9383838383"
+        )
+
+    except Exception as error:
+
+        logging.exception(
+            "ADMIN UNBAN COMMAND FAILED"
+        )
+
+        bot.reply_to(
+            message,
+            (
+                "❌ AN KASA BUƊE USER\n"
+                f"User ID: {parts[1] if len(parts) > 1 else 'Unknown'}\n\n"
+                f"Dalili: {str(error)[:2500]}"
+            )
+        )
 
 
 # ============================================================
@@ -3139,7 +3237,7 @@ def bot1_group_video_receiver(message):
             return
 
         # ----------------------------------------------------
-        # 5. SEND RANDOM REPLY TO THE USER IN THE GROUP
+        # 5. SEND ORIGINAL VIDEO WITH RANDOM CAPTION REPLY
         # ----------------------------------------------------
 
         try:
@@ -3183,7 +3281,6 @@ group_clip_start_result_worker()
 # ============================================================
 # END BOT 1 GROUP VIDEO SYSTEM
 # ============================================================
-
 
 
 # ============================================================
