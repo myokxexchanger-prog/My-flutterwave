@@ -4010,6 +4010,170 @@ def bot1_photo_receiver(message):
 
 
 
+# ============================================================
+# ADMIN ONLY — /clean
+# CLEAN GROUP VIDEO IDENTIFICATION SYSTEM DATA
+# DELETE TASKS + RELATED MESSAGES
+# CLEAN ORPHAN CUSTOMERS
+# ============================================================
+
+@bot.message_handler(commands=["clean"])
+def group_clip_admin_clean_database(message):
+
+    if not message.from_user:
+        return
+
+    # ADMIN ONLY
+    if int(message.from_user.id) != CLIP_ADMIN_ID:
+        return
+
+    conn = None
+    cur = None
+
+    try:
+
+        conn = get_all_chat_db_conn()
+        cur = conn.cursor()
+
+        # ----------------------------------------------------
+        # 1. DELETE CHAT MESSAGES LINKED TO THIS SYSTEM TASKS
+        # ----------------------------------------------------
+
+        cur.execute(
+            """
+            DELETE FROM chat_messages
+            WHERE task_id IN (
+                SELECT task_id
+                FROM tasks
+                WHERE task_type = 'movie_identification'
+            )
+            """
+        )
+
+        deleted_task_messages = cur.rowcount
+
+        # ----------------------------------------------------
+        # 2. DELETE VIDEO MESSAGES FROM THE TARGET GROUP
+        # ----------------------------------------------------
+
+        cur.execute(
+            """
+            DELETE FROM chat_messages
+            WHERE telegram_chat_id = %s
+              AND direction = 'incoming'
+              AND message_type = 'video'
+            """,
+            (CLIP_CHANNEL_VIDEO,)
+        )
+
+        deleted_group_messages = cur.rowcount
+
+        # ----------------------------------------------------
+        # 3. DELETE ALL MOVIE IDENTIFICATION TASKS
+        # PENDING, PROCESSING, COMPLETED, FAILED, ETC.
+        # ----------------------------------------------------
+
+        cur.execute(
+            """
+            DELETE FROM tasks
+            WHERE task_type = 'movie_identification'
+            """
+        )
+
+        deleted_tasks = cur.rowcount
+
+        # ----------------------------------------------------
+        # 4. DELETE ORPHAN CUSTOMER RECORDS
+        # ONLY CUSTOMERS WITH NO OTHER TASKS OR MESSAGES
+        # ----------------------------------------------------
+
+        cur.execute(
+            """
+            DELETE FROM customers c
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM tasks t
+                WHERE t.user_id = c.user_id
+            )
+            AND NOT EXISTS (
+                SELECT 1
+                FROM chat_messages m
+                WHERE m.user_id = c.user_id
+            )
+            """
+        )
+
+        deleted_customers = cur.rowcount
+
+        # ----------------------------------------------------
+        # 5. COMMIT ALL CHANGES
+        # ----------------------------------------------------
+
+        conn.commit()
+
+        # ----------------------------------------------------
+        # 6. ADMIN SUCCESS MESSAGE
+        # ----------------------------------------------------
+
+        bot.send_message(
+            message.chat.id,
+            (
+                "<b>✅ DATABASE CLEANING YA KAMMALA!</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"<b>Movie Tasks: {deleted_tasks}</b>\n"
+                f"<b>Task Messages: {deleted_task_messages}</b>\n"
+                f"<b>Group Video Messages: {deleted_group_messages}</b>\n"
+                f"<b>Orphan Customers: {deleted_customers}</b>\n\n"
+                "<b>An share bayanan Video Identification System.</b>\n"
+                "<b>Yanzu za ka iya farawa daga farko.</b>\n\n"
+                "━━━━━━━━━━━━━━━━━━━━"
+            ),
+            parse_mode="HTML"
+        )
+
+        logging.warning(
+            "ADMIN DATABASE CLEAN: tasks=%s task_messages=%s "
+            "group_messages=%s customers=%s admin=%s",
+            deleted_tasks,
+            deleted_task_messages,
+            deleted_group_messages,
+            deleted_customers,
+            message.from_user.id
+        )
+
+    except Exception as error:
+
+        if conn:
+            conn.rollback()
+
+        logging.exception(
+            "GROUP CLIP DATABASE CLEAN FAILED"
+        )
+
+        bot.send_message(
+            message.chat.id,
+            (
+                "<b>❌ AN KASA SHARE DATABASE</b>\n\n"
+                f"<b>Dalili: {html.escape(str(error)[:2000])}</b>\n"
+                "<b>Ba a yi COMMIT ba; an yi rollback.</b>"
+            ),
+            parse_mode="HTML"
+        )
+
+    finally:
+
+        if cur:
+            cur.close()
+
+        if conn:
+            conn.close()
+
+# ============================================================
+# END /clean COMMAND
+# ============================================================
+
+
+
 
 import time
 import re
