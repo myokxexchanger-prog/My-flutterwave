@@ -2010,6 +2010,8 @@ def telegram_webhook():
 # CUSTOMER DM VERIFICATION
 # TASK CREATION
 # RANDOM GROUP REPLIES
+# 2 HOURS GROUP RESTRICTION AFTER ACCEPTED VIDEO
+# ADMIN NOTIFICATION FOR RESTRICTION SUCCESS / FAILURE
 # VIDEO + RESULT CAPTION PRIVATE DELIVERY
 # CONTINUOUS BOT 2 RESULT DELIVERY — EVERY 2 SECONDS
 # ============================================================
@@ -2039,6 +2041,8 @@ CLIP_REPORT_ID = AD_REPORT
 CLIP_MAX_SIZE = 50 * 1024 * 1024
 
 CLIP_BAN_SECONDS = 24 * 60 * 60
+
+CLIP_USER_RESTRICTION_SECONDS = 2 * 60 * 60
 
 CLIP_RESULT_CHECK_INTERVAL = 2
 
@@ -2094,6 +2098,95 @@ def group_clip_send_random_group_reply(message):
 
 
 # ============================================================
+# RESTRICT USER FOR 2 HOURS AFTER ACCEPTED VIDEO
+# ADMIN NOTIFICATION ON SUCCESS OR FAILURE
+# ============================================================
+
+def group_clip_restrict_user_2_hours(message):
+
+    user = message.from_user
+
+    user_name = group_clip_user_name(user)
+
+    user_id = user.id
+
+    group_id = message.chat.id
+
+    try:
+
+        bot.restrict_chat_member(
+            chat_id=group_id,
+            user_id=user_id,
+            until_date=int(time.time()) + CLIP_USER_RESTRICTION_SECONDS,
+            permissions=ChatPermissions(
+                can_send_messages=False,
+                can_send_audios=False,
+                can_send_documents=False,
+                can_send_photos=False,
+                can_send_videos=False,
+                can_send_video_notes=False,
+                can_send_voice_notes=False,
+                can_send_polls=False,
+                can_send_other_messages=False,
+                can_add_web_page_previews=False
+            )
+        )
+
+        # ADMIN SUCCESS NOTIFICATION
+
+        bot.send_message(
+            CLIP_ADMIN_ID,
+            (
+                "✅ AN DAKATAR DA USER NA TSAYIN 2 HOURS\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                f"User : {user_name}\n"
+                f"User id: {user_id}\n"
+                "An dakatar 2h kafin sake turo sako\n"
+                f"Group ID: {group_id}\n"
+                f"Message ID: {message.message_id}\n"
+                "━━━━━━━━━━━━━━━━━━━━"
+            )
+        )
+
+        return True
+
+    except Exception as error:
+
+        # ADMIN FAILURE NOTIFICATION WITH REASON
+
+        error_reason = str(error)
+
+        try:
+
+            bot.send_message(
+                CLIP_ADMIN_ID,
+                (
+                    "❌ AN KASA DAKATAR DA USER\n"
+                    "━━━━━━━━━━━━━━━━━━━━\n"
+                    f"User : {user_name}\n"
+                    f"User id: {user_id}\n"
+                    f"Group ID: {group_id}\n"
+                    f"Message ID: {message.message_id}\n"
+                    "An kasa dakatar da user\n\n"
+                    f"Dalili: {error_reason[:2500]}\n"
+                    "━━━━━━━━━━━━━━━━━━━━"
+                )
+            )
+
+        except Exception:
+
+            logging.exception(
+                "FAILED TO NOTIFY ADMIN ABOUT RESTRICTION FAILURE"
+            )
+
+        logging.exception(
+            "GROUP USER 2-HOUR RESTRICTION FAILED"
+        )
+
+        return False
+
+
+# ============================================================
 # GROUP AND USER FILTER
 # ============================================================
 
@@ -2102,7 +2195,6 @@ def group_clip_is_valid(message):
     if not message or not message.chat:
         return False
 
-    # Other groups and private messages are ignored silently.
     if message.chat.id != CLIP_CHANNEL_VIDEO:
         return False
 
@@ -2239,7 +2331,6 @@ def group_clip_oversize_video(message):
 
 GROUP_CLIP_ADULT_KEYWORDS = (
 
-    # English
     "porn",
     "porno",
     "pornography",
@@ -2266,7 +2357,6 @@ GROUP_CLIP_ADULT_KEYWORDS = (
     "orgasm",
     "masturbation",
 
-    # Hausa
     "batsa",
     "tsiraici",
     "iskanci",
@@ -2500,8 +2590,6 @@ def group_clip_create_task(message, video_info, ack_message):
 
         cur = conn.cursor()
 
-        # CHECK DUPLICATE TELEGRAM MESSAGE
-
         cur.execute(
             """
             SELECT id
@@ -2520,8 +2608,6 @@ def group_clip_create_task(message, video_info, ack_message):
 
             conn.rollback()
             return None
-
-        # SAVE CUSTOMER
 
         cur.execute(
             """
@@ -2553,8 +2639,6 @@ def group_clip_create_task(message, video_info, ack_message):
                 user.last_name
             )
         )
-
-        # CREATE TASK
 
         payload = {
             "source": "telegram_group",
@@ -2601,8 +2685,6 @@ def group_clip_create_task(message, video_info, ack_message):
         )
 
         task_id = cur.fetchone()[0]
-
-        # SAVE INCOMING VIDEO MESSAGE
 
         cur.execute(
             """
@@ -2784,8 +2866,6 @@ def group_clip_check_completed_tasks():
                 if not result_json:
                     continue
 
-                # ORIGINAL VIDEO LOCATION IN THE GROUP
-
                 source_chat_id = int(
                     payload["telegram_chat_id"]
                 )
@@ -2793,8 +2873,6 @@ def group_clip_check_completed_tasks():
                 source_message_id = int(
                     payload["telegram_message_id"]
                 )
-
-                # USER PRIVATE CHAT
 
                 user_id = int(
                     payload["ack_chat_id"]
@@ -2808,17 +2886,12 @@ def group_clip_check_completed_tasks():
                     result_json
                 )
 
-                # COPY THE EXACT ORIGINAL VIDEO TO USER DM.
-                # THE RESULT IS THE VIDEO CAPTION.
-
                 bot.copy_message(
                     chat_id=user_id,
                     from_chat_id=source_chat_id,
                     message_id=source_message_id,
                     caption=result_text
                 )
-
-                # MARK AS DELIVERED ONLY AFTER VIDEO COPY SUCCEEDS.
 
                 update_conn = get_all_chat_db_conn()
                 update_cur = None
@@ -2852,9 +2925,6 @@ def group_clip_check_completed_tasks():
 
                     update_conn.close()
 
-                # REMOVE THE OLD TEXT ACKNOWLEDGEMENT.
-                # THE USER NOW HAS THE VIDEO WITH ITS RESULT CAPTION.
-
                 try:
 
                     bot.delete_message(
@@ -2874,9 +2944,6 @@ def group_clip_check_completed_tasks():
                 )
 
             except Exception:
-
-                # Keep bot1_delivered false.
-                # The checker will retry this task next time.
 
                 logging.exception(
                     "GROUP VIDEO RESULT DELIVERY FAILED: %s",
@@ -3087,6 +3154,14 @@ def bot1_group_video_receiver(message):
                 "RANDOM GROUP VIDEO REPLY FAILED"
             )
 
+        # ----------------------------------------------------
+        # 6. RESTRICT USER FOR 2 HOURS
+        # ADMIN WILL BE NOTIFIED OF SUCCESS OR FAILURE
+        # ----------------------------------------------------
+
+        group_clip_restrict_user_2_hours(
+            message
+        )
 
     except Exception:
 
@@ -3106,7 +3181,7 @@ group_clip_start_result_worker()
 
 
 # ============================================================
-# END BOT 1 CREAT TASK GROUP VIDEO SYSTEM
+# END BOT 1 GROUP VIDEO SYSTEM
 # ============================================================
 
 
