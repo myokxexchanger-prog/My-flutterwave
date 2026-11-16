@@ -2000,79 +2000,6 @@ def telegram_webhook():
 
 
 # ============================================================
-# BOT 1 — VIDEO GROUP RECEIVER TEST
-# ONLY THE SPECIFIED GROUP
-# ALL OTHER GROUPS AND PRIVATE CHATS: SILENT
-# ============================================================
-
-@bot.message_handler(
-    content_types=["video", "document"],
-    func=lambda message: (
-        message.chat.type in ("group", "supergroup")
-        and message.chat.id == int(CLIP_CHANNEL_VIDEO)
-        and message.from_user is not None
-        and not message.from_user.is_bot
-    )
-)
-def clip_video_group_test(message):
-
-    try:
-        user_id = int(message.from_user.id)
-
-        video = message.video
-
-        if not video and message.document:
-            mime = (
-                message.document.mime_type or ""
-            ).lower()
-
-            if mime.startswith("video/"):
-                video = message.document
-
-        if not video:
-            return
-
-        bot.send_message(
-            user_id,
-            "✅ AN KARƁI BIDIYON KA!\n\n"
-            "Bot ya samu bidiyon da ka turo "
-            "a SHORT VIDEO ALGAITABOT group.\n"
-            "Ana iya ci gaba da gwajin."
-        )
-
-        logging.info(
-            "CLIP GROUP TEST SUCCESS: "
-            "user=%s chat=%s message=%s unique_id=%s",
-            user_id,
-            message.chat.id,
-            message.message_id,
-            video.file_unique_id
-        )
-
-    except Exception:
-
-        logging.exception(
-            "CLIP GROUP VIDEO TEST FAILED"
-        )
-
-        try:
-            bot.reply_to(
-                message,
-                "❌ Ka fara bot a private chat da /start, "
-                "sannan ka sake tura bidiyon."
-            )
-        except Exception:
-            logging.exception(
-                "CLIP GROUP ERROR REPLY FAILED"
-            )
-
-# ============================================================
-# END
-# ============================================================
-
-
-
-# ============================================================
 # BOT 1 — GROUP VIDEO RECEIVER SYSTEM
 # GROUP ONLY
 # USER ONLY — ADMIN EXCLUDED
@@ -2082,6 +2009,7 @@ def clip_video_group_test(message):
 # CUSTOMER DM VERIFICATION
 # TASK CREATION
 # CONTINUOUS BOT 2 RESULT DELIVERY
+# FULL ADMIN DEBUG — EVERY STAGE
 # ============================================================
 
 import re
@@ -2090,6 +2018,7 @@ import time
 import logging
 import threading
 import unicodedata
+import traceback
 
 from datetime import datetime, timezone
 from telebot.types import ChatPermissions
@@ -2109,7 +2038,6 @@ CLIP_MAX_SIZE = 50 * 1024 * 1024
 
 CLIP_BAN_SECONDS = 24 * 60 * 60
 
-# Check database every 2 seconds forever.
 CLIP_RESULT_CHECK_INTERVAL = 2
 
 CLIP_RESULT_THREAD_STARTED = False
@@ -2117,6 +2045,72 @@ CLIP_RESULT_THREAD_STARTED = False
 _CLIP_RESULT_LOCK = threading.Lock()
 
 _CLIP_RESULT_DELIVERY_LOCK = threading.Lock()
+
+
+# ============================================================
+# ADMIN DEBUG SYSTEM
+# ============================================================
+
+def group_clip_debug(stage, message=None, details=None, error=None):
+
+    try:
+
+        lines = [
+            "🔎 BOT 1 — GROUP VIDEO DEBUG",
+            "━━━━━━━━━━━━━━━━━━━━",
+            f"📍 Stage: {stage}",
+            f"🕒 Time: {datetime.now(timezone.utc).isoformat()}"
+        ]
+
+        if message:
+
+            lines.extend([
+                f"👤 User ID: {getattr(message.from_user, 'id', 'Unknown')}",
+                f"👤 User: {getattr(message.from_user, 'first_name', 'Unknown')}",
+                f"💬 Chat ID: {getattr(message.chat, 'id', 'Unknown')}",
+                f"💬 Chat type: {getattr(message.chat, 'type', 'Unknown')}",
+                f"📩 Message ID: {getattr(message, 'message_id', 'Unknown')}",
+                f"🎬 Has video: {bool(getattr(message, 'video', None))}",
+                f"📁 Has document: {bool(getattr(message, 'document', None))}",
+                f"📝 Caption: {(getattr(message, 'caption', None) or 'No caption')[:300]}"
+            ])
+
+        if details:
+            lines.append(f"ℹ️ Details: {str(details)[:1800]}")
+
+        if error:
+            lines.append(f"❌ ERROR: {str(error)[:1800]}")
+
+        lines.append("━━━━━━━━━━━━━━━━━━━━")
+
+        bot.send_message(
+            CLIP_ADMIN_ID,
+            "\n".join(lines)
+        )
+
+    except Exception:
+
+        logging.exception(
+            "GROUP CLIP ADMIN DEBUG SEND FAILED"
+        )
+
+
+def group_clip_debug_exception(stage, error, message=None):
+
+    logging.exception(
+        "GROUP CLIP DEBUG EXCEPTION: %s",
+        stage
+    )
+
+    group_clip_debug(
+        stage,
+        message=message,
+        error=(
+            str(error)
+            + "\n"
+            + traceback.format_exc()[-1200:]
+        )
+    )
 
 
 # ============================================================
@@ -2128,20 +2122,62 @@ def group_clip_is_valid(message):
     if not message or not message.chat:
         return False
 
+    # Telegram update reached this handler's filter.
+    group_clip_debug(
+        "MESSAGE RECEIVED BY GROUP VIDEO FILTER",
+        message
+    )
+
     if message.chat.id != CLIP_CHANNEL_VIDEO:
+
+        group_clip_debug(
+            "REJECTED — WRONG GROUP ID",
+            message,
+            details=f"Expected: {CLIP_CHANNEL_VIDEO}"
+        )
+
         return False
 
     if message.chat.type not in ("group", "supergroup"):
+
+        group_clip_debug(
+            "REJECTED — NOT A GROUP",
+            message
+        )
+
         return False
 
     if not message.from_user:
+
+        group_clip_debug(
+            "REJECTED — NO FROM_USER",
+            message
+        )
+
         return False
 
     if message.from_user.is_bot:
+
+        group_clip_debug(
+            "REJECTED — SENDER IS BOT",
+            message
+        )
+
         return False
 
     if int(message.from_user.id) == CLIP_ADMIN_ID:
+
+        group_clip_debug(
+            "REJECTED — ADMIN EXCLUDED",
+            message
+        )
+
         return False
+
+    group_clip_debug(
+        "FILTER PASSED — CORRECT GROUP AND USER",
+        message
+    )
 
     return True
 
@@ -2177,11 +2213,16 @@ def group_clip_username(user):
 
 def group_clip_get_video(message):
 
+    group_clip_debug(
+        "CHECKING VIDEO INFORMATION",
+        message
+    )
+
     if message.video:
 
         item = message.video
 
-        return {
+        info = {
             "file_id": item.file_id,
             "file_unique_id": item.file_unique_id,
             "file_size": int(item.file_size or 0),
@@ -2190,6 +2231,14 @@ def group_clip_get_video(message):
             "file_type": "video"
         }
 
+        group_clip_debug(
+            "VIDEO OBJECT DETECTED",
+            message,
+            details=f"Size: {info['file_size']} | Unique ID: {info['file_unique_id']}"
+        )
+
+        return info
+
     if message.document:
 
         item = message.document
@@ -2197,9 +2246,16 @@ def group_clip_get_video(message):
         mime = (item.mime_type or "").lower()
 
         if not mime.startswith("video/"):
+
+            group_clip_debug(
+                "DOCUMENT REJECTED — NOT VIDEO",
+                message,
+                details=f"MIME: {mime}"
+            )
+
             return None
 
-        return {
+        info = {
             "file_id": item.file_id,
             "file_unique_id": item.file_unique_id,
             "file_size": int(item.file_size or 0),
@@ -2207,6 +2263,19 @@ def group_clip_get_video(message):
             "mime_type": item.mime_type,
             "file_type": "document_video"
         }
+
+        group_clip_debug(
+            "VIDEO DOCUMENT DETECTED",
+            message,
+            details=f"MIME: {mime} | Size: {info['file_size']}"
+        )
+
+        return info
+
+    group_clip_debug(
+        "NO VIDEO FOUND IN MESSAGE",
+        message
+    )
 
     return None
 
@@ -2218,8 +2287,10 @@ def group_clip_get_video(message):
 
 def group_clip_oversize_video(message):
 
-    # Copy the video BEFORE deleting the group message.
-    # If DM is unavailable, still delete the group message.
+    group_clip_debug(
+        "VIDEO EXCEEDS 50MB — OVERSIZE PROCESS STARTED",
+        message
+    )
 
     try:
 
@@ -2237,10 +2308,17 @@ def group_clip_oversize_video(message):
             "Mun gode"
         )
 
-    except Exception:
+        group_clip_debug(
+            "OVERSIZE VIDEO DM SENT",
+            message
+        )
 
-        logging.info(
-            "OVERSIZE VIDEO: USER DM UNAVAILABLE — SKIPPED"
+    except Exception as error:
+
+        group_clip_debug_exception(
+            "OVERSIZE VIDEO DM FAILED",
+            error,
+            message
         )
 
     finally:
@@ -2252,10 +2330,17 @@ def group_clip_oversize_video(message):
                 message_id=message.message_id
             )
 
-        except Exception:
+            group_clip_debug(
+                "OVERSIZE VIDEO DELETED FROM GROUP",
+                message
+            )
 
-            logging.exception(
-                "OVERSIZE VIDEO GROUP DELETE FAILED"
+        except Exception as error:
+
+            group_clip_debug_exception(
+                "OVERSIZE VIDEO GROUP DELETE FAILED",
+                error,
+                message
             )
 
     return False
@@ -2357,7 +2442,18 @@ def group_clip_is_adult_caption(caption):
         )
 
         if keyword_normalized and keyword_normalized in normalized:
+
+            group_clip_debug(
+                "ADULT CAPTION KEYWORD MATCHED",
+                details=f"Matched keyword: {keyword}"
+            )
+
             return True
+
+    group_clip_debug(
+        "CAPTION PASSED — NO ADULT KEYWORD",
+        details=f"Normalized caption: {normalized[:300]}"
+    )
 
     return False
 
@@ -2369,6 +2465,12 @@ def group_clip_is_adult_caption(caption):
 def group_clip_send_report(message, video_info):
 
     user = message.from_user
+
+    group_clip_debug(
+        "ADULT REPORT STARTED",
+        message,
+        details=f"Report destination: {CLIP_REPORT_ID}"
+    )
 
     report_text = (
         "🚨 GROUP VIDEO CONTENT REPORT\n"
@@ -2395,16 +2497,40 @@ def group_clip_send_report(message, video_info):
             message_id=message.message_id
         )
 
-    except Exception:
-
-        logging.exception(
-            "GROUP CLIP REPORT VIDEO COPY FAILED"
+        group_clip_debug(
+            "ADULT VIDEO COPIED TO REPORT DESTINATION",
+            message
         )
 
-    bot.send_message(
-        CLIP_REPORT_ID,
-        report_text[:3900]
-    )
+    except Exception as error:
+
+        group_clip_debug_exception(
+            "GROUP CLIP REPORT VIDEO COPY FAILED",
+            error,
+            message
+        )
+
+    try:
+
+        bot.send_message(
+            CLIP_REPORT_ID,
+            report_text[:3900]
+        )
+
+        group_clip_debug(
+            "ADULT REPORT TEXT SENT SUCCESSFULLY",
+            message
+        )
+
+    except Exception as error:
+
+        group_clip_debug_exception(
+            "ADULT REPORT TEXT SEND FAILED",
+            error,
+            message
+        )
+
+        raise
 
 
 # ============================================================
@@ -2420,10 +2546,17 @@ def group_clip_remove_and_restrict(message):
             message_id=message.message_id
         )
 
-    except Exception:
+        group_clip_debug(
+            "ADULT MESSAGE DELETED FROM GROUP",
+            message
+        )
 
-        logging.exception(
-            "GROUP CLIP DELETE FAILED"
+    except Exception as error:
+
+        group_clip_debug_exception(
+            "GROUP CLIP DELETE FAILED",
+            error,
+            message
         )
 
     try:
@@ -2446,10 +2579,17 @@ def group_clip_remove_and_restrict(message):
             )
         )
 
-    except Exception:
+        group_clip_debug(
+            "USER RESTRICTED FOR 24 HOURS",
+            message
+        )
 
-        logging.exception(
-            "GROUP CLIP 24H RESTRICTION FAILED"
+    except Exception as error:
+
+        group_clip_debug_exception(
+            "GROUP CLIP 24H RESTRICTION FAILED",
+            error,
+            message
         )
 
 
@@ -2459,11 +2599,23 @@ def group_clip_remove_and_restrict(message):
 
 def group_clip_send_acknowledgement(user_id):
 
-    return bot.send_message(
+    group_clip_debug(
+        "SENDING PRIVATE ACKNOWLEDGEMENT",
+        details=f"Target user ID: {user_id}"
+    )
+
+    result = bot.send_message(
         user_id,
         "MADALLA NA KARBI BIDIYONKA INA BINCIKAWA 😊\n\n"
         "Dan allah ka jira idan na samu video din zan sanar da kai🤗"
     )
+
+    group_clip_debug(
+        "PRIVATE ACKNOWLEDGEMENT SENT SUCCESSFULLY",
+        details=f"User: {user_id} | DM message ID: {result.message_id}"
+    )
+
+    return result
 
 
 # ============================================================
@@ -2474,6 +2626,11 @@ def group_clip_private_message_failed(message):
 
     user = message.from_user
 
+    group_clip_debug(
+        "USER PRIVATE DM FAILED — STARTING FALLBACK",
+        message
+    )
+
     try:
 
         bot.delete_message(
@@ -2481,10 +2638,17 @@ def group_clip_private_message_failed(message):
             message_id=message.message_id
         )
 
-    except Exception:
+        group_clip_debug(
+            "MESSAGE DELETED AFTER PRIVATE DM FAILURE",
+            message
+        )
 
-        logging.exception(
-            "GROUP VIDEO DELETE FAILED"
+    except Exception as error:
+
+        group_clip_debug_exception(
+            "GROUP VIDEO DELETE FAILED",
+            error,
+            message
         )
 
     mention = (
@@ -2506,10 +2670,17 @@ def group_clip_private_message_failed(message):
             parse_mode="HTML"
         )
 
-    except Exception:
+        group_clip_debug(
+            "PRIVATE DM FAILURE NOTICE SENT IN GROUP",
+            message
+        )
 
-        logging.exception(
-            "GROUP PRIVATE MESSAGE FAILURE NOTICE FAILED"
+    except Exception as error:
+
+        group_clip_debug_exception(
+            "GROUP PRIVATE MESSAGE FAILURE NOTICE FAILED",
+            error,
+            message
         )
 
 
@@ -2521,12 +2692,27 @@ def group_clip_create_task(message, video_info, ack_message):
 
     user = message.from_user
 
+    group_clip_debug(
+        "DATABASE CONNECTION STARTING",
+        message
+    )
+
     conn = get_all_chat_db_conn()
     cur = None
+
+    group_clip_debug(
+        "DATABASE CONNECTION SUCCESSFUL",
+        message
+    )
 
     try:
 
         cur = conn.cursor()
+
+        group_clip_debug(
+            "DATABASE CURSOR CREATED",
+            message
+        )
 
         # CHECK DUPLICATE TELEGRAM MESSAGE
 
@@ -2544,12 +2730,28 @@ def group_clip_create_task(message, video_info, ack_message):
             )
         )
 
+        group_clip_debug(
+            "DATABASE DUPLICATE CHECK COMPLETED",
+            message
+        )
+
         if cur.fetchone():
 
             conn.rollback()
+
+            group_clip_debug(
+                "DUPLICATE MESSAGE — TASK NOT CREATED",
+                message
+            )
+
             return None
 
         # SAVE CUSTOMER
+
+        group_clip_debug(
+            "CUSTOMER DATABASE INSERT STARTED",
+            message
+        )
 
         cur.execute(
             """
@@ -2582,6 +2784,11 @@ def group_clip_create_task(message, video_info, ack_message):
             )
         )
 
+        group_clip_debug(
+            "CUSTOMER DATABASE INSERT SUCCESSFUL",
+            message
+        )
+
         # CREATE TASK
 
         payload = {
@@ -2598,10 +2805,17 @@ def group_clip_create_task(message, video_info, ack_message):
             "username": user.username,
             "first_name": user.first_name,
             "last_name": user.last_name,
+            "user_id": user.id,
             "ack_chat_id": ack_message.chat.id,
             "ack_message_id": ack_message.message_id,
             "bot1_delivered": False
         }
+
+        group_clip_debug(
+            "TASK INSERT STARTED",
+            message,
+            details=f"User ID: {user.id} | Group message ID: {message.message_id}"
+        )
 
         cur.execute(
             """
@@ -2629,7 +2843,18 @@ def group_clip_create_task(message, video_info, ack_message):
 
         task_id = cur.fetchone()[0]
 
+        group_clip_debug(
+            "TASK INSERT SUCCESSFUL",
+            message,
+            details=f"Task ID: {task_id}"
+        )
+
         # SAVE INCOMING VIDEO MESSAGE
+
+        group_clip_debug(
+            "CHAT_MESSAGES INSERT STARTED",
+            message
+        )
 
         cur.execute(
             """
@@ -2673,7 +2898,18 @@ def group_clip_create_task(message, video_info, ack_message):
             )
         )
 
+        group_clip_debug(
+            "CHAT_MESSAGES INSERT SUCCESSFUL",
+            message
+        )
+
         conn.commit()
+
+        group_clip_debug(
+            "DATABASE COMMIT SUCCESSFUL — TASK READY FOR BOT 2",
+            message,
+            details=f"Task ID: {task_id}"
+        )
 
         logging.info(
             "GROUP VIDEO TASK CREATED: %s",
@@ -2682,12 +2918,14 @@ def group_clip_create_task(message, video_info, ack_message):
 
         return str(task_id)
 
-    except Exception:
+    except Exception as error:
 
         conn.rollback()
 
-        logging.exception(
-            "GROUP VIDEO TASK CREATION FAILED"
+        group_clip_debug_exception(
+            "DATABASE TASK CREATION FAILED — TRANSACTION ROLLED BACK",
+            error,
+            message
         )
 
         raise
@@ -2698,6 +2936,11 @@ def group_clip_create_task(message, video_info, ack_message):
             cur.close()
 
         conn.close()
+
+        group_clip_debug(
+            "DATABASE CONNECTION CLOSED",
+            message
+        )
 
 
 # ============================================================
@@ -2743,13 +2986,16 @@ def group_clip_format_result(result):
 
 def group_clip_check_completed_tasks():
 
-    # Prevent two local threads from processing same rows.
     if not _CLIP_RESULT_DELIVERY_LOCK.acquire(
         blocking=False
     ):
         return
 
     try:
+
+        group_clip_debug(
+            "RESULT CHECKER — DATABASE QUERY STARTING"
+        )
 
         conn = get_all_chat_db_conn()
         cur = None
@@ -2779,14 +3025,17 @@ def group_clip_check_completed_tasks():
 
             rows = cur.fetchall()
 
+            group_clip_debug(
+                "RESULT CHECKER — DATABASE QUERY SUCCESSFUL",
+                details=f"Completed tasks awaiting delivery: {len(rows)}"
+            )
+
         finally:
 
             if cur:
                 cur.close()
 
             conn.close()
-
-        # Process every completed task returned by DB.
 
         for task_id, payload, result_json in rows:
 
@@ -2807,8 +3056,11 @@ def group_clip_check_completed_tasks():
                 if not isinstance(result_json, dict):
                     raise ValueError("Invalid task result_json")
 
-                # Ignore tasks without a result.
                 if not result_json:
+                    group_clip_debug(
+                        "COMPLETED TASK HAS EMPTY RESULT",
+                        details=f"Task ID: {task_id}"
+                    )
                     continue
 
                 user_id = int(
@@ -2823,7 +3075,14 @@ def group_clip_check_completed_tasks():
                     result_json
                 )
 
-                # EDIT ORIGINAL ACKNOWLEDGEMENT IN USER DM.
+                group_clip_debug(
+                    "RESULT DELIVERY STARTED",
+                    details=(
+                        f"Task ID: {task_id}\n"
+                        f"Target user: {user_id}\n"
+                        f"Acknowledgement message: {ack_message_id}"
+                    )
+                )
 
                 bot.edit_message_text(
                     chat_id=user_id,
@@ -2831,7 +3090,10 @@ def group_clip_check_completed_tasks():
                     text=result_text
                 )
 
-                # ONLY MARK DELIVERED AFTER SUCCESSFUL EDIT.
+                group_clip_debug(
+                    "RESULT SUCCESSFULLY DELIVERED TO USER",
+                    details=f"Task ID: {task_id} | User ID: {user_id}"
+                )
 
                 update_conn = get_all_chat_db_conn()
                 update_cur = None
@@ -2858,6 +3120,11 @@ def group_clip_check_completed_tasks():
 
                     update_conn.commit()
 
+                    group_clip_debug(
+                        "RESULT DELIVERY FLAG SAVED IN DATABASE",
+                        details=f"Task ID: {task_id}"
+                    )
+
                 finally:
 
                     if update_cur:
@@ -2870,10 +3137,13 @@ def group_clip_check_completed_tasks():
                     task_id
                 )
 
-            except Exception:
+            except Exception as error:
 
-                # Keep bot1_delivered false.
-                # The checker will retry this task next time.
+                group_clip_debug_exception(
+                    "GROUP VIDEO RESULT DELIVERY FAILED",
+                    error
+                )
+
                 logging.exception(
                     "GROUP VIDEO RESULT DELIVERY FAILED: %s",
                     task_id
@@ -2894,19 +3164,27 @@ def group_clip_result_worker():
         "GROUP CLIP RESULT WORKER STARTED — CHECKING EVERY 2 SECONDS"
     )
 
+    group_clip_debug(
+        "RESULT WORKER THREAD STARTED"
+    )
+
     while True:
 
         try:
 
             group_clip_check_completed_tasks()
 
-        except Exception:
+        except Exception as error:
+
+            group_clip_debug_exception(
+                "RESULT WORKER LOOP ERROR — WILL RETRY",
+                error
+            )
 
             logging.exception(
                 "GROUP CLIP RESULT WORKER ERROR — WILL RETRY"
             )
 
-        # It will continue forever, even after errors.
         time.sleep(
             CLIP_RESULT_CHECK_INTERVAL
         )
@@ -2919,6 +3197,9 @@ def group_clip_start_result_worker():
     with _CLIP_RESULT_LOCK:
 
         if CLIP_RESULT_THREAD_STARTED:
+            group_clip_debug(
+                "RESULT WORKER ALREADY STARTED"
+            )
             return
 
         thread = threading.Thread(
@@ -2935,6 +3216,10 @@ def group_clip_start_result_worker():
             "GROUP CLIP RESULT WORKER STARTED SUCCESSFULLY"
         )
 
+        group_clip_debug(
+            "RESULT WORKER THREAD LAUNCHED SUCCESSFULLY"
+        )
+
 
 # ============================================================
 # MAIN GROUP VIDEO HANDLER
@@ -2946,122 +3231,200 @@ def group_clip_start_result_worker():
 )
 def bot1_group_video_receiver(message):
 
-    video_info = group_clip_get_video(message)
-
-    if not video_info:
-        return
-
-    # --------------------------------------------------------
-    # 1. CHECK VIDEO SIZE FIRST
-    # --------------------------------------------------------
-
-    if video_info["file_size"] > CLIP_MAX_SIZE:
-
-        group_clip_oversize_video(
-            message
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # 2. ADULT CAPTION CHECK
-    # --------------------------------------------------------
-
-    caption = message.caption or ""
-
-    if group_clip_is_adult_caption(caption):
-
-        try:
-
-            group_clip_send_report(
-                message,
-                video_info
-            )
-
-        except Exception:
-
-            logging.exception(
-                "GROUP ADULT REPORT FAILED"
-            )
-
-        group_clip_remove_and_restrict(
-            message
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # 3. SEND PRIVATE ACKNOWLEDGEMENT FIRST
-    # --------------------------------------------------------
+    group_clip_debug(
+        "MAIN VIDEO HANDLER ENTERED",
+        message
+    )
 
     try:
 
-        ack_message = group_clip_send_acknowledgement(
-            message.from_user.id
-        )
+        video_info = group_clip_get_video(message)
 
-    except Exception:
+        if not video_info:
 
-        logging.exception(
-            "CANNOT SEND GROUP VIDEO ACKNOWLEDGEMENT"
-        )
-
-        group_clip_private_message_failed(
-            message
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # 4. CREATE DATABASE TASK
-    # --------------------------------------------------------
-
-    try:
-
-        task_id = group_clip_create_task(
-            message,
-            video_info,
-            ack_message
-        )
-
-        if not task_id:
-
-            logging.warning(
-                "DUPLICATE GROUP VIDEO MESSAGE: %s",
-                message.message_id
+            group_clip_debug(
+                "HANDLER STOPPED — VIDEO INFORMATION NOT FOUND",
+                message
             )
 
             return
 
-        logging.info(
-            "GROUP VIDEO ACCEPTED — TASK ID: %s",
-            task_id
+        group_clip_debug(
+            "VIDEO INFORMATION SUCCESSFULLY READ",
+            message,
+            details=(
+                f"Size: {video_info['file_size']}\n"
+                f"File type: {video_info['file_type']}\n"
+                f"Unique ID: {video_info['file_unique_id']}"
+            )
         )
 
-    except Exception:
+        # ----------------------------------------------------
+        # 1. CHECK VIDEO SIZE FIRST
+        # ----------------------------------------------------
 
-        logging.exception(
-            "GROUP VIDEO TASK SAVE FAILED"
+        if video_info["file_size"] > CLIP_MAX_SIZE:
+
+            group_clip_debug(
+                "VIDEO EXCEEDS 50MB",
+                message
+            )
+
+            group_clip_oversize_video(
+                message
+            )
+
+            return
+
+        # ----------------------------------------------------
+        # 2. ADULT CAPTION CHECK
+        # ----------------------------------------------------
+
+        caption = message.caption or ""
+
+        if group_clip_is_adult_caption(caption):
+
+            group_clip_debug(
+                "ADULT CONTENT DETECTED — REPORT AND RESTRICTION",
+                message
+            )
+
+            try:
+
+                group_clip_send_report(
+                    message,
+                    video_info
+                )
+
+            except Exception as error:
+
+                group_clip_debug_exception(
+                    "GROUP ADULT REPORT FAILED",
+                    error,
+                    message
+                )
+
+            group_clip_remove_and_restrict(
+                message
+            )
+
+            return
+
+        # ----------------------------------------------------
+        # 3. SEND PRIVATE ACKNOWLEDGEMENT FIRST
+        # ----------------------------------------------------
+
+        group_clip_debug(
+            "NORMAL VIDEO — SENDING USER DM",
+            message
         )
 
         try:
 
-            bot.edit_message_text(
-                chat_id=ack_message.chat.id,
-                message_id=ack_message.message_id,
-                text=(
-                    "Yi hakuri, an samu matsala wajen ajiye bidiyonka.\n"
-                    "Don Allah ka sake gwadawa anjima."
+            ack_message = group_clip_send_acknowledgement(
+                message.from_user.id
+            )
+
+        except Exception as error:
+
+            group_clip_debug_exception(
+                "CANNOT SEND GROUP VIDEO ACKNOWLEDGEMENT",
+                error,
+                message
+            )
+
+            group_clip_private_message_failed(
+                message
+            )
+
+            return
+
+        # ----------------------------------------------------
+        # 4. CREATE DATABASE TASK
+        # ----------------------------------------------------
+
+        group_clip_debug(
+            "USER DM SUCCESSFUL — STARTING DATABASE TASK",
+            message,
+            details=f"DM message ID: {ack_message.message_id}"
+        )
+
+        try:
+
+            task_id = group_clip_create_task(
+                message,
+                video_info,
+                ack_message
+            )
+
+            if not task_id:
+
+                group_clip_debug(
+                    "TASK NOT CREATED — DUPLICATE MESSAGE",
+                    message
                 )
+
+                logging.warning(
+                    "DUPLICATE GROUP VIDEO MESSAGE: %s",
+                    message.message_id
+                )
+
+                return
+
+            group_clip_debug(
+                "GROUP VIDEO ACCEPTED — TASK CREATED",
+                message,
+                details=f"Task ID: {task_id}"
             )
 
-        except Exception:
-
-            logging.exception(
-                "GROUP VIDEO TASK FAILURE NOTICE FAILED"
+            logging.info(
+                "GROUP VIDEO ACCEPTED — TASK ID: %s",
+                task_id
             )
 
-        return
+        except Exception as error:
+
+            group_clip_debug_exception(
+                "GROUP VIDEO TASK SAVE FAILED",
+                error,
+                message
+            )
+
+            try:
+
+                bot.edit_message_text(
+                    chat_id=ack_message.chat.id,
+                    message_id=ack_message.message_id,
+                    text=(
+                        "Yi hakuri, an samu matsala wajen ajiye bidiyonka.\n"
+                        "Don Allah ka sake gwadawa anjima."
+                    )
+                )
+
+                group_clip_debug(
+                    "DATABASE FAILURE NOTICE SENT TO USER",
+                    message
+                )
+
+            except Exception as edit_error:
+
+                group_clip_debug_exception(
+                    "GROUP VIDEO TASK FAILURE NOTICE FAILED",
+                    edit_error,
+                    message
+                )
+
+            return
+
+    except Exception as error:
+
+        group_clip_debug_exception(
+            "UNHANDLED MAIN VIDEO HANDLER ERROR",
+            error,
+            message
+        )
+
+        raise
 
 
 # ============================================================
@@ -3073,9 +3436,26 @@ group_clip_start_result_worker()
 
 
 # ============================================================
-# END BOT 1 CREAT TASK GROUP VIDEO SYSTEM
+# BOT 1 DEBUG STARTUP REPORT
 # ============================================================
 
+group_clip_debug(
+    "BOT 1 GROUP VIDEO SYSTEM LOADED",
+    details=(
+        f"Target group: {CLIP_CHANNEL_VIDEO}\n"
+        f"Report destination: {CLIP_REPORT_ID}\n"
+        f"Maximum video size: {CLIP_MAX_SIZE} bytes\n"
+        f"Admin excluded: {CLIP_ADMIN_ID}\n"
+        "Video handler: REGISTERED\n"
+        "Photo handler: NOT REGISTERED HERE\n"
+        "Result worker: STARTED"
+    )
+)
+
+
+# ============================================================
+# END BOT 1 CREAT TASK GROUP VIDEO SYSTEM
+# ============================================================
 
 
 # ============================================================
