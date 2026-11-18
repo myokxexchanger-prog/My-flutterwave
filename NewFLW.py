@@ -3983,6 +3983,591 @@ def bot1_photo_receiver(message):
 # ============================================================
 
 
+import time
+import re
+import difflib
+from telebot.apihelper import ApiTelegramException
+
+
+# =============================================================
+# SMART DELIVERY NAME SYSTEM
+# =============================================================
+
+# Kamfanonin da bot zai gane idan sun bayyana a filename/title.
+SMART_KNOWN_COMPANIES = (
+    "YSF ZAMANI",
+    "SS RECORD",
+    "ALGAITA",
+    "FIKIRA",
+    "SULTAN",
+    "MEGA",
+)
+
+
+def smart_clean_spaces(text):
+    return re.sub(r"\s+", " ", str(text or "")).strip()
+
+
+def smart_normalize(text):
+    text = str(text or "").upper()
+    text = re.sub(r"[^A-Z0-9]+", " ", text)
+    return smart_clean_spaces(text)
+
+
+def smart_is_number_token(token):
+    return bool(re.fullmatch(r"\d+(?:[.,]\d+)?", token or ""))
+
+
+def smart_remove_phone_numbers(text):
+    """
+    Yana cire phone numbers kamar:
+    08035227550
+    +2348035227550
+    0803 522 7550
+    """
+    return re.sub(
+        r"(?<!\d)(?:\+?\d[\d\s().-]{8,}\d)(?!\d)",
+        " ",
+        str(text or "")
+    )
+
+
+# =============================================================
+# READ ADMIN TITLE
+# =============================================================
+
+def smart_extract_admin_meta(admin_title):
+
+    raw = smart_clean_spaces(admin_title)
+    working = raw
+    company = None
+
+    # ---------------------------------------------------------
+    # 1. COMPANY A CIKIN ( )
+    #
+    # Misali:
+    # KOGIN JINI 19,20,21 (Gwani)
+    # HARGITSI (Sultan)
+    # ---------------------------------------------------------
+
+    paren_matches = re.findall(r"\(([^()]*)\)", working)
+
+    for value in reversed(paren_matches):
+
+        value = smart_clean_spaces(value)
+
+        if value and not re.fullmatch(r"[\d,\- ]+", value):
+            company = value
+            break
+
+    # Cire parentheses daga title
+    working = re.sub(
+        r"\s*\([^)]*\)",
+        " ",
+        working
+    )
+
+    # ---------------------------------------------------------
+    # 2. COMPANY TA "FROM"
+    #
+    # Misali:
+    # Hargitsi 2026 From Fikira
+    # ---------------------------------------------------------
+
+    from_match = re.search(
+        r"\bFROM\s+(.+?)\s*$",
+        working,
+        flags=re.IGNORECASE
+    )
+
+    if from_match:
+
+        candidate = smart_clean_spaces(
+            from_match.group(1)
+        )
+
+        if candidate:
+            company = candidate
+
+            working = working[:from_match.start()]
+
+    # ---------------------------------------------------------
+    # 3. SANANNUN COMPANY NAMES
+    # ---------------------------------------------------------
+
+    for known in sorted(
+        SMART_KNOWN_COMPANIES,
+        key=len,
+        reverse=True
+    ):
+
+        if re.search(
+            rf"\b{re.escape(known)}\b",
+            working,
+            flags=re.IGNORECASE
+        ):
+
+            company = known
+
+            working = re.sub(
+                rf"\b{re.escape(known)}\b",
+                " ",
+                working,
+                flags=re.IGNORECASE
+            )
+
+            break
+
+    # ---------------------------------------------------------
+    # 4. GANO EPISODE NUMBERS DAGA ADMIN TITLE
+    #
+    # Misali:
+    # Kogin Jini 19,20,21
+    #
+    # zai bada:
+    # [19,20,21]
+    # ---------------------------------------------------------
+
+    episode_numbers = [
+        int(x)
+        for x in re.findall(
+            r"(?<!\d)(\d{1,3})(?!\d)",
+            raw
+        )
+        if not (1900 <= int(x) <= 2100)
+    ]
+
+    # ---------------------------------------------------------
+    # 5. IDAN ADMIN YA BA DA EPISODES DA YAWA
+    #
+    # Kogin Jini 19,20,21
+    #
+    # muna cire lambobin daga base title.
+    # ---------------------------------------------------------
+
+    if len(episode_numbers) >= 2:
+
+        working = re.sub(
+            r"(?<!\d)"
+            r"\d{1,3}"
+            r"(?:\s*[,/&-]\s*\d{1,3})+"
+            r"(?!\d)",
+            " ",
+            working
+        )
+
+    # ---------------------------------------------------------
+    # 6. LAST NON-NUMERIC WORD = COMPANY
+    #
+    # Misali:
+    # Hargitsi Sultan
+    #
+    # -> Hargitsi
+    # -> Sultan
+    #
+    # Amma:
+    # Hargitsi 2026
+    #
+    # -> babu company
+    # ---------------------------------------------------------
+
+    if not company:
+
+        tokens = smart_clean_spaces(
+            working
+        ).split()
+
+        if (
+            len(tokens) >= 2
+            and not smart_is_number_token(tokens[-1])
+        ):
+
+            company = tokens[-1]
+
+            working = " ".join(
+                tokens[:-1]
+            )
+
+    base_title = smart_clean_spaces(
+        working
+    )
+
+    return {
+        "raw": raw,
+        "base_title": base_title,
+        "company": company,
+        "episodes": episode_numbers,
+    }
+
+
+# =============================================================
+# READ ORIGINAL FILE NAME
+# =============================================================
+
+def smart_extract_original_meta(file_name):
+
+    # Cire extension
+    raw = re.sub(
+        r"\.[A-Za-z0-9]{2,8}$",
+        "",
+        str(file_name or "")
+    )
+
+    working = raw
+
+    # ---------------------------------------------------------
+    # CIRE PHONE NUMBER
+    # ---------------------------------------------------------
+
+    working = smart_remove_phone_numbers(
+        working
+    )
+
+    # ---------------------------------------------------------
+    # CIRE TELEGRAM USERNAME
+    #
+    # @username
+    # ---------------------------------------------------------
+
+    working = re.sub(
+        r"@\w+",
+        " ",
+        working
+    )
+
+    # ---------------------------------------------------------
+    # GANO EPISODE NUMBER
+    # ---------------------------------------------------------
+
+    episode_numbers = [
+        int(x)
+        for x in re.findall(
+            r"(?<!\d)(\d{1,3})(?!\d)",
+            working
+        )
+        if not (1900 <= int(x) <= 2100)
+    ]
+
+    # ---------------------------------------------------------
+    # CIRE COMPANY NAMES DAGA ORIGINAL FILE
+    # ---------------------------------------------------------
+
+    for known in sorted(
+        SMART_KNOWN_COMPANIES,
+        key=len,
+        reverse=True
+    ):
+
+        working = re.sub(
+            rf"\b{re.escape(known)}\b",
+            " ",
+            working,
+            flags=re.IGNORECASE
+        )
+
+    # ---------------------------------------------------------
+    # CIRE COMMON FILE/PROMOTIONAL WORDS
+    # ---------------------------------------------------------
+
+    working = re.sub(
+        r"\b(?:"
+        r"MASTER|"
+        r"EP|"
+        r"EPISODE|"
+        r"PART|"
+        r"HD|"
+        r"FHD|"
+        r"FULL|"
+        r"WEBRIP|"
+        r"WEB|"
+        r"720P|"
+        r"1080P|"
+        r"1440P|"
+        r"2160P|"
+        r"4K|"
+        r"UPLOADED|"
+        r"FROM|"
+        r"TELEGRAM"
+        r")\b",
+        " ",
+        working,
+        flags=re.IGNORECASE
+    )
+
+    # Cire episode numbers daga core text
+    working = re.sub(
+        r"(?<!\d)\d{1,3}(?!\d)",
+        " ",
+        working
+    )
+
+    core = smart_clean_spaces(
+        working
+    )
+
+    return {
+        "raw": raw,
+        "core": core,
+        "episodes": episode_numbers,
+    }
+
+
+# =============================================================
+# MATCH ADMIN NAME DA ORIGINAL FILE NAME
+# =============================================================
+
+def smart_titles_match(admin_base, original_core):
+
+    a = smart_normalize(admin_base)
+    b = smart_normalize(original_core)
+
+    if not a or not b:
+        return False
+
+    # Exact match
+    if a == b:
+        return True
+
+    a_tokens = set(a.split())
+    b_tokens = set(b.split())
+
+    # Misali:
+    # KOGIN JINI
+    # KOGIN_JINI_
+    if (
+        len(a_tokens) >= 2
+        and a_tokens.issubset(b_tokens)
+    ):
+        return True
+
+    # Fuzzy matching
+    ratio = difflib.SequenceMatcher(
+        None,
+        a,
+        b
+    ).ratio()
+
+    return ratio >= 0.72
+
+
+# =============================================================
+# BUILD FINAL USER DELIVERY CAPTION
+# =============================================================
+
+def smart_build_delivery_caption(
+    admin_title,
+    original_file_name,
+    item_index,
+    total_items
+):
+
+    admin = smart_extract_admin_meta(
+        admin_title
+    )
+
+    original = smart_extract_original_meta(
+        original_file_name
+    )
+
+    base_title = (
+        admin["base_title"]
+        or smart_clean_spaces(admin_title)
+    )
+
+    company = admin["company"]
+
+    episode = None
+
+    # =========================================================
+    # STEP 1
+    #
+    # IDAN ORIGINAL FILE NAME YA MATCH ADMIN TITLE
+    # =========================================================
+
+    if smart_titles_match(
+        base_title,
+        original["core"]
+    ):
+
+        if admin["episodes"]:
+
+            for number in original["episodes"]:
+
+                if number in admin["episodes"]:
+
+                    episode = number
+                    break
+
+        if (
+            episode is None
+            and original["episodes"]
+        ):
+
+            episode = original["episodes"][0]
+
+    # =========================================================
+    # STEP 2
+    #
+    # IDAN ORIGINAL FILE NAME BAI MATCH ADMIN BA
+    # =========================================================
+
+    if (
+        episode is None
+        and admin["episodes"]
+    ):
+
+        if (
+            len(admin["episodes"]) == total_items
+            and 0 <= item_index < len(admin["episodes"])
+        ):
+
+            episode = admin["episodes"][
+                item_index
+            ]
+
+    # =========================================================
+    # BUILD FINAL NAME (IDAN FIM 1 NE KO FIYE DA HAKA)
+    # =========================================================
+
+    final_parts = [
+        base_title
+    ]
+
+    if episode is not None:
+
+        if not re.search(
+            rf"(?<!\d){episode}(?!\d)",
+            base_title
+        ):
+
+            final_parts.append(
+                str(episode)
+            )
+
+    if company:
+
+        final_parts.append(
+            company
+        )
+
+    final_title = smart_clean_spaces(
+        " ".join(final_parts)
+    ).upper()
+
+    comp_upper = str(company or "").upper()
+    if "SULTAN" in comp_upper:
+        suffix = "MASTER"
+    else:
+        suffix = "DUBSTUDIO"
+
+    return (
+        f"{final_title} {suffix}\n"
+        f"Uploader From @Algaitabot Telegram"
+    )
+
+
+# =============================================================
+# DELIVERY
+# =============================================================
+
+@bot.callback_query_handler(
+    func=lambda c: c.data.startswith("deliver:")
+)
+def deliver_items(call):
+
+    user_id = call.from_user.id
+
+    try:
+        _, order_id = call.data.split(":", 1)
+
+    except:
+        bot.answer_callback_query(
+            call.id,
+            "Invalid order information."
+        )
+        return
+
+    conn = get_conn()
+    cur = conn.cursor()
+
+    # =========================================================
+    # CHECK ORDER
+    # =========================================================
+
+    cur.execute(
+        "SELECT paid FROM orders WHERE id=%s AND user_id=%s",
+        (order_id, user_id)
+    )
+
+    row = cur.fetchone()
+
+    if not row or row[0] != 1:
+
+        cur.close()
+        conn.close()
+
+        bot.answer_callback_query(
+            call.id,
+            "Your payment has not been confirmed yet."
+        )
+
+        return
+
+    # =========================================================
+    # PREVENT RESEND
+    # =========================================================
+
+    cur.execute(
+        "SELECT 1 FROM user_movies WHERE order_id=%s LIMIT 1",
+        (order_id,)
+    )
+
+    if cur.fetchone():
+
+        cur.close()
+        conn.close()
+
+        kb = InlineKeyboardMarkup()
+
+        kb.add(
+            InlineKeyboardButton(
+                "PAID MOVIES",
+                callback_data="my_movies"
+            )
+        )
+
+        bot.send_message(
+            user_id,
+            "You have already received this movie.\n\n"
+            "You can download it again from Paid Movies.",
+            reply_markup=kb
+        )
+
+        return
+
+    # Remove popup
+    bot.answer_callback_query(call.id)
+
+    # =========================================================
+    # LOADING MESSAGE
+    # =========================================================
+
+    try:
+
+        bot.edit_message_text(
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            text="⏳ Loading..."
+        )
+
+        time.sleep(1.0)
+
+    except Exception as e:
+
+        print(
+            f"Error editing loading message: {e}"
+        )
+
     # =========================================================
     # FETCH ITEMS
     # =========================================================
@@ -4010,11 +4595,13 @@ def bot1_photo_receiver(message):
         conn.close()
 
         try:
+
             bot.edit_message_text(
                 chat_id=call.message.chat.id,
                 message_id=call.message.message_id,
                 text="Delivery Error ❌😓\nPLEASE CONTACT ADMIN"
             )
+
         except:
             pass
 
@@ -4028,39 +4615,93 @@ def bot1_photo_receiver(message):
     # =========================================================
     # TSARA FIM DIN IDAN SUN FI GUDA DAYA (SORTING BY EPISODE)
     # =========================================================
-    
+
     processed_items = []
-    
+
     for item in items:
         item_id = item[0]
         file_id = item[1]
         admin_title = item[2]
         original_file_name = item[3]
-        
-        # Zakulo lambar episode daga file_name ko admin_title
+
         ep_nums = [
             int(x) for x in re.findall(r"(?<!\d)(\d{1,3})(?!\d)", original_file_name or "")
             if not (1900 <= int(x) <= 2100)
         ]
-        
+
         if not ep_nums and admin_title:
             ep_nums = [
                 int(x) for x in re.findall(r"(?<!\d)(\d{1,3})(?!\d)", admin_title or "")
                 if not (1900 <= int(x) <= 2100)
             ]
-            
-        ep_val = ep_nums[0] if ep_nums else 999999 # Idan babu lamba a saka a ƙarshe
+
+        ep_val = ep_nums[0] if ep_nums else 999999
         processed_items.append((ep_val, item))
 
-    # Idan sun fi guda ɗaya, mu tsara su daga ƙarami zuwa bba (1, 2, 3...)
     if len(items) > 1:
         processed_items.sort(key=lambda x: x[0])
 
-    # Maido da items din da aka tsara zuwa tsari na gaske
     sorted_items = [x[1] for x in processed_items]
 
     # =========================================================
-    # SEND LOOP (TA HANNUN TSARA SHI DA WURI)
+    # SAFE SEND (TOWAN RETRY SAU DAYA KAFIN CONTACT ADMIN)
+    # =========================================================
+
+    def safe_send(
+        chat_id,
+        file_id,
+        caption
+    ):
+        attempts = 0
+        while attempts < 2:
+            try:
+                try:
+                    return bot.send_video(
+                        chat_id,
+                        file_id,
+                        caption=caption
+                    )
+                except:
+                    return bot.send_document(
+                        chat_id,
+                        file_id,
+                        caption=caption
+                    )
+
+            except ApiTelegramException as e:
+                if e.error_code == 429:
+                    retry = int(
+                        e.result_json["parameters"][
+                            "retry_after"
+                        ]
+                    )
+                    bot.send_message(
+                        chat_id,
+                        "Wait...\n"
+                        "Please wait, delivery will continue in a few seconds."
+                    )
+                    time.sleep(retry)
+                    continue
+                else:
+                    attempts += 1
+                    if attempts >= 2:
+                        return None
+                    time.sleep(1.0)
+                    continue
+
+            except Exception as e:
+                print(
+                    f"Delivery send error: {e}"
+                )
+                attempts += 1
+                if attempts >= 2:
+                    return None
+                time.sleep(1.0)
+                continue
+        return None
+
+    # =========================================================
+    # SEND LOOP
     # =========================================================
 
     sent = 0
@@ -4076,7 +4717,10 @@ def bot1_photo_receiver(message):
         if not file_id:
             continue
 
-        # Rigakafin maimaita tura fim ɗin da aka riga aka ba shi
+        # =====================================================
+        # PREVENT DUPLICATE ITEM DELIVERY
+        # =====================================================
+
         cur.execute(
             """
             SELECT 1
@@ -4091,27 +4735,70 @@ def bot1_photo_receiver(message):
             continue
 
         # =====================================================
-        # SMART CAPTION (TSARIN SUNA GA KOWANE FILE)
+        # SMART CAPTION (TSARIN SUNA DA FILENAME GA FIM MAI FIYAMI)
         # =====================================================
 
         try:
-            delivery_caption = (
-                smart_build_delivery_caption(
-                    admin_title=admin_title,
-                    original_file_name=original_file_name,
-                    item_index=item_index,
-                    total_items=total_items
+            if total_items > 1 and original_file_name:
+                orig_meta = smart_extract_original_meta(original_file_name)
+                admin_meta = smart_extract_admin_meta(admin_title)
+                
+                core_name = orig_meta["core"] if orig_meta["core"] else admin_meta["base_title"]
+                comp = admin_meta["company"]
+                
+                episodes_found = orig_meta["episodes"]
+                current_ep = episodes_found[0] if episodes_found else None
+                
+                if current_ep is None and admin_meta["episodes"]:
+                    if 0 <= item_index < len(admin_meta["episodes"]):
+                        current_ep = admin_meta["episodes"][item_index]
+
+                parts = [core_name]
+                if current_ep is not None:
+                    parts.append(str(current_ep))
+                if comp:
+                    parts.append(comp)
+
+                final_title = smart_clean_spaces(" ".join(parts)).upper()
+                
+                comp_upper = str(comp or "").upper()
+                if "SULTAN" in comp_upper:
+                    suffix = "MASTER"
+                else:
+                    suffix = "DUBSTUDIO"
+
+                delivery_caption = (
+                    f"{final_title} {suffix}\n"
+                    f"Uploader From @Algaitabot Telegram"
                 )
-            )
+            else:
+                delivery_caption = (
+                    smart_build_delivery_caption(
+                        admin_title=admin_title,
+                        original_file_name=original_file_name,
+                        item_index=item_index,
+                        total_items=total_items
+                    )
+                )
+
         except Exception as e:
-            print(f"Smart delivery name error: {e}")
-            fallback_title = smart_clean_spaces(admin_title).upper()
+            print(
+                f"Smart delivery name error: {e}"
+            )
+            fallback_title = (
+                smart_clean_spaces(
+                    admin_title
+                ).upper()
+            )
             delivery_caption = (
                 f"{fallback_title} MASTER\n"
                 f"Uploader From @Algaitabot Telegram"
             )
 
-        # Aika wa mai amfani
+        # =====================================================
+        # SEND
+        # =====================================================
+
         msg = safe_send(
             user_id,
             file_id,
@@ -4121,20 +4808,91 @@ def bot1_photo_receiver(message):
         if not msg:
             continue
 
-        # Ajiye a database cewa an ba shi
+        # =====================================================
+        # SAVE USER MOVIE
+        # =====================================================
+
         cur.execute(
             """
             INSERT INTO user_movies
             (user_id, item_id, order_id)
             VALUES (%s,%s,%s)
             """,
-            (user_id, item_id, order_id)
+            (
+                user_id,
+                item_id,
+                order_id
+            )
         )
 
         sent += 1
+
         time.sleep(1.0)
 
+    # =========================================================
+    # COMMIT
+    # =========================================================
 
+    conn.commit()
+
+    cur.close()
+    conn.close()
+
+    # =========================================================
+    # RESULT
+    # =========================================================
+
+    if sent == 0:
+
+        try:
+
+            bot.edit_message_text(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                text="Delivery Error ❌😓\nCONTACT ADMIN"
+            )
+
+        except Exception as e:
+
+            print(
+                f"Error editing message: {e}"
+            )
+
+        bot.send_message(
+            user_id,
+            "Items could not be delivered. Please CONTACT ADMIN."
+        )
+
+        return
+
+    # =========================================================
+    # SUCCESS
+    # =========================================================
+
+    try:
+
+        bot.edit_message_text(
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            text="Delivery Successful ✅"
+        )
+
+    except Exception as e:
+
+        print(
+            f"Error editing message: {e}"
+        )
+
+    bot.send_message(
+        user_id,
+        f"Your movie(s) have been delivered ({sent}).\n"
+        "Thank you for your purchase."
+    )
+
+    send_feedback_prompt(
+        user_id,
+        order_id
+    )
 
 
 
