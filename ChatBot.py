@@ -1998,6 +1998,8 @@ def telegram_webhook():
     return "OK", 200
 
 
+
+
 # ============================================================
 # BOT 1 — GROUP VIDEO RECEIVER SYSTEM
 # GROUP ONLY
@@ -2007,14 +2009,12 @@ def telegram_webhook():
 # 50MB VIDEO SIZE PROTECTION
 # CUSTOMER DM VERIFICATION
 # TASK CREATION
-# RANDOM TEXT-ONLY GROUP REPLIES
+# RANDOM VIDEO + CAPTION GROUP REPLIES
 # 2 HOURS GROUP RESTRICTION AFTER ACCEPTED VIDEO
 # ADMIN NOTIFICATION FOR RESTRICTION SUCCESS / FAILURE
 # ADMIN ONLY /unban COMMAND
 # VIDEO + RESULT CAPTION PRIVATE DELIVERY
 # CONTINUOUS BOT 2 RESULT DELIVERY — EVERY 2 SECONDS
-# ALL BOT TEXT MESSAGES BOLD
-# ALL VISIBLE IDS ARE COPYABLE USING <code>
 # ============================================================
 
 import re
@@ -2057,7 +2057,6 @@ _CLIP_RESULT_DELIVERY_LOCK = threading.Lock()
 
 # ============================================================
 # RANDOM GROUP REPLY MESSAGES
-# TEXT ONLY — DO NOT COPY VIDEO INTO GROUP
 # ============================================================
 
 GROUP_CLIP_REPLY_MESSAGES = (
@@ -2094,13 +2093,11 @@ def group_clip_send_random_group_reply(message):
         GROUP_CLIP_REPLY_MESSAGES
     ).format(name=name)
 
-    # IMPORTANT:
-    # SEND TEXT ONLY AS A REPLY TO USER'S VIDEO.
-    # DO NOT COPY OR RESEND THE VIDEO INTO THE GROUP.
-
-    return bot.send_message(
+    return bot.copy_message(
         chat_id=message.chat.id,
-        text=f"<b>{reply_text}</b>",
+        from_chat_id=message.chat.id,
+        message_id=message.message_id,
+        caption=f"<b>{reply_text}</b>",
         parse_mode="HTML",
         reply_to_message_id=message.message_id
     )
@@ -2109,7 +2106,6 @@ def group_clip_send_random_group_reply(message):
 # ============================================================
 # RESTRICT USER FOR 2 HOURS AFTER ACCEPTED VIDEO
 # ADMIN NOTIFICATION ON SUCCESS OR FAILURE
-# ALL TEXT BOLD — USER ID COPYABLE
 # ============================================================
 
 def group_clip_restrict_user_2_hours(message):
@@ -2145,13 +2141,13 @@ def group_clip_restrict_user_2_hours(message):
         bot.send_message(
             CLIP_ADMIN_ID,
             (
-                "<b>✅ AN DAKATAR DA USER NA TSAYIN 2 HOURS</b>\n"
+                "✅ AN DAKATAR DA USER NA TSAYIN 2 HOURS\n"
                 "━━━━━━━━━━━━━━━━━━━━\n"
-                f"<b>User: {html.escape(user_name)}</b>\n"
-                f"<b>User ID: <code>{user_id}</code></b>\n"
-                "<b>An dakatar da user na tsawon awa 2.</b>\n"
-                f"<b>Group ID: <code>{group_id}</code></b>\n"
-                f"<b>Message ID: <code>{message.message_id}</code></b>\n"
+                f"User : {html.escape(user_name)}\n"
+                f"User id: <code>{user_id}</code>\n"
+                "An dakatar 2h kafin sake turo sako\n"
+                f"Group ID: <code>{group_id}</code>\n"
+                f"Message ID: <code>{message.message_id}</code>\n"
                 "━━━━━━━━━━━━━━━━━━━━"
             ),
             parse_mode="HTML"
@@ -2168,14 +2164,14 @@ def group_clip_restrict_user_2_hours(message):
             bot.send_message(
                 CLIP_ADMIN_ID,
                 (
-                    "<b>❌ AN KASA DAKATAR DA USER</b>\n"
+                    "❌ AN KASA DAKATAR DA USER\n"
                     "━━━━━━━━━━━━━━━━━━━━\n"
-                    f"<b>User: {html.escape(user_name)}</b>\n"
-                    f"<b>User ID: <code>{user_id}</code></b>\n"
-                    f"<b>Group ID: <code>{group_id}</code></b>\n"
-                    f"<b>Message ID: <code>{message.message_id}</code></b>\n"
-                    "<b>An kasa dakatar da user.</b>\n\n"
-                    f"<b>Dalili: {html.escape(error_reason[:2500])}</b>\n"
+                    f"User : {html.escape(user_name)}\n"
+                    f"User id: <code>{user_id}</code>\n"
+                    f"Group ID: <code>{group_id}</code>\n"
+                    f"Message ID: <code>{message.message_id}</code>\n"
+                    "An kasa dakatar da user\n\n"
+                    f"Dalili: {html.escape(error_reason[:2500])}\n"
                     "━━━━━━━━━━━━━━━━━━━━"
                 ),
                 parse_mode="HTML"
@@ -2197,7 +2193,6 @@ def group_clip_restrict_user_2_hours(message):
 # ============================================================
 # ADMIN ONLY — /unban USER_ID
 # OPEN USER IMMEDIATELY IN THE GROUP
-# ALL TEXT BOLD — IDS COPYABLE
 # ============================================================
 
 @bot.message_handler(commands=["unban"])
@@ -2217,12 +2212,8 @@ def group_clip_admin_unban(message):
 
             bot.reply_to(
                 message,
-                (
-                    "<b>Amfani:</b>\n"
-                    "<code>/unban USER_ID</code>\n\n"
-                    "<b>Misali:</b>\n"
-                    "<code>/unban 9383838383</code>"
-                ),
+                "<b>Amfani:</b>\n/unban USER_ID\n\n"
+                "<b>Misali:</b>\n/unban 9383838383",
                 parse_mode="HTML"
             )
 
@@ -2262,10 +2253,10 @@ def group_clip_admin_unban(message):
             (
                 "<b>✅ AN BUƊE USER NASARA!</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━\n"
-                f"<b>User ID: <code>{target_user_id}</code></b>\n"
-                f"<b>Group ID: <code>{CLIP_CHANNEL_VIDEO}</code></b>\n"
-                "<b>An cire dakatarwar user.</b>\n"
-                "<b>Zai iya sake turo sako yanzu.</b>\n"
+                f"User ID: <code>{target_user_id}</code>\n"
+                f"Group ID: <code>{CLIP_CHANNEL_VIDEO}</code>\n"
+                "An cire dakatarwar user.\n"
+                "Zai iya sake turo sako yanzu.\n"
                 "━━━━━━━━━━━━━━━━━━━━"
             ),
             parse_mode="HTML"
@@ -2275,10 +2266,8 @@ def group_clip_admin_unban(message):
 
         bot.reply_to(
             message,
-            (
-                "<b>❌ User ID bai dace ba.</b>\n"
-                "<b>Misali:</b> <code>/unban 9383838383</code>"
-            ),
+            "<b>❌ User ID bai dace ba.</b>\n"
+            "Misali: /unban 9383838383",
             parse_mode="HTML"
         )
 
@@ -2292,8 +2281,8 @@ def group_clip_admin_unban(message):
             message,
             (
                 "<b>❌ AN KASA BUƊE USER</b>\n"
-                f"<b>User ID: <code>{html.escape(parts[1] if len(parts) > 1 else 'Unknown')}</code></b>\n\n"
-                f"<b>Dalili: {html.escape(str(error)[:2500])}</b>"
+                f"User ID: <code>{parts[1] if len(parts) > 1 else 'Unknown'}</code>\n\n"
+                f"Dalili: {html.escape(str(error)[:2500])}"
             ),
             parse_mode="HTML"
         )
@@ -2394,7 +2383,6 @@ def group_clip_get_video(message):
 # ============================================================
 # 50MB SIZE PROTECTION
 # DELETE FROM GROUP — DM USER — NO DATABASE
-# ALL BOT TEXT BOLD
 # ============================================================
 
 def group_clip_oversize_video(message):
@@ -2410,10 +2398,10 @@ def group_clip_oversize_video(message):
         bot.send_message(
             message.from_user.id,
             (
-                "<b>Wannan Video daka tura a group yayi girma.</b>\n"
-                "<b>Bani da izinin sarrafa video da ya wuce 50MB.</b>\n\n"
-                "<b>Ka rage girmansa ka sake aiko shi a Group din☺️</b>\n\n"
-                "<b>Mun gode.</b>"
+                "<b>Wannan Video daka tura a group yayi girma</b>\n"
+                "Bani da izinin sarrarfa video da ya wuce 50MB\n\n"
+                "Ka rage girmasa ka sake aiko minti kadan a Group din☺️\n\n"
+                "Mun gode"
             ),
             parse_mode="HTML"
         )
@@ -2543,7 +2531,6 @@ def group_clip_is_adult_caption(caption):
 
 # ============================================================
 # REPORT ADULT CONTENT
-# IDS COPYABLE — ALL REPORT TEXT BOLD
 # ============================================================
 
 def group_clip_send_report(message, video_info):
@@ -2551,21 +2538,20 @@ def group_clip_send_report(message, video_info):
     user = message.from_user
 
     report_text = (
-        "<b>🚨 GROUP VIDEO CONTENT REPORT</b>\n"
+        "🚨 GROUP VIDEO CONTENT REPORT\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        f"<b>Name: {html.escape(group_clip_user_name(user))}</b>\n"
-        f"<b>Username: {html.escape(group_clip_username(user))}</b>\n"
-        f"<b>User ID: <code>{user.id}</code></b>\n"
-        f"<b>Group ID: <code>{message.chat.id}</code></b>\n"
-        f"<b>Message ID: <code>{message.message_id}</code></b>\n"
-        f"<b>File Size: <code>{video_info['file_size']}</code></b>\n"
-        f"<b>File Name: {html.escape(str(video_info['file_name'] or 'Unknown'))}</b>\n"
-        f"<b>File Unique ID: <code>{html.escape(str(video_info['file_unique_id']))}</code></b>\n"
+        f"Name: {group_clip_user_name(user)}\n"
+        f"Username: {group_clip_username(user)}\n"
+        f"User ID: {user.id}\n"
+        f"Group ID: {message.chat.id}\n"
+        f"Message ID: {message.message_id}\n"
+        f"File Size: {video_info['file_size']}\n"
+        f"File Name: {video_info['file_name'] or 'Unknown'}\n"
+        f"File Unique ID: {video_info['file_unique_id']}\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        f"<b>Original Caption:</b>\n"
-        f"<b>{html.escape(message.caption or 'No caption')}</b>\n"
+        f"Original Caption:\n{message.caption or 'No caption'}\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        f"<b>Report Time: {datetime.now(timezone.utc).isoformat()}</b>"
+        f"Report Time: {datetime.now(timezone.utc).isoformat()}"
     )
 
     try:
@@ -2584,8 +2570,7 @@ def group_clip_send_report(message, video_info):
 
     bot.send_message(
         CLIP_REPORT_ID,
-        report_text[:3900],
-        parse_mode="HTML"
+        report_text[:3900]
     )
 
 
@@ -2646,12 +2631,11 @@ def group_clip_send_acknowledgement(message):
 
     caption = (
         "<b>MADALLA NA KARBI BIDIYONKA INA BINCIKAWA 😊</b>\n\n"
-        "<b>Dan Allah ka jira idan na samu video din zan sanar da kai🤗</b>"
+        "<b>Dan allah ka jira idan na samu video din zan sanar da kai🤗</b>"
     )
 
-    # COPY ORIGINAL VIDEO TO USER PRIVATE DM ONLY.
-    # ACKNOWLEDGEMENT TEXT IS THE VIDEO CAPTION.
-    # NO VIDEO COPY IS SENT BY THIS FUNCTION INTO THE GROUP.
+    # Copy the exact video sent by the user into their private chat.
+    # The acknowledgement text is attached as the video's caption.
 
     return bot.copy_message(
         chat_id=user_id,
@@ -2664,7 +2648,6 @@ def group_clip_send_acknowledgement(message):
 
 # ============================================================
 # USER COULD NOT RECEIVE PRIVATE MESSAGE
-# ALL BOT TEXT BOLD
 # ============================================================
 
 def group_clip_private_message_failed(message):
@@ -2695,10 +2678,10 @@ def group_clip_private_message_failed(message):
             message.chat.id,
             (
                 f"<b>Yi hakuri malam {mention}</b>\n\n"
-                "<b>Aikin ka bazai kammala ba.</b>\n"
-                "<b>Da bukatar kaje AlgaitaBot ka taba &lt;start&gt;.</b>\n"
-                "<b>Sannan kazo ka turo video din anan group.</b>\n\n"
-                "<b>Mun gode🙏</b>"
+                "<b>Aikin ka bazai kammala ba\n"
+                "Da bukatar kaje Algaitabot ka taba &lt;start&gt;\n"
+                "Sannan kazo ka turo video din anan group\n\n"
+                "Mun gode🙏</b>"
             ),
             parse_mode="HTML"
         )
@@ -2929,7 +2912,7 @@ def group_clip_format_result(result):
 # ============================================================
 # CHECK ALL COMPLETED TASKS
 # RUNS EVERY 2 SECONDS
-# SEND ORIGINAL VIDEO WITH RESULT CAPTION TO USER DM ONLY
+# SEND ORIGINAL VIDEO WITH RESULT CAPTION
 # ============================================================
 
 def group_clip_check_completed_tasks():
@@ -3021,9 +3004,6 @@ def group_clip_check_completed_tasks():
                     result_json
                 )
 
-                # SEND THE ORIGINAL VIDEO WITH RESULT CAPTION
-                # TO USER PRIVATE DM ONLY.
-
                 bot.copy_message(
                     chat_id=user_id,
                     from_chat_id=source_chat_id,
@@ -3063,9 +3043,6 @@ def group_clip_check_completed_tasks():
                         update_cur.close()
 
                     update_conn.close()
-
-                # DELETE THE OLD ACKNOWLEDGEMENT VIDEO
-                # AFTER THE RESULT VIDEO HAS BEEN SENT.
 
                 try:
 
@@ -3208,8 +3185,7 @@ def bot1_group_video_receiver(message):
             return
 
         # ----------------------------------------------------
-        # 3. SEND ORIGINAL VIDEO TO USER PRIVATE DM
-        # WITH BOLD ACKNOWLEDGEMENT CAPTION
+        # 3. SEND ORIGINAL VIDEO WITH BOLD DM CAPTION
         # ----------------------------------------------------
 
         try:
@@ -3283,8 +3259,7 @@ def bot1_group_video_receiver(message):
             return
 
         # ----------------------------------------------------
-        # 5. REPLY WITH RANDOM TEXT ONLY IN GROUP
-        # DO NOT COPY OR RESEND VIDEO INTO GROUP
+        # 5. SEND ORIGINAL VIDEO WITH RANDOM BOLD CAPTION
         # ----------------------------------------------------
 
         try:
@@ -3296,7 +3271,7 @@ def bot1_group_video_receiver(message):
         except Exception:
 
             logging.exception(
-                "RANDOM GROUP TEXT REPLY FAILED"
+                "RANDOM GROUP VIDEO REPLY FAILED"
             )
 
         # ----------------------------------------------------
@@ -4008,173 +3983,6 @@ def bot1_photo_receiver(message):
 # ============================================================
 
 
-
-
-# ============================================================
-# ADMIN ONLY — /clean
-# CLEAN GROUP VIDEO IDENTIFICATION SYSTEM DATA
-# DELETE TASKS + RELATED MESSAGES
-# CLEAN ORPHAN CUSTOMERS
-# ============================================================
-
-@bot.message_handler(commands=["clean"])
-def group_clip_admin_clean_database(message):
-
-    if not message.from_user:
-        return
-
-    # ADMIN ONLY
-    if int(message.from_user.id) != CLIP_ADMIN_ID:
-        return
-
-    conn = None
-    cur = None
-
-    try:
-
-        conn = get_all_chat_db_conn()
-        cur = conn.cursor()
-
-        # ----------------------------------------------------
-        # 1. DELETE CHAT MESSAGES LINKED TO THIS SYSTEM TASKS
-        # ----------------------------------------------------
-
-        cur.execute(
-            """
-            DELETE FROM chat_messages
-            WHERE task_id IN (
-                SELECT task_id
-                FROM tasks
-                WHERE task_type = 'movie_identification'
-            )
-            """
-        )
-
-        deleted_task_messages = cur.rowcount
-
-        # ----------------------------------------------------
-        # 2. DELETE VIDEO MESSAGES FROM THE TARGET GROUP
-        # ----------------------------------------------------
-
-        cur.execute(
-            """
-            DELETE FROM chat_messages
-            WHERE telegram_chat_id = %s
-              AND direction = 'incoming'
-              AND message_type = 'video'
-            """,
-            (CLIP_CHANNEL_VIDEO,)
-        )
-
-        deleted_group_messages = cur.rowcount
-
-        # ----------------------------------------------------
-        # 3. DELETE ALL MOVIE IDENTIFICATION TASKS
-        # PENDING, PROCESSING, COMPLETED, FAILED, ETC.
-        # ----------------------------------------------------
-
-        cur.execute(
-            """
-            DELETE FROM tasks
-            WHERE task_type = 'movie_identification'
-            """
-        )
-
-        deleted_tasks = cur.rowcount
-
-        # ----------------------------------------------------
-        # 4. DELETE ORPHAN CUSTOMER RECORDS
-        # ONLY CUSTOMERS WITH NO OTHER TASKS OR MESSAGES
-        # ----------------------------------------------------
-
-        cur.execute(
-            """
-            DELETE FROM customers c
-            WHERE NOT EXISTS (
-                SELECT 1
-                FROM tasks t
-                WHERE t.user_id = c.user_id
-            )
-            AND NOT EXISTS (
-                SELECT 1
-                FROM chat_messages m
-                WHERE m.user_id = c.user_id
-            )
-            """
-        )
-
-        deleted_customers = cur.rowcount
-
-        # ----------------------------------------------------
-        # 5. COMMIT ALL CHANGES
-        # ----------------------------------------------------
-
-        conn.commit()
-
-        # ----------------------------------------------------
-        # 6. ADMIN SUCCESS MESSAGE
-        # ----------------------------------------------------
-
-        bot.send_message(
-            message.chat.id,
-            (
-                "<b>✅ DATABASE CLEANING YA KAMMALA!</b>\n"
-                "━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"<b>Movie Tasks: {deleted_tasks}</b>\n"
-                f"<b>Task Messages: {deleted_task_messages}</b>\n"
-                f"<b>Group Video Messages: {deleted_group_messages}</b>\n"
-                f"<b>Orphan Customers: {deleted_customers}</b>\n\n"
-                "<b>An share bayanan Video Identification System.</b>\n"
-                "<b>Yanzu za ka iya farawa daga farko.</b>\n\n"
-                "━━━━━━━━━━━━━━━━━━━━"
-            ),
-            parse_mode="HTML"
-        )
-
-        logging.warning(
-            "ADMIN DATABASE CLEAN: tasks=%s task_messages=%s "
-            "group_messages=%s customers=%s admin=%s",
-            deleted_tasks,
-            deleted_task_messages,
-            deleted_group_messages,
-            deleted_customers,
-            message.from_user.id
-        )
-
-    except Exception as error:
-
-        if conn:
-            conn.rollback()
-
-        logging.exception(
-            "GROUP CLIP DATABASE CLEAN FAILED"
-        )
-
-        bot.send_message(
-            message.chat.id,
-            (
-                "<b>❌ AN KASA SHARE DATABASE</b>\n\n"
-                f"<b>Dalili: {html.escape(str(error)[:2000])}</b>\n"
-                "<b>Ba a yi COMMIT ba; an yi rollback.</b>"
-            ),
-            parse_mode="HTML"
-        )
-
-    finally:
-
-        if cur:
-            cur.close()
-
-        if conn:
-            conn.close()
-
-# ============================================================
-# END /clean COMMAND
-# ============================================================
-
-
-
-
 import time
 import re
 import difflib
@@ -4574,16 +4382,6 @@ def smart_build_delivery_caption(
     # STEP 1
     #
     # IDAN ORIGINAL FILE NAME YA MATCH ADMIN TITLE
-    #
-    # MISALI:
-    #
-    # ADMIN:
-    # KOGIN JINI 19,20,21 (Gwani)
-    #
-    # FILE:
-    # KOGIN_JINI_20_SULTAN_MASTER.mp4
-    #
-    # -> KOGIN JINI 20 GWANI MASTER
     # =========================================================
 
     if smart_titles_match(
@@ -4591,8 +4389,6 @@ def smart_build_delivery_caption(
         original["core"]
     ):
 
-        # Idan admin ya ba da episode list,
-        # mu fara neman number da yake ciki.
         if admin["episodes"]:
 
             for number in original["episodes"]:
@@ -4602,9 +4398,6 @@ def smart_build_delivery_caption(
                     episode = number
                     break
 
-        # Idan babu matching number a list,
-        # amma original yana da episode,
-        # mu yi amfani da shi.
         if (
             episode is None
             and original["episodes"]
@@ -4616,33 +4409,12 @@ def smart_build_delivery_caption(
     # STEP 2
     #
     # IDAN ORIGINAL FILE NAME BAI MATCH ADMIN BA
-    #
-    # ZAI WATSAR DA ORIGINAL TITLE.
-    #
-    # SAI YA DOGARA DA ADMIN.
     # =========================================================
 
     if (
         episode is None
         and admin["episodes"]
     ):
-
-        # Position fallback zai yi aiki ne kawai
-        # idan yawan files da yawan episodes
-        # sun yi daidai.
-        #
-        # Misali:
-        #
-        # Admin:
-        # 19,20,21
-        #
-        # Files:
-        # 3
-        #
-        # zai zama:
-        # file 1 -> 19
-        # file 2 -> 20
-        # file 3 -> 21
 
         if (
             len(admin["episodes"]) == total_items
@@ -4654,14 +4426,13 @@ def smart_build_delivery_caption(
             ]
 
     # =========================================================
-    # BUILD FINAL NAME
+    # BUILD FINAL NAME (IDAN FIM 1 NE KO FIYE DA HAKA)
     # =========================================================
 
     final_parts = [
         base_title
     ]
 
-    # Kara episode idan bai riga ya kasance a title ba.
     if episode is not None:
 
         if not re.search(
@@ -4673,21 +4444,24 @@ def smart_build_delivery_caption(
                 str(episode)
             )
 
-    # Kara company din ADMIN
     if company:
 
         final_parts.append(
             company
         )
 
-    # Komai uppercase
     final_title = smart_clean_spaces(
         " ".join(final_parts)
     ).upper()
 
-    # Final caption
+    comp_upper = str(company or "").upper()
+    if "SULTAN" in comp_upper:
+        suffix = "MASTER"
+    else:
+        suffix = "DUBSTUDIO"
+
     return (
-        f"{final_title} MASTER\n"
+        f"{final_title} {suffix}\n"
         f"Uploader From @Algaitabot Telegram"
     )
 
@@ -4796,11 +4570,6 @@ def deliver_items(call):
 
     # =========================================================
     # FETCH ITEMS
-    #
-    # MU ƘARA i.file_name KAWAI.
-    #
-    # Wannan shi ne original filename da Add Movie
-    # ya adana.
     # =========================================================
 
     cur.execute(
@@ -4814,7 +4583,6 @@ def deliver_items(call):
         JOIN items i
             ON i.id = oi.item_id
         WHERE oi.order_id=%s
-        ORDER BY i.id ASC
         """,
         (order_id,)
     )
@@ -4845,9 +4613,38 @@ def deliver_items(call):
         return
 
     # =========================================================
-    # SAFE SEND
-    #
-    # AN BAR KOMAI KAMAR YADDA KAKE.
+    # TSARA FIM DIN IDAN SUN FI GUDA DAYA (SORTING BY EPISODE)
+    # =========================================================
+
+    processed_items = []
+
+    for item in items:
+        item_id = item[0]
+        file_id = item[1]
+        admin_title = item[2]
+        original_file_name = item[3]
+
+        ep_nums = [
+            int(x) for x in re.findall(r"(?<!\d)(\d{1,3})(?!\d)", original_file_name or "")
+            if not (1900 <= int(x) <= 2100)
+        ]
+
+        if not ep_nums and admin_title:
+            ep_nums = [
+                int(x) for x in re.findall(r"(?<!\d)(\d{1,3})(?!\d)", admin_title or "")
+                if not (1900 <= int(x) <= 2100)
+            ]
+
+        ep_val = ep_nums[0] if ep_nums else 999999
+        processed_items.append((ep_val, item))
+
+    if len(items) > 1:
+        processed_items.sort(key=lambda x: x[0])
+
+    sorted_items = [x[1] for x in processed_items]
+
+    # =========================================================
+    # SAFE SEND (TOWAN RETRY SAU DAYA KAFIN CONTACT ADMIN)
     # =========================================================
 
     def safe_send(
@@ -4855,21 +4652,16 @@ def deliver_items(call):
         file_id,
         caption
     ):
-
-        while True:
-
+        attempts = 0
+        while attempts < 2:
             try:
-
                 try:
-
                     return bot.send_video(
                         chat_id,
                         file_id,
                         caption=caption
                     )
-
                 except:
-
                     return bot.send_document(
                         chat_id,
                         file_id,
@@ -4877,51 +4669,45 @@ def deliver_items(call):
                     )
 
             except ApiTelegramException as e:
-
                 if e.error_code == 429:
-
                     retry = int(
                         e.result_json["parameters"][
                             "retry_after"
                         ]
                     )
-
                     bot.send_message(
                         chat_id,
                         "Wait...\n"
                         "Please wait, delivery will continue in a few seconds."
                     )
-
                     time.sleep(retry)
-
+                    continue
+                else:
+                    attempts += 1
+                    if attempts >= 2:
+                        return None
+                    time.sleep(1.0)
                     continue
 
-                else:
-
-                    return None
-
             except Exception as e:
-
                 print(
                     f"Delivery send error: {e}"
                 )
-
-                return None
+                attempts += 1
+                if attempts >= 2:
+                    return None
+                time.sleep(1.0)
+                continue
+        return None
 
     # =========================================================
     # SEND LOOP
     # =========================================================
 
     sent = 0
-    total_items = len(items)
+    total_items = len(sorted_items)
 
-    for item_index, item in enumerate(items):
-
-        # Sabon SELECT yanzu yana da fields 4:
-        # item_id
-        # file_id
-        # admin title
-        # original file name
+    for item_index, item in enumerate(sorted_items):
 
         item_id = item[0]
         file_id = item[1]
@@ -4949,39 +4735,61 @@ def deliver_items(call):
             continue
 
         # =====================================================
-        # SMART CAPTION
+        # SMART CAPTION (TSARIN SUNA DA FILENAME GA FIM MAI FIYAMI)
         # =====================================================
 
         try:
+            if total_items > 1 and original_file_name:
+                orig_meta = smart_extract_original_meta(original_file_name)
+                admin_meta = smart_extract_admin_meta(admin_title)
+                
+                core_name = orig_meta["core"] if orig_meta["core"] else admin_meta["base_title"]
+                comp = admin_meta["company"]
+                
+                episodes_found = orig_meta["episodes"]
+                current_ep = episodes_found[0] if episodes_found else None
+                
+                if current_ep is None and admin_meta["episodes"]:
+                    if 0 <= item_index < len(admin_meta["episodes"]):
+                        current_ep = admin_meta["episodes"][item_index]
 
-            delivery_caption = (
-                smart_build_delivery_caption(
-                    admin_title=admin_title,
-                    original_file_name=original_file_name,
-                    item_index=item_index,
-                    total_items=total_items
+                parts = [core_name]
+                if current_ep is not None:
+                    parts.append(str(current_ep))
+                if comp:
+                    parts.append(comp)
+
+                final_title = smart_clean_spaces(" ".join(parts)).upper()
+                
+                comp_upper = str(comp or "").upper()
+                if "SULTAN" in comp_upper:
+                    suffix = "MASTER"
+                else:
+                    suffix = "DUBSTUDIO"
+
+                delivery_caption = (
+                    f"{final_title} {suffix}\n"
+                    f"Uploader From @Algaitabot Telegram"
                 )
-            )
+            else:
+                delivery_caption = (
+                    smart_build_delivery_caption(
+                        admin_title=admin_title,
+                        original_file_name=original_file_name,
+                        item_index=item_index,
+                        total_items=total_items
+                    )
+                )
 
         except Exception as e:
-
-            # Wannan fallback ne domin smart system
-            # kada ta taba hana delivery.
-            #
-            # Idan wani sabon filename ya zo wanda
-            # parser bai gane ba, bot zai koma
-            # admin title kai tsaye.
-
             print(
                 f"Smart delivery name error: {e}"
             )
-
             fallback_title = (
                 smart_clean_spaces(
                     admin_title
                 ).upper()
             )
-
             delivery_caption = (
                 f"{fallback_title} MASTER\n"
                 f"Uploader From @Algaitabot Telegram"
@@ -5002,8 +4810,6 @@ def deliver_items(call):
 
         # =====================================================
         # SAVE USER MOVIE
-        #
-        # BA A CANZA TABLE KO LOGIC BA.
         # =====================================================
 
         cur.execute(
@@ -5043,7 +4849,7 @@ def deliver_items(call):
             bot.edit_message_text(
                 chat_id=call.message.chat.id,
                 message_id=call.message.message_id,
-                text="Delivery Error ❌😓\nPLEASE CONTACT ADMIN"
+                text="Delivery Error ❌😓\nCONTACT ADMIN"
             )
 
         except Exception as e:
@@ -5054,7 +4860,7 @@ def deliver_items(call):
 
         bot.send_message(
             user_id,
-            "Items could not be delivered."
+            "Items could not be delivered. Please CONTACT ADMIN."
         )
 
         return
@@ -5087,7 +4893,6 @@ def deliver_items(call):
         user_id,
         order_id
     )
-
 
 
 
