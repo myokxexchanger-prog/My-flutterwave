@@ -2011,65 +2011,78 @@ def telegram_webhook():
     return "OK", 200
 
 
+
+
 # ============================================================
 # MOVIE ORIGINAL NAME RECOGNITION SYSTEM
-# PRIVATE CHANNEL BATCH PROCESSING EDITION
+# COMPLETE BATCH + EXACT MATCH + POSTER CONFIRMATION
 #
-# INPUT:
-# MOVIES_NAME CHANNEL
+# SOURCE DATABASE:
+#   items
+#   series
 #
-# SOURCE:
-# MAIN DATABASE -> ITEMS TABLE
+# DESTINATION DATABASE:
+#   movies_name
 #
-# DESTINATION:
-# ALL CHAT DATABASE -> MOVIES_NAME TABLE
+# IMPORTANT:
+#   - NO CHANGE TO ADD MOVIE
+#   - NO CHANGE TO FILM UPDATER
+#   - NO NEW COLUMN IN SERIES
+#   - POSTER: series.item_id = items.id
 #
-# FEATURES:
-# MULTIPLE POSTER COLLECTION
-# DONE COMMAND
-# MEMORY BATCH PROCESSING
-# LIVE EDITABLE PROGRESS
-# EXACT CASE-INSENSITIVE MATCHING
-# DUPLICATE GROUP DETECTION
-# ERROR POSTER REPORTING
-# SAFE DATABASE TRANSACTIONS
+# WORKFLOW:
+#   PHOTO + CAPTION -> MEMORY
+#   DONE -> PROCESS BATCH
+#   ONE GROUP_KEY -> AUTOMATIC PROCESSING
+#   MULTIPLE GROUP_KEYS -> ADMIN POSTER SELECTION
+#   UPDATE -> ONLY UPDATE EXISTING RECORD
+#   NO UPDATE -> INSERT NEW RECORD ONLY
 # ============================================================
 
 import re
+import uuid
 import threading
-import psycopg2
 
-from telebot.apihelper import ApiTelegramException
+from telebot.types import (
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    InputMediaPhoto
+)
 
 
 # ============================================================
-# CONFIGURATION
+# EXISTING VARIABLES REQUIRED
 # ============================================================
-
-# Existing variables in your main code:
 #
-# ADMINS = [6603268127]
-# MOVIES_NAME = -1005672878790
-#
+# bot
+# ADMINS
+# MOVIES_NAME
 # get_conn()
 # get_all_chat_db_conn()
+#
+# movies_name table must already exist with:
+# group_key, original_title, release_year, lead_actors
+#
+# ============================================================
 
 
 # ============================================================
-# BATCH MEMORY
+# MEMORY
 # ============================================================
 
 MOVIES_NAME_BATCH = []
 
 MOVIES_NAME_PROCESSING = False
 
-MOVIES_NAME_LOCK = threading.Lock()
+MOVIES_NAME_LOCK = threading.RLock()
+
+MOVIES_NAME_ACTIVE = {}
 
 
 # ============================================================
-# NORMALIZE MOVIE TITLE
-# CASE INSENSITIVE
-# WHITESPACE NORMALIZATION ONLY
+# TITLE NORMALIZATION
+# Case and extra spaces do not matter.
+# Letters and punctuation must match.
 # ============================================================
 
 def movies_name_normalize(value):
@@ -2082,35 +2095,26 @@ def movies_name_normalize(value):
 
 
 # ============================================================
-# CHANNEL ADMIN SECURITY
+# CHANNEL / ADMIN SECURITY
 # ============================================================
 
-def movies_name_is_admin(m):
+def movies_name_is_admin(message):
 
-    sender = getattr(m, "from_user", None)
+    sender = getattr(message, "from_user", None)
 
-    sender_id = (
-        sender.id if sender else None
+    if sender and sender.id in ADMINS:
+        return True
+
+    sender_chat = getattr(
+        message,
+        "sender_chat",
+        None
     )
 
-    # When Telegram provides the actual sender ID,
-    # it must belong to ADMINS.
-
-    if sender_id is not None:
-
-        return sender_id in ADMINS
-
-    # Telegram may hide the individual author of a
-    # channel post and identify the channel instead.
-    #
-    # In that situation, channel publishing permissions
-    # become the security boundary.
-    #
-    # IMPORTANT:
-    # Only users listed in ADMINS should have permission
-    # to publish in this private input channel.
-
-    sender_chat = getattr(m, "sender_chat", None)
+    # Telegram channel posts may hide the
+    # identity of the individual publisher.
+    # Therefore only trusted admins should
+    # have permission to publish in this channel.
 
     if sender_chat and sender_chat.id == MOVIES_NAME:
         return True
@@ -2119,19 +2123,19 @@ def movies_name_is_admin(m):
 
 
 # ============================================================
-# PARSE MOVIE INFORMATION
+# PARSE CAPTION
 #
 # FIRST LINE:
-# ADMIN MOVIE TITLE
+#   Exact admin movie title
 #
-# OPTIONAL LINES BEFORE YEAR:
-# LEAD ACTORS
+# OPTIONAL MIDDLE LINES:
+#   Lead actors
 #
-# YEAR LINE:
-# ORIGINAL TITLE - YEAR
+# REQUIRED LINE:
+#   Original title - YEAR
 #
-# REMAINING LINES:
-# IGNORED
+# OPTIONAL FINAL LINE:
+#   UPDATE
 # ============================================================
 
 def movies_name_parse(text):
@@ -2145,19 +2149,22 @@ def movies_name_parse(text):
     if len(lines) < 2:
         return None
 
-    # First line is the exact Admin movie title.
+    update_mode = False
+
+    # UPDATE is valid ONLY as the final non-empty line.
+
+    if lines[-1].casefold() == "update":
+
+        update_mode = True
+        lines.pop()
+
+    if len(lines) < 2:
+        return None
 
     admin_title = lines[0]
 
     if not admin_title:
         return None
-
-    # Accept:
-    # China war-2017
-    # China war- 2017
-    # China war -2017
-    # China war - 2017
-    # China war  -    2017
 
     year_pattern = re.compile(
         r"^(.+?)\s*-\s*((?:18|19|20|21)\d{2})$"
@@ -2184,11 +2191,6 @@ def movies_name_parse(text):
     if not original_title or not release_year:
         return None
 
-    if not original_title.strip():
-        return None
-
-    # Lines before original title/year are actors.
-
     actor_lines = lines[1:original_index]
 
     lead_actors = (
@@ -2197,25 +2199,31 @@ def movies_name_parse(text):
     )
 
     return {
+
         "admin_title": admin_title,
+
         "original_title": original_title,
+
         "release_year": release_year,
-        "lead_actors": lead_actors
+
+        "lead_actors": lead_actors,
+
+        "update_mode": update_mode
+
     }
 
 
 # ============================================================
-# FIND EXACT MOVIE MATCH IN ITEMS
+# FIND EXACT MOVIE IN ITEMS
 #
-# SAME LETTERS REQUIRED
-# CASE DOES NOT MATTER
-# EXTRA SPACES DO NOT MATTER
-# PARENTHESES MUST MATCH
-# NO PARTIAL MATCHING
-# NO FUZZY MATCHING
+# POSTER RELATION:
+# series.item_id = items.id
+#
+# SAME GROUP KEY = SAME MOVIE
+# DIFFERENT GROUP KEYS = DIFFERENT CANDIDATES
 # ============================================================
 
-def movies_name_find_group_key(admin_title):
+def movies_name_find_candidates(admin_title):
 
     conn = None
     cur = None
@@ -2231,32 +2239,52 @@ def movies_name_find_group_key(admin_title):
 
         cur.execute(
             """
-            SELECT DISTINCT group_key, title
-            FROM items
+            SELECT
+                i.id,
+                i.group_key,
+                i.title,
+                s.poster_file_id
+
+            FROM items i
+
+            LEFT JOIN series s
+                ON s.item_id = i.id
+
             WHERE
                 LOWER(
                     REGEXP_REPLACE(
-                        BTRIM(title),
+                        BTRIM(i.title),
                         '[[:space:]]+',
                         ' ',
                         'g'
                     )
                 ) = LOWER(%s)
+
+            ORDER BY i.id ASC
             """,
             (normalized_title,)
         )
 
-        results = cur.fetchall()
+        rows = cur.fetchall()
 
-        matched_group_keys = set()
+        if not rows:
+
+            return {
+                "status": "not_found",
+                "candidates": []
+            }
+
+        groups = {}
 
         missing_group_key = False
 
-        # Python performs the final exact comparison.
+        for item_id, group_key, db_title, poster_file_id in rows:
 
-        for group_key, db_title in results:
+            # Final exact comparison.
+            if movies_name_normalize(
+                db_title
+            ) != normalized_title:
 
-            if movies_name_normalize(db_title) != normalized_title:
                 continue
 
             if not group_key or not str(group_key).strip():
@@ -2264,54 +2292,89 @@ def movies_name_find_group_key(admin_title):
                 missing_group_key = True
                 continue
 
-            matched_group_keys.add(str(group_key))
+            key = str(group_key)
 
-        # No matching title.
+            if key not in groups:
 
-        if not matched_group_keys:
+                groups[key] = {
 
-            return {
-                "status": "not_found",
-                "group_key": None
-            }
+                    "group_key": key,
 
-        # A matching movie without a group key
-        # makes the result unsafe to identify.
+                    "title": db_title,
+
+                    "poster_file_id": poster_file_id,
+
+                    "item_ids": [item_id]
+
+                }
+
+            else:
+
+                groups[key]["item_ids"].append(item_id)
+
+                # Use the first available poster
+                # belonging to this same group.
+
+                if (
+                    not groups[key]["poster_file_id"]
+                    and poster_file_id
+                ):
+
+                    groups[key]["poster_file_id"] = poster_file_id
 
         if missing_group_key:
 
             return {
                 "status": "missing_group_key",
-                "group_key": None
+                "candidates": []
             }
 
-        # More than one distinct group key means
-        # multiple movies share the same exact title.
+        candidates = list(groups.values())
 
-        if len(matched_group_keys) > 1:
+        if not candidates:
 
             return {
+                "status": "not_found",
+                "candidates": []
+            }
+
+        if len(candidates) > 1:
+
+            return {
+
                 "status": "duplicate",
-                "group_key": None,
-                "count": len(matched_group_keys)
+
+                "candidates": candidates,
+
+                "count": len(candidates)
+
             }
 
         return {
+
             "status": "success",
-            "group_key": next(iter(matched_group_keys))
+
+            "group_key": candidates[0]["group_key"],
+
+            "candidates": candidates
+
         }
 
     except Exception as e:
 
         print(
-            "❌ MOVIES_NAME ITEMS SEARCH ERROR:",
+            "❌ MOVIE / POSTER SEARCH ERROR:",
             repr(e)
         )
 
         return {
+
             "status": "database_error",
-            "group_key": None,
+
+            "candidates": [],
+
             "error": str(e)
+
         }
 
     finally:
@@ -2324,15 +2387,26 @@ def movies_name_find_group_key(admin_title):
 
 
 # ============================================================
-# SAVE MOVIE INFORMATION
-# ALL CHAT DATABASE
+# SAVE / UPDATE MOVIE NAME
+#
+# NO UPDATE:
+#   INSERT ONLY.
+#   EXISTING RECORD = REJECT.
+#
+# UPDATE:
+#   UPDATE EXISTING RECORD ONLY.
+#   MISSING RECORD = REJECT.
+#
+# OMITTED ACTORS DURING UPDATE:
+#   KEEP OLD ACTORS.
 # ============================================================
 
 def movies_name_save(
     group_key,
     original_title,
     release_year,
-    lead_actors
+    lead_actors,
+    update_mode=False
 ):
 
     conn = None
@@ -2341,8 +2415,51 @@ def movies_name_save(
     try:
 
         conn = get_all_chat_db_conn()
-
         cur = conn.cursor()
+
+        if update_mode:
+
+            cur.execute(
+                """
+                UPDATE movies_name
+
+                SET
+                    original_title = %s,
+                    release_year = %s,
+                    lead_actors = COALESCE(
+                        %s,
+                        lead_actors
+                    )
+
+                WHERE group_key = %s
+
+                RETURNING group_key
+                """,
+                (
+                    original_title,
+                    release_year,
+                    lead_actors,
+                    group_key
+                )
+            )
+
+            updated = cur.fetchone()
+
+            if not updated:
+
+                conn.rollback()
+
+                return {
+                    "status": "update_not_found"
+                }
+
+            conn.commit()
+
+            return {
+                "status": "updated"
+            }
+
+        # INSERT MODE: never overwrite an existing record.
 
         cur.execute(
             """
@@ -2352,19 +2469,13 @@ def movies_name_save(
                 release_year,
                 lead_actors
             )
+
             VALUES (%s, %s, %s, %s)
 
             ON CONFLICT (group_key)
-            DO UPDATE SET
+            DO NOTHING
 
-                original_title = EXCLUDED.original_title,
-
-                release_year = EXCLUDED.release_year,
-
-                lead_actors = COALESCE(
-                    EXCLUDED.lead_actors,
-                    movies_name.lead_actors
-                )
+            RETURNING group_key
             """,
             (
                 group_key,
@@ -2374,9 +2485,21 @@ def movies_name_save(
             )
         )
 
+        inserted = cur.fetchone()
+
+        if not inserted:
+
+            conn.rollback()
+
+            return {
+                "status": "already_exists"
+            }
+
         conn.commit()
 
-        return True
+        return {
+            "status": "inserted"
+        }
 
     except Exception as e:
 
@@ -2384,11 +2507,17 @@ def movies_name_save(
             conn.rollback()
 
         print(
-            "❌ MOVIES_NAME SAVE ERROR:",
+            "❌ MOVIES_NAME DATABASE ERROR:",
             repr(e)
         )
 
-        return False
+        return {
+
+            "status": "database_error",
+
+            "error": str(e)
+
+        }
 
     finally:
 
@@ -2400,310 +2529,387 @@ def movies_name_save(
 
 
 # ============================================================
-# SEND ERROR REPORT
-# POSTER + REASON
+# SAVE SELECTED MOVIE
+# ============================================================
+
+def movies_name_process_selected(
+    item,
+    movie_data,
+    group_key
+):
+
+    result = movies_name_save(
+
+        group_key=group_key,
+
+        original_title=movie_data["original_title"],
+
+        release_year=movie_data["release_year"],
+
+        lead_actors=movie_data["lead_actors"],
+
+        update_mode=movie_data["update_mode"]
+
+    )
+
+    status = result["status"]
+
+    if status == "inserted":
+        action = "INSERTED"
+
+    elif status == "updated":
+        action = "UPDATED"
+
+    elif status == "already_exists":
+
+        return {
+
+            "success": False,
+
+            "reason": (
+                "DUPLICATE RECORD.\n"
+                "This group_key already exists in movies_name.\n"
+                "Nothing was changed.\n"
+                "Use UPDATE as the final caption line to update it."
+            )
+
+        }
+
+    elif status == "update_not_found":
+
+        return {
+
+            "success": False,
+
+            "reason": (
+                "UPDATE REJECTED.\n"
+                "No existing movies_name record was found "
+                "for this group_key.\n"
+                "No new record was created."
+            )
+
+        }
+
+    else:
+
+        return {
+
+            "success": False,
+
+            "reason": (
+                "DATABASE ERROR:\n"
+                + result.get("error", "Unknown error")
+            )
+
+        }
+
+    return {
+
+        "success": True,
+
+        "action": action,
+
+        "group_key": group_key,
+
+        "admin_title": movie_data["admin_title"]
+
+    }
+
+
+# ============================================================
+# ERROR REPORT
 # ============================================================
 
 def movies_name_send_error(item, index, reason):
 
     try:
 
-        error_caption = (
+        caption = (
             f"❌ MOVIE ERROR\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"Item: {index}\n\n"
             f"Reason:\n{reason}"
         )
 
-        photo_file_id = item.get("photo_file_id")
+        photo = item.get("photo_file_id")
 
-        if photo_file_id:
+        if photo:
 
             bot.send_photo(
                 MOVIES_NAME,
-                photo_file_id,
-                caption=error_caption,
+                photo,
+                caption=caption,
                 parse_mode=None
             )
 
         else:
 
-            original_text = item.get("text", "")
-
             bot.send_message(
                 MOVIES_NAME,
-                error_caption
-                + "\n\nOriginal message:\n"
-                + original_text[:1500],
+                caption + "\n\n" + item.get("text", "")[:1500],
                 parse_mode=None
             )
 
     except Exception as e:
 
         print(
-            "❌ MOVIES_NAME ERROR REPORT FAILED:",
+            "❌ ERROR REPORT FAILED:",
             repr(e)
         )
 
 
 # ============================================================
-# PROCESS ONE MOVIE
+# PROGRESS
 # ============================================================
 
-def movies_name_process_one(item):
-
-    incoming_text = item.get("text", "")
-
-    # ================= PARSE =================
-
-    movie_data = movies_name_parse(
-        incoming_text
-    )
-
-    if not movie_data:
-
-        return {
-            "success": False,
-            "reason": (
-                "Invalid format.\n"
-                "Expected:\n"
-                "Admin Movie Title\n"
-                "Optional Lead Actors\n"
-                "Original Movie Title - YEAR\n"
-                "Price or other lines may follow."
-            )
-        }
-
-    admin_title = movie_data["admin_title"]
-
-    original_title = movie_data["original_title"]
-
-    release_year = movie_data["release_year"]
-
-    lead_actors = movie_data["lead_actors"]
-
-    # ================= SEARCH ITEMS =================
-
-    match_result = movies_name_find_group_key(
-        admin_title
-    )
-
-    status = match_result["status"]
-
-    if status == "not_found":
-
-        return {
-            "success": False,
-            "reason": (
-                "Movie not found in items.\n"
-                "Full movie title does not match."
-            )
-        }
-
-    if status == "duplicate":
-
-        return {
-            "success": False,
-            "reason": (
-                "DUPLICATE MOVIE TITLE!\n"
-                f"Found {match_result['count']} "
-                "different group keys for this exact title.\n"
-                "Saving rejected to prevent wrong matching."
-            )
-        }
-
-    if status == "missing_group_key":
-
-        return {
-            "success": False,
-            "reason": (
-                "Matching movie exists, but at least one "
-                "matching item has an empty group_key.\n"
-                "Saving rejected."
-            )
-        }
-
-    if status == "database_error":
-
-        return {
-            "success": False,
-            "reason": (
-                "Items database search failed.\n"
-                + match_result.get("error", "")
-            )
-        }
-
-    group_key = match_result["group_key"]
-
-    # ================= SAVE =================
-
-    saved = movies_name_save(
-        group_key=group_key,
-        original_title=original_title,
-        release_year=release_year,
-        lead_actors=lead_actors
-    )
-
-    if not saved:
-
-        return {
-            "success": False,
-            "reason": (
-                "Could not save movie information "
-                "into ALL CHAT DATABASE."
-            )
-        }
-
-    return {
-        "success": True,
-        "group_key": group_key,
-        "admin_title": admin_title,
-        "original_title": original_title,
-        "release_year": release_year,
-        "lead_actors": lead_actors
-    }
-
-
-# ============================================================
-# UPDATE PROGRESS MESSAGE
-# ============================================================
-
-def movies_name_update_progress(
-    message_id,
-    completed,
-    total
-):
+def movies_name_update_progress(active):
 
     try:
 
         bot.edit_message_text(
-            f"⏳ Work done {completed}/{total}",
+
+            f"⏳ Work done "
+            f"{active['index']}/{active['total']}",
+
             MOVIES_NAME,
-            message_id,
+
+            active["progress_message_id"],
+
             parse_mode=None
+
         )
 
     except Exception as e:
 
         print(
-            "⚠️ MOVIES_NAME PROGRESS EDIT ERROR:",
+            "⚠️ PROGRESS UPDATE ERROR:",
             repr(e)
         )
 
 
 # ============================================================
-# PROCESS COMPLETE BATCH
+# SELECTION KEYBOARD
+#
+# ROW 1: YES | NEXT
+# ROW 2: BACK | NO
 # ============================================================
 
-def movies_name_process_batch(batch):
+def movies_name_selection_keyboard(token):
 
-    global MOVIES_NAME_PROCESSING
+    kb = InlineKeyboardMarkup()
 
-    total = len(batch)
+    kb.row(
 
-    successful = 0
-    failed = 0
+        InlineKeyboardButton(
+            "Yes ✅",
+            callback_data=f"mn:yes:{token}"
+        ),
 
-    progress_message = None
-
-    try:
-
-        if total == 0:
-            return
-
-        # ================= START PROGRESS =================
-
-        progress_message = bot.send_message(
-            MOVIES_NAME,
-            f"⏳ Work done 0/{total}",
-            parse_mode=None
+        InlineKeyboardButton(
+            "Next ➡️",
+            callback_data=f"mn:next:{token}"
         )
 
-        # ================= PROCESS ONE BY ONE =================
+    )
 
-        for index, item in enumerate(batch, start=1):
+    kb.row(
+
+        InlineKeyboardButton(
+            "↖️ Back",
+            callback_data=f"mn:back:{token}"
+        ),
+
+        InlineKeyboardButton(
+            "No ❌",
+            callback_data=f"mn:no:{token}"
+        )
+
+    )
+
+    return kb
+
+
+# ============================================================
+# SHOW CANDIDATE POSTER
+# ============================================================
+
+def movies_name_show_candidate(active):
+
+    candidates = active["candidates"]
+
+    page = active["page"]
+
+    candidate = candidates[page]
+
+    total = len(candidates)
+
+    caption = (
+
+        "⚠️ AN SAMU FINA-FINAI MASU SUNA IRI DAYA\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+
+        f"Admin title: {active['movie_data']['admin_title']}\n\n"
+
+        f"Candidate: {page + 1}/{total}\n\n"
+
+        f"Group Key:\n{candidate['group_key']}\n\n"
+
+        "Shin wannan ne fim ɗin da kake nufi?\n\n"
+
+        "Yes = Zaɓi wannan fim\n"
+        "Next = Fim na gaba\n"
+        "Back = Fim na baya\n"
+        "No = Soke dukkan batch ɗin"
+
+    )
+
+    keyboard = movies_name_selection_keyboard(
+        active["token"]
+    )
+
+    photo = candidate.get("poster_file_id")
+
+    old_message_id = active.get(
+        "selection_message_id"
+    )
+
+    if photo:
+
+        if old_message_id:
 
             try:
 
-                result = movies_name_process_one(item)
+                bot.edit_message_media(
 
-                if result["success"]:
+                    media=InputMediaPhoto(
+                        media=photo,
+                        caption=caption
+                    ),
 
-                    successful += 1
+                    chat_id=MOVIES_NAME,
 
-                    print(
-                        "✅ MOVIE SAVED:",
-                        result["admin_title"],
-                        result["group_key"]
-                    )
+                    message_id=old_message_id,
 
-                else:
+                    reply_markup=keyboard
 
-                    failed += 1
+                )
 
-                    movies_name_send_error(
-                        item,
-                        index,
-                        result["reason"]
-                    )
-
-                    print(
-                        "❌ MOVIE FAILED:",
-                        result["reason"]
-                    )
+                return
 
             except Exception as e:
 
-                failed += 1
-
-                movies_name_send_error(
-                    item,
-                    index,
-                    "Unexpected processing error:\n"
-                    + repr(e)
-                )
-
                 print(
-                    "🔥 MOVIE PROCESSING ERROR:",
+                    "⚠️ POSTER EDIT ERROR:",
                     repr(e)
                 )
 
-            # Update progress after every item.
+                try:
 
-            movies_name_update_progress(
-                progress_message.message_id,
-                index,
-                total
-            )
+                    bot.delete_message(
+                        MOVIES_NAME,
+                        old_message_id
+                    )
 
-        # ================= FINAL REPORT =================
+                except:
+                    pass
 
-        try:
+        msg = bot.send_photo(
 
-            bot.send_message(
-                MOVIES_NAME,
-                (
-                    "🏁 MOVIES BATCH COMPLETED\n"
-                    "━━━━━━━━━━━━━━━━━━\n"
-                    f"📦 Total: {total}\n"
-                    f"✅ Successful: {successful}\n"
-                    f"❌ Failed: {failed}\n\n"
-                    "All items have been processed."
-                ),
-                parse_mode=None
-            )
+            MOVIES_NAME,
 
-        except Exception as e:
+            photo,
 
-            print(
-                "❌ FINAL REPORT ERROR:",
-                repr(e)
-            )
+            caption=caption,
+
+            parse_mode=None,
+
+            reply_markup=keyboard
+
+        )
+
+    else:
+
+        text = (
+            caption
+            + "\n\n⚠️ Ba a samu poster a series table ta item_id ba."
+        )
+
+        if old_message_id:
+
+            try:
+
+                bot.edit_message_text(
+
+                    text,
+
+                    MOVIES_NAME,
+
+                    old_message_id,
+
+                    reply_markup=keyboard,
+
+                    parse_mode=None
+
+                )
+
+                return
+
+            except:
+                pass
+
+        msg = bot.send_message(
+
+            MOVIES_NAME,
+
+            text,
+
+            parse_mode=None,
+
+            reply_markup=keyboard
+
+        )
+
+    active["selection_message_id"] = msg.message_id
+
+
+# ============================================================
+# FINISH BATCH
+# ============================================================
+
+def movies_name_finish_batch(token):
+
+    global MOVIES_NAME_PROCESSING
+
+    active = MOVIES_NAME_ACTIVE.get(token)
+
+    if not active:
+        return
+
+    try:
+
+        bot.send_message(
+
+            MOVIES_NAME,
+
+            (
+                "🏁 MOVIES BATCH COMPLETED\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                f"📦 Total: {active['total']}\n"
+                f"✅ Successful: {active['successful']}\n"
+                f"🆕 New records: {active['inserted']}\n"
+                f"🔄 Updated records: {active['updated']}\n"
+                f"❌ Failed: {active['failed']}\n\n"
+                "All items have been processed."
+            ),
+
+            parse_mode=None
+
+        )
 
     except Exception as e:
 
         print(
-            "🔥 MOVIES BATCH FATAL ERROR:",
+            "❌ FINAL REPORT ERROR:",
             repr(e)
         )
 
@@ -2711,18 +2917,609 @@ def movies_name_process_batch(batch):
 
         with MOVIES_NAME_LOCK:
 
+            MOVIES_NAME_ACTIVE.pop(token, None)
+
             MOVIES_NAME_PROCESSING = False
 
         print(
-            "✅ MOVIES BATCH PROCESSING FINISHED"
+            "✅ MOVIES BATCH FINISHED"
         )
 
 
 # ============================================================
-# MAIN PRIVATE CHANNEL HANDLER
-#
-# COLLECT PHOTOS AND TEXT
-# NO RESPONSE UNTIL DONE
+# PROCESS NEXT ITEM
+# ============================================================
+
+def movies_name_process_next(token):
+
+    active = MOVIES_NAME_ACTIVE.get(token)
+
+    if not active:
+        return
+
+    try:
+
+        while active["index"] < active["total"]:
+
+            if token not in MOVIES_NAME_ACTIVE:
+                return
+
+            index = active["index"]
+
+            item = active["batch"][index]
+
+            try:
+
+                # ================= PARSE =================
+
+                movie_data = movies_name_parse(
+                    item.get("text", "")
+                )
+
+                if not movie_data:
+
+                    active["failed"] += 1
+
+                    movies_name_send_error(
+
+                        item,
+
+                        index + 1,
+
+                        (
+                            "INVALID CAPTION FORMAT.\n\n"
+                            "Expected:\n"
+                            "Admin title\n"
+                            "Optional actors\n"
+                            "Original title - YEAR\n"
+                            "Optional extra lines\n"
+                            "Optional final UPDATE"
+                        )
+
+                    )
+
+                    active["index"] += 1
+
+                    movies_name_update_progress(active)
+
+                    continue
+
+                # ================= SEARCH ITEMS =================
+
+                match = movies_name_find_candidates(
+                    movie_data["admin_title"]
+                )
+
+                status = match["status"]
+
+                if status == "not_found":
+
+                    active["failed"] += 1
+
+                    movies_name_send_error(
+
+                        item,
+
+                        index + 1,
+
+                        "MOVIE NOT FOUND IN ITEMS. Exact title match failed."
+
+                    )
+
+                    active["index"] += 1
+
+                    movies_name_update_progress(active)
+
+                    continue
+
+                if status == "missing_group_key":
+
+                    active["failed"] += 1
+
+                    movies_name_send_error(
+
+                        item,
+
+                        index + 1,
+
+                        "Matching item has a missing group_key. Saving rejected."
+
+                    )
+
+                    active["index"] += 1
+
+                    movies_name_update_progress(active)
+
+                    continue
+
+                if status == "database_error":
+
+                    active["failed"] += 1
+
+                    movies_name_send_error(
+
+                        item,
+
+                        index + 1,
+
+                        "ITEMS / SERIES DATABASE ERROR:\n"
+                        + match.get("error", "")
+
+                    )
+
+                    active["index"] += 1
+
+                    movies_name_update_progress(active)
+
+                    continue
+
+                # =================================================
+                # MULTIPLE DIFFERENT GROUP KEYS
+                # ADMIN MUST SELECT THE CORRECT POSTER
+                # =================================================
+
+                if status == "duplicate":
+
+                    active["current_item"] = item
+
+                    active["movie_data"] = movie_data
+
+                    active["candidates"] = match["candidates"]
+
+                    active["page"] = 0
+
+                    active["waiting_selection"] = True
+
+                    movies_name_show_candidate(active)
+
+                    print(
+                        "⚠️ ADMIN SELECTION REQUIRED:",
+                        movie_data["admin_title"]
+                    )
+
+                    return
+
+                # =================================================
+                # ONLY ONE GROUP KEY
+                # CONTINUE AUTOMATICALLY
+                # =================================================
+
+                group_key = match["group_key"]
+
+                result = movies_name_process_selected(
+
+                    item,
+
+                    movie_data,
+
+                    group_key
+
+                )
+
+                if result["success"]:
+
+                    active["successful"] += 1
+
+                    if result["action"] == "INSERTED":
+
+                        active["inserted"] += 1
+
+                    elif result["action"] == "UPDATED":
+
+                        active["updated"] += 1
+
+                    print(
+                        "✅ MOVIE SAVED:",
+                        result["action"],
+                        group_key
+                    )
+
+                else:
+
+                    active["failed"] += 1
+
+                    movies_name_send_error(
+
+                        item,
+
+                        index + 1,
+
+                        result["reason"]
+
+                    )
+
+                active["index"] += 1
+
+                movies_name_update_progress(active)
+
+            except Exception as e:
+
+                active["failed"] += 1
+
+                movies_name_send_error(
+
+                    item,
+
+                    index + 1,
+
+                    "UNEXPECTED ERROR:\n" + repr(e)
+
+                )
+
+                active["index"] += 1
+
+                movies_name_update_progress(active)
+
+        movies_name_finish_batch(token)
+
+    except Exception as e:
+
+        print(
+            "🔥 BATCH PROCESSING ERROR:",
+            repr(e)
+        )
+
+        movies_name_finish_batch(token)
+
+
+# ============================================================
+# CANCEL ENTIRE BATCH
+# ============================================================
+
+def movies_name_cancel_batch(token):
+
+    global MOVIES_NAME_PROCESSING
+
+    active = MOVIES_NAME_ACTIVE.get(token)
+
+    if not active:
+        return
+
+    remaining = (
+        active["total"] - active["index"]
+    )
+
+    with MOVIES_NAME_LOCK:
+
+        MOVIES_NAME_ACTIVE.pop(token, None)
+
+        MOVIES_NAME_BATCH.clear()
+
+        MOVIES_NAME_PROCESSING = False
+
+    try:
+
+        bot.send_message(
+
+            MOVIES_NAME,
+
+            (
+                "🚫 MOVIES BATCH CANCELLED\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "Admin cancelled the operation.\n\n"
+                f"Remaining items discarded: {remaining}\n"
+                "No further processing will continue."
+            ),
+
+            parse_mode=None
+
+        )
+
+    except Exception as e:
+
+        print(
+            "❌ CANCEL MESSAGE ERROR:",
+            repr(e)
+        )
+
+    print(
+        "🚫 MOVIES BATCH CANCELLED"
+    )
+
+
+# ============================================================
+# BUTTON CALLBACK
+# YES / NEXT / BACK / NO
+# ============================================================
+
+@bot.callback_query_handler(
+    func=lambda c: (
+        c.data
+        and c.data.startswith("mn:")
+    )
+)
+def movies_name_selection_callback(c):
+
+    try:
+
+        # ================= ADMIN SECURITY =================
+
+        if c.from_user.id not in ADMINS:
+
+            bot.answer_callback_query(
+
+                c.id,
+
+                "⛔ Ba ka da izinin yin wannan aikin.",
+
+                show_alert=True
+
+            )
+
+            return
+
+        # ================= CHANNEL SECURITY =================
+
+        if (
+            not c.message
+            or c.message.chat.id != MOVIES_NAME
+        ):
+
+            bot.answer_callback_query(
+
+                c.id,
+
+                "Invalid channel.",
+
+                show_alert=True
+
+            )
+
+            return
+
+        parts = c.data.split(":")
+
+        if len(parts) != 3:
+            return
+
+        action = parts[1]
+
+        token = parts[2]
+
+        active = MOVIES_NAME_ACTIVE.get(token)
+
+        if not active:
+
+            bot.answer_callback_query(
+
+                c.id,
+
+                "Wannan aikin ya ƙare ko an soke shi.",
+
+                show_alert=True
+
+            )
+
+            return
+
+        if not active.get("waiting_selection"):
+
+            bot.answer_callback_query(
+
+                c.id,
+
+                "Babu zaɓin da ake jira.",
+
+                show_alert=True
+
+            )
+
+            return
+
+        # ================= NEXT =================
+
+        if action == "next":
+
+            if active["page"] >= len(active["candidates"]) - 1:
+
+                bot.answer_callback_query(
+
+                    c.id,
+
+                    "❌ Babu wani fim a page din gaba!",
+
+                    show_alert=True
+
+                )
+
+                return
+
+            active["page"] += 1
+
+            movies_name_show_candidate(active)
+
+            bot.answer_callback_query(
+                c.id,
+                "An buɗe fim na gaba."
+            )
+
+            return
+
+        # ================= BACK =================
+
+        if action == "back":
+
+            if active["page"] <= 0:
+
+                bot.answer_callback_query(
+
+                    c.id,
+
+                    "❌ Babu wani fim a page din baya!",
+
+                    show_alert=True
+
+                )
+
+                return
+
+            active["page"] -= 1
+
+            movies_name_show_candidate(active)
+
+            bot.answer_callback_query(
+                c.id,
+                "An koma fim na baya."
+            )
+
+            return
+
+        # ================= NO =================
+
+        if action == "no":
+
+            bot.answer_callback_query(
+
+                c.id,
+
+                "An soke batch ɗin.",
+
+                show_alert=True
+
+            )
+
+            movies_name_cancel_batch(token)
+
+            return
+
+        # ================= YES =================
+
+        if action == "yes":
+
+            # Prevent repeated clicks.
+
+            active["waiting_selection"] = False
+
+            candidate = active["candidates"][
+                active["page"]
+            ]
+
+            group_key = candidate["group_key"]
+
+            item = active["current_item"]
+
+            movie_data = active["movie_data"]
+
+            bot.answer_callback_query(
+
+                c.id,
+
+                "Ana adana fim ɗin da ka zaɓa..."
+
+            )
+
+            try:
+
+                result = movies_name_process_selected(
+
+                    item,
+
+                    movie_data,
+
+                    group_key
+
+                )
+
+                if result["success"]:
+
+                    active["successful"] += 1
+
+                    if result["action"] == "INSERTED":
+
+                        active["inserted"] += 1
+
+                    elif result["action"] == "UPDATED":
+
+                        active["updated"] += 1
+
+                    print(
+                        "✅ ADMIN SELECTED:",
+                        group_key
+                    )
+
+                else:
+
+                    active["failed"] += 1
+
+                    movies_name_send_error(
+
+                        item,
+
+                        active["index"] + 1,
+
+                        result["reason"]
+
+                    )
+
+            except Exception as e:
+
+                active["failed"] += 1
+
+                movies_name_send_error(
+
+                    item,
+
+                    active["index"] + 1,
+
+                    "SELECTION SAVE ERROR:\n" + repr(e)
+
+                )
+
+            # ================= NEXT BATCH ITEM =================
+
+            active["index"] += 1
+
+            active["current_item"] = None
+
+            active["movie_data"] = None
+
+            active["candidates"] = []
+
+            active["page"] = 0
+
+            active["selection_message_id"] = None
+
+            movies_name_update_progress(active)
+
+            threading.Thread(
+
+                target=movies_name_process_next,
+
+                args=(token,),
+
+                daemon=True
+
+            ).start()
+
+            return
+
+    except Exception as e:
+
+        print(
+            "🔥 MOVIES CALLBACK ERROR:",
+            repr(e)
+        )
+
+        try:
+
+            bot.answer_callback_query(
+
+                c.id,
+
+                "An samu kuskuren system.",
+
+                show_alert=True
+
+            )
+
+        except:
+            pass
+
+
+# ============================================================
+# PRIVATE CHANNEL HANDLER
+# COLLECT PHOTO / TEXT
+# WAIT FOR DONE
 # ============================================================
 
 @bot.channel_post_handler(
@@ -2734,28 +3531,17 @@ def movies_name_channel_handler(m):
 
     try:
 
-        # ====================================================
-        # 1. CHANNEL SECURITY
-        # ====================================================
+        # ================= CHANNEL CHECK =================
 
         if m.chat.id != MOVIES_NAME:
             return
 
-        # ====================================================
-        # 2. ADMIN SECURITY
-        # ====================================================
+        # ================= ADMIN CHECK =================
 
         if not movies_name_is_admin(m):
-
-            print(
-                "⛔ MOVIES_NAME UNAUTHORIZED MESSAGE"
-            )
-
             return
 
-        # ====================================================
-        # 3. GET INPUT
-        # ====================================================
+        # ================= READ INPUT =================
 
         if m.content_type == "photo":
 
@@ -2772,9 +3558,7 @@ def movies_name_channel_handler(m):
         else:
             return
 
-        # ====================================================
-        # 4. DONE COMMAND
-        # ====================================================
+        # ================= DONE =================
 
         if (
             m.content_type == "text"
@@ -2786,9 +3570,13 @@ def movies_name_channel_handler(m):
                 if MOVIES_NAME_PROCESSING:
 
                     bot.send_message(
+
                         MOVIES_NAME,
+
                         "⚠️ Another batch is currently processing.",
+
                         parse_mode=None
+
                     )
 
                     return
@@ -2796,38 +3584,98 @@ def movies_name_channel_handler(m):
                 if not MOVIES_NAME_BATCH:
 
                     bot.send_message(
+
                         MOVIES_NAME,
+
                         "⚠️ No movies waiting for processing.",
+
                         parse_mode=None
+
                     )
 
                     return
 
-                # Copy current batch from memory.
-
-                batch_to_process = list(
-                    MOVIES_NAME_BATCH
-                )
+                batch = list(MOVIES_NAME_BATCH)
 
                 MOVIES_NAME_BATCH.clear()
 
                 MOVIES_NAME_PROCESSING = True
 
-            # Start processing after releasing the lock.
+                token = uuid.uuid4().hex[:10]
+
+                progress = bot.send_message(
+
+                    MOVIES_NAME,
+
+                    f"⏳ Work done 0/{len(batch)}",
+
+                    parse_mode=None
+
+                )
+
+                MOVIES_NAME_ACTIVE[token] = {
+
+                    "token": token,
+
+                    "batch": batch,
+
+                    "index": 0,
+
+                    "total": len(batch),
+
+                    "successful": 0,
+
+                    "failed": 0,
+
+                    "inserted": 0,
+
+                    "updated": 0,
+
+                    "progress_message_id": progress.message_id,
+
+                    "waiting_selection": False,
+
+                    "current_item": None,
+
+                    "movie_data": None,
+
+                    "candidates": [],
+
+                    "page": 0,
+
+                    "selection_message_id": None
+
+                }
 
             threading.Thread(
-                target=movies_name_process_batch,
-                args=(batch_to_process,),
+
+                target=movies_name_process_next,
+
+                args=(token,),
+
                 daemon=True
+
             ).start()
 
             return
 
-        # ====================================================
-        # 5. COLLECT MESSAGE IN MEMORY
-        # ====================================================
+        # ================= BLOCK DURING PROCESSING =================
 
         with MOVIES_NAME_LOCK:
+
+            if MOVIES_NAME_PROCESSING:
+
+                bot.send_message(
+
+                    MOVIES_NAME,
+
+                    "⚠️ Ana sarrafa batch na yanzu. Jira ya gama.",
+
+                    parse_mode=None
+
+                )
+
+                return
 
             MOVIES_NAME_BATCH.append({
 
@@ -2841,13 +3689,9 @@ def movies_name_channel_handler(m):
 
             })
 
-            current_total = len(
-                MOVIES_NAME_BATCH
-            )
+            current_total = len(MOVIES_NAME_BATCH)
 
-        # NO TELEGRAM RESPONSE HERE.
-        # ADMIN CAN SEND 50 OR MORE ITEMS.
-        # PROCESSING STARTS ONLY AFTER DONE.
+        # Silent collection until DONE.
 
         print(
             f"📥 MOVIES_NAME COLLECTED: {current_total}"
@@ -2862,24 +3706,10 @@ def movies_name_channel_handler(m):
 
 
 # ============================================================
-# SYSTEM READY
+# END OF MOVIE ORIGINAL NAME SYSTEM
 # ============================================================
 
-print(
-    "✅ MOVIE ORIGINAL NAME RECOGNITION SYSTEM READY"
-)
 
-print(
-    "✅ PRIVATE CHANNEL BATCH COLLECTION ENABLED"
-)
-
-print(
-    "✅ WAITING FOR ADMIN INPUT AND DONE COMMAND"
-)
-
-# ============================================================
-# END OF MOVIES NAME SYSTEM
-# ============================================================
 
 
 
