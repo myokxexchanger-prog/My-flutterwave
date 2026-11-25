@@ -1110,7 +1110,7 @@ admin_states = {}
 active_links = {}
 # --- Admins configuration ---
 ADMINS = [6603268127]
-
+MOVIES_NAME = -1005672878790
 
 
 # Chats where this system must remain silent.
