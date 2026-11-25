@@ -665,6 +665,19 @@ ON customers(last_interaction_at)
 """)
 
 
+# ================= MOVIES NAME TABLE =================
+
+chat_cur.execute("""
+CREATE TABLE IF NOT EXISTS movies_name (
+    id BIGSERIAL PRIMARY KEY,
+    group_key TEXT UNIQUE NOT NULL,
+    original_title TEXT,
+    release_year INTEGER,
+    lead_actors TEXT
+)
+""")
+
+
 # ================= SAVE ALL CHAT TABLES =================
 
 chat_conn.commit()
