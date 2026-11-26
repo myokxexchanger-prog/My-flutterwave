@@ -104,6 +104,83 @@ def get_all_chat_db_conn():
 
 
 
+# =============================
+# ENSURE BOT_ORDER TABLE STRUCTURE
+# =============================
+
+def ensure_bot_order_table():
+
+    try:
+
+        # Create table if it does not exist
+        chat_cur.execute("""
+            CREATE TABLE IF NOT EXISTS bot_order (
+                id TEXT PRIMARY KEY,
+                user_id BIGINT,
+                movie_id INTEGER,
+                item_id INTEGER,
+                amount INTEGER,
+                paid INTEGER DEFAULT 0,
+                pay_ref TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                type VARCHAR(20) DEFAULT 'film'
+            )
+        """)
+
+        # Helper function
+        def ensure_column(column_name, column_type):
+
+            chat_cur.execute("""
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                  AND table_name = 'bot_order'
+                  AND column_name = %s
+            """, (column_name,))
+
+            if not chat_cur.fetchone():
+
+                chat_cur.execute(
+                    f"ALTER TABLE bot_order ADD COLUMN {column_name} {column_type}"
+                )
+
+                print(f"✅ bot_order column '{column_name}' added")
+
+            else:
+
+                print(f"✅ bot_order column '{column_name}' already exists")
+
+        # Required new columns
+        ensure_column("task_id", "UUID")
+        ensure_column("group_key", "TEXT")
+        ensure_column("selected_movie_title", "TEXT")
+        ensure_column("selected_movie_year", "INTEGER")
+        ensure_column("checker_chat_id", "BIGINT")
+        ensure_column("checker_message_id", "BIGINT")
+
+        chat_conn.commit()
+
+        print("✅ BOT_ORDER TABLE STRUCTURE VERIFIED SUCCESSFULLY")
+
+    except Exception as e:
+
+        chat_conn.rollback()
+
+        print("❌ BOT_ORDER MIGRATION ERROR:", e)
+
+        logging.exception("BOT_ORDER TABLE MIGRATION FAILED")
+
+
+# =============================
+# RUN MIGRATION ONCE AT STARTUP
+# =============================
+
+ensure_bot_order_table()
+
+
+
+
+
 #=== Farko
 
 def ensure_items_table():
@@ -678,6 +755,7 @@ CREATE TABLE IF NOT EXISTS movies_name (
 """)
 
 
+
 # =========================
 # BOT_ORDER TABLE
 # =========================
@@ -692,9 +770,83 @@ CREATE TABLE IF NOT EXISTS bot_order (
     paid INTEGER DEFAULT 0,
     pay_ref TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    type VARCHAR(20) DEFAULT 'film'
+    type VARCHAR(20) DEFAULT 'film',
+
+    -- AI TASK CONNECTION
+    task_id UUID,
+
+    -- SELECTED MOVIE INFORMATION
+    group_key TEXT,
+    selected_movie_title TEXT,
+    selected_movie_year INTEGER,
+
+    -- MOVIE CHECKER MESSAGE INFORMATION
+    checker_chat_id BIGINT,
+    checker_message_id BIGINT
 )
 """)
+
+
+# =========================
+# ADD NEW COLUMNS TO EXISTING TABLE
+# =========================
+
+chat_cur.execute("""
+ALTER TABLE bot_order
+ADD COLUMN IF NOT EXISTS task_id UUID
+""")
+
+chat_cur.execute("""
+ALTER TABLE bot_order
+ADD COLUMN IF NOT EXISTS group_key TEXT
+""")
+
+chat_cur.execute("""
+ALTER TABLE bot_order
+ADD COLUMN IF NOT EXISTS selected_movie_title TEXT
+""")
+
+chat_cur.execute("""
+ALTER TABLE bot_order
+ADD COLUMN IF NOT EXISTS selected_movie_year INTEGER
+""")
+
+chat_cur.execute("""
+ALTER TABLE bot_order
+ADD COLUMN IF NOT EXISTS checker_chat_id BIGINT
+""")
+
+chat_cur.execute("""
+ALTER TABLE bot_order
+ADD COLUMN IF NOT EXISTS checker_message_id BIGINT
+""")
+
+
+
+# =========================
+# BOT_ORDER_ITEMS TABLE
+# =========================
+
+chat_cur.execute("""
+CREATE TABLE IF NOT EXISTS bot_order_items (
+    id BIGSERIAL PRIMARY KEY,
+
+    order_id TEXT NOT NULL
+        REFERENCES bot_order(id)
+        ON DELETE CASCADE,
+
+    item_id INTEGER NOT NULL,
+
+    file_id TEXT,
+
+    price INTEGER DEFAULT 0,
+
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+    UNIQUE(order_id, item_id)
+)
+""")
+
 
 # ================= SAVE ALL CHAT TABLES =================
 
