@@ -13343,13 +13343,188 @@ def receive_hausa_titles(m):
     bot.send_message(uid, "📸 Yanzu turo poster + caption (suna da farashi)")
 
 
+
 # ===============================
 # FINALIZE (UPLOAD + DB) WITH PREFIX CASHBACK (C200) - PRESERVE SPACES
+# + AUTOMATIC ORIGINAL MOVIE NAME REGISTRATION
 # ===============================
+
 from telebot.apihelper import ApiTelegramException
 import time
 import uuid
+import re
 from datetime import datetime
+
+# ============================================================
+# ORIGINAL MOVIE TITLE DETECTION
+#
+# - Ignores the first caption line.
+# - Searches every other line for Original Title - YEAR.
+# - Supports: Hope - 2026 / Hope- 2026 / Hope -2026 / Hope-2026
+# - Ignores price and cashback lines.
+# - Uses the newly generated group_key.
+# - Same group_key with multiple files = ONE movie record.
+# - Writes ONLY to movies_name in the all-chat database.
+# - Does not modify items or series for this feature.
+# ============================================================
+
+def series_find_original_movie_name(caption):
+
+    lines = [
+        line.strip()
+        for line in (caption or "").splitlines()
+        if line.strip()
+    ]
+
+    # First line is the admin/local movie title.
+    # Search starts from the second line.
+    if len(lines) < 2:
+        return None
+
+    year_pattern = re.compile(
+        r"^(.+?)\s*-\s*((?:18|19|20|21)\d{2})$"
+    )
+
+    for line in lines[1:]:
+
+        # Ignore cashback, e.g. C200 or c1,000.
+        if re.fullmatch(
+            r"[cC]\s*\d[\d,]*",
+            line
+        ):
+            continue
+
+        # Ignore price-only lines, e.g. 200 or 1,000.
+        if re.fullmatch(
+            r"\d[\d,]*",
+            line
+        ):
+            continue
+
+        match = year_pattern.fullmatch(line)
+
+        if not match:
+            continue
+
+        original_title = match.group(1).strip()
+        release_year = int(match.group(2))
+
+        if not original_title:
+            continue
+
+        return {
+            "original_title": original_title,
+            "release_year": release_year
+        }
+
+    return None
+
+
+# ============================================================
+# SAVE ORIGINAL MOVIE NAME
+#
+# One group_key = one movies_name record,
+# even when the movie contains many files.
+#
+# Existing record is never overwritten here.
+# ============================================================
+
+def series_save_original_movie_name(group_key, caption):
+
+    movie_data = series_find_original_movie_name(caption)
+
+    if not movie_data:
+        print(
+            "ℹ️ ORIGINAL MOVIE TITLE NOT FOUND. "
+            "MOVIES_NAME WAS NOT CHANGED."
+        )
+        return {
+            "status": "not_found"
+        }
+
+    conn = None
+    cur = None
+
+    try:
+
+        conn = get_all_chat_db_conn()
+        cur = conn.cursor()
+
+        cur.execute(
+            """
+            INSERT INTO movies_name (
+                group_key,
+                original_title,
+                release_year
+            )
+            VALUES (%s, %s, %s)
+            ON CONFLICT (group_key) DO NOTHING
+            RETURNING group_key
+            """,
+            (
+                str(group_key),
+                movie_data["original_title"],
+                movie_data["release_year"]
+            )
+        )
+
+        inserted = cur.fetchone()
+
+        if inserted:
+            conn.commit()
+
+            print(
+                "✅ ORIGINAL MOVIE NAME SAVED:",
+                movie_data["original_title"],
+                movie_data["release_year"],
+                group_key
+            )
+
+            return {
+                "status": "inserted",
+                "original_title": movie_data["original_title"],
+                "release_year": movie_data["release_year"]
+            }
+
+        conn.rollback()
+
+        print(
+            "ℹ️ MOVIE GROUP KEY ALREADY EXISTS. "
+            "EXISTING MOVIES_NAME RECORD PRESERVED:",
+            group_key
+        )
+
+        return {
+            "status": "already_exists"
+        }
+
+    except Exception as e:
+
+        if conn:
+            conn.rollback()
+
+        print(
+            "❌ ORIGINAL MOVIE NAME SAVE ERROR:",
+            repr(e)
+        )
+
+        return {
+            "status": "database_error",
+            "error": str(e)
+        }
+
+    finally:
+
+        if cur:
+            cur.close()
+
+        if conn:
+            conn.close()
+
+
+# ===============================
+# FINALIZE (UPLOAD + DB) WITH PREFIX CASHBACK (C200) - PRESERVE SPACES
+# ===============================
 
 @bot.message_handler(
     content_types=["photo"],
@@ -13545,6 +13720,49 @@ def series_finalize(m):
 
     cur.close()
     conn.close()
+
+    # ============================================================
+    # NEW ADDITION:
+    # AFTER SUCCESSFUL ITEM SAVING, REGISTER ORIGINAL MOVIE NAME.
+    #
+    # Uses this movie's group_key once.
+    # Multiple files with the same group_key remain ONE movie.
+    # Does not update or modify items / series / poster records.
+    # ============================================================
+
+    if item_ids:
+
+        original_name_result = series_save_original_movie_name(
+            group_key,
+            data
+        )
+
+        if original_name_result["status"] == "inserted":
+
+            print(
+                "✅ MOVIES_NAME REGISTRATION COMPLETED:",
+                group_key
+            )
+
+        elif original_name_result["status"] == "not_found":
+
+            print(
+                "ℹ️ No Original Title - YEAR line found. "
+                "Movie upload remains successful."
+            )
+
+        elif original_name_result["status"] == "already_exists":
+
+            print(
+                "ℹ️ Existing movies_name record was preserved."
+            )
+
+        else:
+
+            print(
+                "❌ MOVIES_NAME REGISTRATION FAILED:",
+                original_name_result.get("error", "Unknown error")
+            )
 
     # ================= PUBLIC POST =================
     try:
