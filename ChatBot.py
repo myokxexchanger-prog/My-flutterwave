@@ -3946,13 +3946,11 @@ def movies_name_channel_handler(m):
 # END OF MOVIE ORIGINAL NAME SYSTEM
 # ============================================================
 
-
-
 # ============================================================
-# CONNECT AIFIMS.py TO MAIN CHATBOT
+# CONNECT AIFILE.py TO MAIN CHATBOT
 # ============================================================
 
-from AIfims import setup_aifims
+from AIfile import setup_aifims
 
 setup_aifims(
     main_bot=bot,
@@ -3963,8 +3961,7 @@ setup_aifims(
     flutterwave_payment_function=create_flutterwave_payment
 )
 
-print("✅ AIFIMS CONNECTED SUCCESSFULLY")
-
+print("✅ AIFILE CONNECTED SUCCESSFULLY")
 
 
 # ============================================================
