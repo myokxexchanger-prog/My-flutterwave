@@ -3946,6 +3946,9 @@ def movies_name_channel_handler(m):
 # END OF MOVIE ORIGINAL NAME SYSTEM
 # ============================================================
 
+
+
+
 # ============================================================
 # AIfims.py — BOT 1 GROUP VIDEO + AI MOVIE MATCHING + ORDER
 # Uses the existing bot and existing database connection functions.
@@ -4005,7 +4008,7 @@ def group_clip_debug(stage, task_id=None, details=None, error=None):
                 lines.append("<b>Error:</b>")
                 lines.append(f"<code>{group_clip_safe(str(error)[:1800])}</code>")
 
-            message_text = "\\n".join(lines)
+            message_text = "\n".join(lines)
 
             logging.info(
                 "AIFIMS DEBUG | stage=%s | task=%s | details=%s | error=%s",
@@ -4064,6 +4067,32 @@ def group_clip_normalize_words(value):
     value = unicodedata.normalize("NFKC", str(value or "")).casefold()
     value = "".join(c for c in unicodedata.normalize("NFKD", value) if not unicodedata.combining(c))
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", value)).strip()
+
+
+def group_clip_title_match_key(value):
+    """Normalize sequel notation and ignore bracketed aliases."""
+    text = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    text = re.sub(r"\([^)]*\)|\[[^\]]*\]|\{[^}]*\}", " ", text)
+    text = re.sub(r"\biii\b", " 3 ", text)
+    text = re.sub(r"\bii\b", " 2 ", text)
+    text = re.sub(r"\biv\b", " 4 ", text)
+    text = re.sub(r"\bi\b", " 1 ", text)
+    text = re.sub(r"\bv\b", " 5 ", text)
+    text = re.sub(r"\bsi\s*([0-9]+)\b", r" \1 ", text)
+    text = re.sub(r"\bs([0-9]+)\b", r" \1 ", text)
+    return group_clip_normalize_words(text)
+
+
+def group_clip_title_similarity(a, b):
+    from difflib import SequenceMatcher
+    ka, kb = group_clip_title_match_key(a), group_clip_title_match_key(b)
+    if not ka or not kb:
+        return 0.0
+    if ka == kb:
+        return 1.0
+    ta, tb = set(ka.split()), set(kb.split())
+    overlap = len(ta & tb) / max(1, len(ta | tb))
+    return max(SequenceMatcher(None, ka, kb).ratio(), overlap)
 
 # ============================================================
 # 3. GROUP REPLIES
@@ -4356,30 +4385,62 @@ def group_clip_extract_ai_movie(result):
 # Exact title/year first; normalized title fallback still requires same year.
 # ============================================================
 def group_clip_find_movie_group_keys(original_title, release_year):
+    """
+    Match title flexibly, but ONLY within the exact release year.
+    Exact title -> normalized sequel/alias -> fuzzy title match.
+    """
     conn = get_all_chat_db_conn()
     cur = None
     try:
         cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute("""
-            SELECT group_key,original_title,release_year FROM movies_name
-            WHERE release_year=%s AND LOWER(TRIM(original_title))=LOWER(TRIM(%s))
+            SELECT group_key, original_title, release_year
+            FROM movies_name
+            WHERE release_year=%s
             ORDER BY id ASC
-        """, (int(release_year), original_title))
-        rows = cur.fetchall()
-        if not rows:
-            cur.execute("SELECT group_key,original_title,release_year FROM movies_name WHERE release_year=%s ORDER BY id ASC",
-                        (int(release_year),))
-            rows = [r for r in cur.fetchall()
-                    if group_clip_normalize_words(r["original_title"]) == group_clip_normalize_words(original_title)]
+        """, (int(release_year),))
+        year_rows = cur.fetchall()
+
+        target_key = group_clip_title_match_key(original_title)
+        exact_rows = [
+            r for r in year_rows
+            if group_clip_normalize_words(r.get("original_title")) ==
+               group_clip_normalize_words(original_title)
+        ]
+        normalized_rows = [
+            r for r in year_rows
+            if group_clip_title_match_key(r.get("original_title")) == target_key
+        ]
+
+        matched_rows = exact_rows or normalized_rows
+        method = "exact" if exact_rows else ("normalized_alias" if normalized_rows else None)
+
+        if not matched_rows:
+            scored = []
+            for row in year_rows:
+                score = group_clip_title_similarity(original_title, row.get("original_title"))
+                if score >= 0.76:
+                    scored.append((score, row))
+            if scored:
+                best = max(score for score, _ in scored)
+                matched_rows = [row for score, row in scored if score >= best - 0.025]
+                method = f"fuzzy_{best:.3f}"
+
         output, seen = [], set()
-        for row in rows:
+        for row in matched_rows:
             key = row.get("group_key")
             if key and key not in seen:
                 seen.add(key)
-                output.append({"group_key":key,"original_title":row.get("original_title"),"release_year":row.get("release_year")})
+                output.append({
+                    "group_key": key,
+                    "original_title": row.get("original_title"),
+                    "release_year": row.get("release_year"),
+                    "match_method": method,
+                })
         return output
     finally:
-        if cur: cur.close()
+        if cur:
+            cur.close()
         conn.close()
 
 # ============================================================
@@ -4580,6 +4641,90 @@ def group_clip_send_payment_to_user(user_id,order_id,amount,movie_title,movie_ye
         "<i>Mun gode da amfani da AlgaitaBot 🙏</i>")
     return bot.send_message(int(user_id),text,parse_mode="HTML",reply_markup=keyboard)
 
+def group_clip_send_not_found_to_user(payload):
+    """Put the apology on the submitted video already copied to the user's DM."""
+    user_id = int(payload["user_id"])
+    caption = (
+        "<b>Yi hakuri, na duba fina-finan da suke gareni amma ban samu wannan fim din ba.</b>\n\n"
+        "<b>Amma na tura sakon zuwa ga admin. Zan duba nan ba da jimawa ba; "
+        "idan akwai fim din zan sanar da kai.</b>\n\n"
+        "<b>Mun gode sosai 🙏</b>"
+    )
+    ack_chat_id = int(payload.get("ack_chat_id") or user_id)
+    ack_message_id = payload.get("ack_message_id")
+    try:
+        if ack_message_id:
+            bot.edit_message_caption(
+                chat_id=ack_chat_id, message_id=int(ack_message_id),
+                caption=caption, parse_mode="HTML"
+            )
+            return
+    except Exception:
+        logging.exception("NOT-FOUND ACK CAPTION EDIT FAILED")
+
+    bot.copy_message(
+        chat_id=user_id,
+        from_chat_id=int(payload["telegram_chat_id"]),
+        message_id=int(payload["telegram_message_id"]),
+        caption=caption,
+        parse_mode="HTML"
+    )
+
+
+def group_clip_send_not_found_to_checker(payload, movie_title, movie_year, task_id):
+    if not MOVIE_CHECKER:
+        raise RuntimeError("Saita MOVIE_CHECKER da ainihin Telegram group ID.")
+    full_name = (
+        str(payload.get("first_name") or "") + " " +
+        str(payload.get("last_name") or "")
+    ).strip() or "Unknown"
+    caption = (
+        "<b>🔎 AI MOVIE — ADMIN REVIEW REQUIRED</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"<b>User:</b> {group_clip_safe(full_name)}\n"
+        f"<b>User ID:</b> <code>{int(payload.get('user_id') or 0)}</code>\n"
+        f"<b>AI title:</b> {group_clip_safe(movie_title)}\n"
+        f"<b>Year:</b> {int(movie_year)}\n"
+        f"<b>Task ID:</b> <code>{group_clip_safe(task_id)}</code>\n"
+        "<b>Status:</b> ⚠️ NOT FOUND IN MOVIE DATABASE\n"
+        "Admin: a duba ko akwai wannan fim ko a yi masa rajista."
+    )
+    return bot.copy_message(
+        chat_id=MOVIE_CHECKER,
+        from_chat_id=int(payload["telegram_chat_id"]),
+        message_id=int(payload["telegram_message_id"]),
+        caption=caption,
+        parse_mode="HTML"
+    )
+
+
+def group_clip_mark_task_not_found(task_id, checker_message_id=None):
+    conn = get_all_chat_db_conn()
+    cur = None
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            UPDATE tasks
+            SET payload=COALESCE(payload,'{}'::jsonb)||%s::jsonb, updated_at=NOW()
+            WHERE task_id=%s
+        """, (json.dumps({
+            "bot1_delivered": True,
+            "movie_order_created": False,
+            "movie_not_found": True,
+            "checker_message_id": checker_message_id,
+            "checker_chat_id": MOVIE_CHECKER if checker_message_id else None
+        }), str(task_id)))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        logging.exception("FAILED TO MARK NOT-FOUND TASK")
+        raise
+    finally:
+        if cur:
+            cur.close()
+        conn.close()
+
+
 # ============================================================
 # 18. PROCESS AI RESULT — LOOKUP -> SELECT -> ORDER -> CHECKER -> PAY
 # ============================================================
@@ -4617,9 +4762,48 @@ def group_clip_process_completed_task(task_id,payload,result_json):
                      {"movie_title": movie_title, "year": movie_year})
     movie_groups = group_clip_find_movie_group_keys(movie_title,movie_year)
     if not movie_groups:
-        group_clip_debug("An rasa fim mai wannan sunan a movies_name", task_id,
-                         {"movie_title": movie_title, "year": movie_year})
-        raise LookupError(f"Ba a samu '{movie_title}' ({movie_year}) a movies_name ba.")
+        group_clip_debug(
+            "Ba a samu fim din ba — ana sanar da user kuma ana tura bidiyo zuwa Movie Checker",
+            task_id,
+            {"movie_title": movie_title, "year": movie_year}
+        )
+        checker_message = None
+        try:
+            checker_message = group_clip_send_not_found_to_checker(
+                payload, movie_title, movie_year, task_id
+            )
+            group_clip_debug(
+                "An tura bidiyon da ba a samu ba zuwa Movie Checker domin admin review",
+                task_id,
+                {"checker_chat_id": MOVIE_CHECKER,
+                 "checker_message_id": checker_message.message_id}
+            )
+        except Exception:
+            group_clip_debug(
+                "An kasa tura not-found video zuwa Movie Checker",
+                task_id,
+                error=traceback.format_exc()
+            )
+
+        try:
+            group_clip_send_not_found_to_user(payload)
+            group_clip_debug(
+                "An aika sakon rashin samun fim zuwa user a caption na bidiyo",
+                task_id,
+                {"user_id": user_id}
+            )
+        except Exception:
+            group_clip_debug(
+                "An kasa aika sakon not-found zuwa user",
+                task_id,
+                error=traceback.format_exc()
+            )
+            raise
+
+        group_clip_mark_task_not_found(
+            task_id, getattr(checker_message, "message_id", None)
+        )
+        return
     group_clip_debug("An samo sunan fim a movies_name", task_id,
                      {"matches": movie_groups})
     # items is in the separate Movie DB.
@@ -4634,9 +4818,45 @@ def group_clip_process_completed_task(task_id,payload,result_json):
                                  "has_file_id": bool(x.get("file_id"))} for x in items[:30]]})
     selected,reason = group_clip_select_movie_group(movie_groups,items)
     if not selected:
-        group_clip_debug("An samu sunan fim amma an rasa file mai file_id a items", task_id,
-                         {"group_keys": group_keys, "items_count": len(items)})
-        raise LookupError("An samu original movie name amma babu file mai file_id a items.")
+        group_clip_debug(
+            "An samu sunan fim amma babu file mai file_id — ana sanar da user kuma a tura wa admin",
+            task_id,
+            {"group_keys": group_keys, "items_count": len(items),
+             "movie_title": movie_title, "year": movie_year}
+        )
+        checker_message = None
+        try:
+            checker_message = group_clip_send_not_found_to_checker(
+                payload, movie_title, movie_year, task_id
+            )
+            group_clip_debug(
+                "An tura bidiyon da babu file zuwa Movie Checker domin admin review",
+                task_id,
+                {"checker_chat_id": MOVIE_CHECKER,
+                 "checker_message_id": checker_message.message_id}
+            )
+        except Exception:
+            group_clip_debug(
+                "An kasa tura bidiyon no-file zuwa Movie Checker",
+                task_id,
+                error=traceback.format_exc()
+            )
+        try:
+            group_clip_send_not_found_to_user(payload)
+            group_clip_debug(
+                "An aika sakon rashin samun file zuwa user a caption na bidiyo",
+                task_id, {"user_id": user_id}
+            )
+        except Exception:
+            group_clip_debug(
+                "An kasa aika sakon no-file zuwa user",
+                task_id, error=traceback.format_exc()
+            )
+            raise
+        group_clip_mark_task_not_found(
+            task_id, getattr(checker_message, "message_id", None)
+        )
+        return
     group_clip_debug("An zabi fim daga items", task_id,
                      {"selected_group_key": selected.get("group_key"),
                       "reason": reason, "company": selected.get("company"),
@@ -4898,6 +5118,7 @@ group_clip_start_result_worker()
 # ============================================================
 # END AIfims.py
 # ============================================================
+
 
 
 
