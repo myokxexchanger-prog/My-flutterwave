@@ -678,6 +678,24 @@ CREATE TABLE IF NOT EXISTS movies_name (
 """)
 
 
+# =========================
+# BOT_ORDER TABLE
+# =========================
+
+chat_cur.execute("""
+CREATE TABLE IF NOT EXISTS bot_order (
+    id TEXT PRIMARY KEY,
+    user_id BIGINT,
+    movie_id INTEGER,
+    item_id INTEGER,
+    amount INTEGER,
+    paid INTEGER DEFAULT 0,
+    pay_ref TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    type VARCHAR(20) DEFAULT 'film'
+)
+""")
+
 # ================= SAVE ALL CHAT TABLES =================
 
 chat_conn.commit()
