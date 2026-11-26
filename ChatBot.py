@@ -3947,6 +3947,7 @@ def movies_name_channel_handler(m):
 # ============================================================
 
 
+
 # ============================================================
 # AIfims.py — BOT 1 GROUP VIDEO + AI MOVIE MATCHING + ORDER
 # Uses the existing bot and existing database connection functions.
@@ -3955,7 +3956,7 @@ def movies_name_channel_handler(m):
 # Movie DB:    items (via get_conn())
 # ============================================================
 
-import os, re, json, time, uuid, html, random, logging, threading, unicodedata
+import os, re, json, time, uuid, html, random, logging, threading, unicodedata, traceback
 from datetime import datetime, timezone
 from telebot import types
 from telebot.types import ChatPermissions
@@ -3975,6 +3976,32 @@ CLIP_RESULT_CHECK_INTERVAL = 2
 CLIP_RESULT_THREAD_STARTED = False
 _CLIP_RESULT_LOCK = threading.Lock()
 _CLIP_RESULT_DELIVERY_LOCK = threading.Lock()
+
+
+# ============================================================
+# DEBUG SYSTEM — SEND EVERY AI/DB/TELEGRAM/FLUTTERWAVE STAGE TO ADMIN
+# Diagnostic only: does not change the existing processing decisions.
+# ============================================================
+def group_clip_debug(stage, task_id=None, details=None, error=None):
+    try:
+        lines = [
+            "🧪 <b>AIFIMS DEBUG</b>",
+            f"<b>Stage:</b> {group_clip_safe(stage)}",
+            f"<b>Task ID:</b> <code>{group_clip_safe(task_id or 'N/A')}</code>",
+        ]
+        if details:
+            lines.append("<b>Details:</b>")
+            lines.append(group_clip_safe(str(details)[:2200]))
+        if error:
+            lines.append("<b>Error:</b>")
+            lines.append(f"<code>{group_clip_safe(str(error)[:1800])}</code>")
+        text = "\\n".join(lines)
+        logging.info("AIFIMS DEBUG | stage=%s | task=%s | details=%s | error=%s",
+                     stage, task_id, details, error)
+        bot.send_message(CLIP_ADMIN_ID, text, parse_mode="HTML")
+    except Exception:
+        logging.exception("AIFIMS DEBUG ADMIN DELIVERY FAILED | stage=%s", stage)
+
 
 # Priority list supplied by you. Add more company names here later.
 AI_MOVIE_COMPANY_PRIORITY = (
@@ -4542,6 +4569,8 @@ def group_clip_process_completed_task(task_id,payload,result_json):
     if not payload or not result_json:
         raise ValueError("Task payload/result_json babu ko ba su dace ba.")
     user_id = int(payload["user_id"])
+    group_clip_debug("An samu COMPLETE daga AI — an fara karanta sakamakon", task_id,
+                     {"user_id": user_id, "result_json": result_json})
 
     # Recovery/idempotency: do not create another order for this task.
     conn = get_all_chat_db_conn()
@@ -4555,25 +4584,53 @@ def group_clip_process_completed_task(task_id,payload,result_json):
         conn.close()
     if existing:
         logging.info("ORDER ALREADY EXISTS FOR TASK %s",task_id)
+        group_clip_debug("An gano cewa order ya riga ya kasance; tsohon tsarin return ya yi aiki",
+                         task_id, {"order_id": existing[0]})
         return
 
+    group_clip_debug("An fara extraction na sunan fim da shekara daga AI", task_id)
     movie_title,movie_year = group_clip_extract_ai_movie(result_json)
+    group_clip_debug("An samu amsa daga AI", task_id,
+                     {"movie_title": movie_title, "movie_year": movie_year})
     # movies_name is in All Chat DB.
+    group_clip_debug("An shiga binciken sunan a movies_name — All Chat DB", task_id,
+                     {"movie_title": movie_title, "year": movie_year})
     movie_groups = group_clip_find_movie_group_keys(movie_title,movie_year)
     if not movie_groups:
+        group_clip_debug("An rasa fim mai wannan sunan a movies_name", task_id,
+                         {"movie_title": movie_title, "year": movie_year})
         raise LookupError(f"Ba a samu '{movie_title}' ({movie_year}) a movies_name ba.")
+    group_clip_debug("An samo sunan fim a movies_name", task_id,
+                     {"matches": movie_groups})
     # items is in the separate Movie DB.
     group_keys = [x["group_key"] for x in movie_groups]
+    group_clip_debug("An shiga binciken items — Movie DB", task_id,
+                     {"group_keys": group_keys})
     items = group_clip_fetch_items_for_group_keys(group_keys)
+    group_clip_debug("An dawo da sakamakon items daga Movie DB", task_id,
+                     {"items_count": len(items),
+                      "items": [{"id": x.get("id"), "title": x.get("title"),
+                                 "group_key": x.get("group_key"),
+                                 "has_file_id": bool(x.get("file_id"))} for x in items[:30]]})
     selected,reason = group_clip_select_movie_group(movie_groups,items)
     if not selected:
+        group_clip_debug("An samu sunan fim amma an rasa file mai file_id a items", task_id,
+                         {"group_keys": group_keys, "items_count": len(items)})
         raise LookupError("An samu original movie name amma babu file mai file_id a items.")
+    group_clip_debug("An zabi fim daga items", task_id,
+                     {"selected_group_key": selected.get("group_key"),
+                      "reason": reason, "company": selected.get("company"),
+                      "selected_items_count": len(selected.get("items", []))})
     logging.info("AI MOVIE CHOSEN title=%s year=%s group=%s reason=%s company=%s",
                  movie_title,movie_year,selected["group_key"],reason,selected.get("company"))
 
     # Create one All Chat DB order and link every file through bot_order_items.
+    group_clip_debug("An fara kirkirar order a bot_order da bot_order_items", task_id)
     order_id,amount,selected_items = group_clip_create_ai_order(
         task_id,user_id,selected,movie_title,movie_year)
+    group_clip_debug("An kirkiri order cikin nasara", task_id,
+                     {"order_id": order_id, "amount": amount,
+                      "selected_items_count": len(selected_items)})
 
     # Remove the earlier checking message from user's DM using saved ID.
     try:
@@ -4583,11 +4640,24 @@ def group_clip_process_completed_task(task_id,payload,result_json):
         logging.exception("FAILED TO DELETE OLD INA BINCIKAWA MESSAGE task=%s",task_id)
 
     # Send submitted video to MOVIE_CHECKER with Pending + Change Movie.
+    group_clip_debug("Ana tura bidiyo zuwa Telegram Movie Checker", task_id,
+                     {"checker_chat_id": MOVIE_CHECKER, "order_id": order_id})
     checker_message = group_clip_send_checker_pending(payload,order_id,movie_title,movie_year)
+    group_clip_debug("An tura bidiyo zuwa Movie Checker; an ajiye message ID", task_id,
+                     {"checker_message_id": checker_message.message_id,
+                      "checker_chat_id": MOVIE_CHECKER})
 
     # Create Flutterwave link and send it to the customer.
+    group_clip_debug("Ana kiran Flutterwave domin samar da payment link", task_id,
+                     {"order_id": order_id, "amount": amount})
     payment_url = group_clip_create_payment_link(user_id,order_id,amount,f"{movie_title} ({movie_year})")
-    group_clip_send_payment_to_user(user_id,order_id,amount,movie_title,movie_year,payment_url)
+    group_clip_debug("Flutterwave ya dawo da payment URL", task_id,
+                     {"order_id": order_id, "url_received": bool(payment_url)})
+    group_clip_debug("Ana aika Pay Now zuwa DM na user", task_id,
+                     {"user_id": user_id, "order_id": order_id})
+    payment_message = group_clip_send_payment_to_user(user_id,order_id,amount,movie_title,movie_year,payment_url)
+    group_clip_debug("An aika sakon Pay Now ga user", task_id,
+                     {"user_id": user_id, "telegram_message_id": payment_message.message_id})
 
     # Mark task delivered only after successful checker and user delivery.
     conn = get_all_chat_db_conn()
@@ -4609,6 +4679,8 @@ def group_clip_process_completed_task(task_id,payload,result_json):
         if cur: cur.close()
         conn.close()
     logging.info("AI MOVIE ORDER SENT: task=%s order=%s",task_id,order_id)
+    group_clip_debug("An kammala duk matakai — user ya samu payment link", task_id,
+                     {"order_id": order_id, "user_id": user_id})
 
 # ============================================================
 # 19. COMPLETED TASK POLLER — EVERY TWO SECONDS
@@ -4628,6 +4700,10 @@ def group_clip_check_completed_tasks():
                 ORDER BY completed_at ASC NULLS LAST,created_at ASC LIMIT 100
             """)
             rows = cur.fetchall()
+            if rows:
+                group_clip_debug("Worker ya samu completed tasks daga All Chat DB", details={
+                    "completed_tasks_found": len(rows)
+                })
         finally:
             if cur: cur.close()
             conn.close()
@@ -4636,14 +4712,19 @@ def group_clip_check_completed_tasks():
                 group_clip_process_completed_task(task_id,payload,result_json)
             except LookupError as error:
                 logging.warning("AI MOVIE NOT FOUND — TASK %s: %s",task_id,error)
-            except Exception:
+                group_clip_debug("An samu matsalar lookup — ba a samu fim/file ba",
+                                 task_id, error=error)
+            except Exception as error:
                 logging.exception("AI MOVIE ORDER PROCESSING FAILED task=%s",task_id)
+                group_clip_debug("AN SAMU KUSKURE A CIKIN AI MOVIE ORDER PROCESSING",
+                                 task_id, error=traceback.format_exc())
     finally:
         _CLIP_RESULT_DELIVERY_LOCK.release()
 
 
 def group_clip_result_worker():
     logging.info("AIFIMS RESULT WORKER STARTED — CHECK EVERY 2 SECONDS")
+    group_clip_debug("AIfims result worker ya fara aiki")
     while True:
         try:
             group_clip_check_completed_tasks()
@@ -4797,6 +4878,8 @@ group_clip_start_result_worker()
 # ============================================================
 # END AIfims.py
 # ============================================================
+
+
 
 
 
