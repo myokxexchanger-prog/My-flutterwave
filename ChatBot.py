@@ -3946,8 +3946,6 @@ def movies_name_channel_handler(m):
 # END OF MOVIE ORIGINAL NAME SYSTEM
 # ============================================================
 
-
-
 # ============================================================
 # AIfims.py — BOT 1 GROUP VIDEO + AI MOVIE MATCHING + ORDER
 # Uses the existing bot and existing database connection functions.
@@ -3977,30 +3975,52 @@ CLIP_RESULT_THREAD_STARTED = False
 _CLIP_RESULT_LOCK = threading.Lock()
 _CLIP_RESULT_DELIVERY_LOCK = threading.Lock()
 
+# Prevent repeated debug messages for the same task/stage.
+_CLIP_DEBUG_SENT = set()
+_CLIP_DEBUG_LOCK = threading.Lock()
+
 
 # ============================================================
 # DEBUG SYSTEM — SEND EVERY AI/DB/TELEGRAM/FLUTTERWAVE STAGE TO ADMIN
 # Diagnostic only: does not change the existing processing decisions.
 # ============================================================
 def group_clip_debug(stage, task_id=None, details=None, error=None):
-    try:
-        lines = [
-            "🧪 <b>AIFIMS DEBUG</b>",
-            f"<b>Stage:</b> {group_clip_safe(stage)}",
-            f"<b>Task ID:</b> <code>{group_clip_safe(task_id or 'N/A')}</code>",
-        ]
-        if details:
-            lines.append("<b>Details:</b>")
-            lines.append(group_clip_safe(str(details)[:2200]))
-        if error:
-            lines.append("<b>Error:</b>")
-            lines.append(f"<code>{group_clip_safe(str(error)[:1800])}</code>")
-        text = "\\n".join(lines)
-        logging.info("AIFIMS DEBUG | stage=%s | task=%s | details=%s | error=%s",
-                     stage, task_id, details, error)
-        bot.send_message(CLIP_ADMIN_ID, text, parse_mode="HTML")
-    except Exception:
-        logging.exception("AIFIMS DEBUG ADMIN DELIVERY FAILED | stage=%s", stage)
+    # Same task + same stage = one Telegram debug message only.
+    debug_key = (str(task_id or "GLOBAL"), str(stage))
+
+    with _CLIP_DEBUG_LOCK:
+        if debug_key in _CLIP_DEBUG_SENT:
+            return
+
+        try:
+            lines = [
+                "🧪 <b>AIFIMS DEBUG</b>",
+                f"<b>Stage:</b> {group_clip_safe(stage)}",
+                f"<b>Task ID:</b> <code>{group_clip_safe(task_id or 'N/A')}</code>",
+            ]
+            if details:
+                lines.append("<b>Details:</b>")
+                lines.append(group_clip_safe(str(details)[:2200]))
+            if error:
+                lines.append("<b>Error:</b>")
+                lines.append(f"<code>{group_clip_safe(str(error)[:1800])}</code>")
+
+            message_text = "\\n".join(lines)
+
+            logging.info(
+                "AIFIMS DEBUG | stage=%s | task=%s | details=%s | error=%s",
+                stage, task_id, details, error
+            )
+
+            # Record the stage only after Telegram successfully accepts it.
+            bot.send_message(CLIP_ADMIN_ID, message_text, parse_mode="HTML")
+            _CLIP_DEBUG_SENT.add(debug_key)
+
+        except Exception:
+            logging.exception(
+                "AIFIMS DEBUG ADMIN DELIVERY FAILED | stage=%s | task=%s",
+                stage, task_id
+            )
 
 
 # Priority list supplied by you. Add more company names here later.
@@ -4878,7 +4898,6 @@ group_clip_start_result_worker()
 # ============================================================
 # END AIfims.py
 # ============================================================
-
 
 
 
