@@ -2012,31 +2012,25 @@ def telegram_webhook():
 
 
 
-
 # ============================================================
 # MOVIE ORIGINAL NAME RECOGNITION SYSTEM
-# COMPLETE BATCH + EXACT MATCH + POSTER CONFIRMATION
+# COMPLETE CORRECTED VERSION
 #
-# SOURCE DATABASE:
+# MAIN DATABASE (READ ONLY):
 #   items
 #   series
 #
-# DESTINATION DATABASE:
+# ALL CHAT DATABASE (WRITE ONLY):
 #   movies_name
 #
-# IMPORTANT:
-#   - NO CHANGE TO ADD MOVIE
-#   - NO CHANGE TO FILM UPDATER
-#   - NO NEW COLUMN IN SERIES
-#   - POSTER: series.item_id = items.id
+# POSTER RELATION:
+#   series.file_id = items.file_id
 #
-# WORKFLOW:
-#   PHOTO + CAPTION -> MEMORY
-#   DONE -> PROCESS BATCH
-#   ONE GROUP_KEY -> AUTOMATIC PROCESSING
-#   MULTIPLE GROUP_KEYS -> ADMIN POSTER SELECTION
-#   UPDATE -> ONLY UPDATE EXISTING RECORD
-#   NO UPDATE -> INSERT NEW RECORD ONLY
+# NO ALTER TABLE
+# NO INSERT / UPDATE / DELETE IN MAIN DATABASE
+# NO CHANGE TO ADD MOVIE
+# NO CHANGE TO FILM UPDATER
+# NO ORDER_ITEMS MODIFICATION
 # ============================================================
 
 import re
@@ -2051,7 +2045,7 @@ from telebot.types import (
 
 
 # ============================================================
-# EXISTING VARIABLES REQUIRED
+# REQUIRED EXISTING VARIABLES
 # ============================================================
 #
 # bot
@@ -2060,14 +2054,17 @@ from telebot.types import (
 # get_conn()
 # get_all_chat_db_conn()
 #
-# movies_name table must already exist with:
-# group_key, original_title, release_year, lead_actors
+# movies_name table:
+# group_key
+# original_title
+# release_year
+# lead_actors
 #
 # ============================================================
 
 
 # ============================================================
-# MEMORY
+# GLOBAL MEMORY
 # ============================================================
 
 MOVIES_NAME_BATCH = []
@@ -2080,9 +2077,9 @@ MOVIES_NAME_ACTIVE = {}
 
 
 # ============================================================
-# TITLE NORMALIZATION
-# Case and extra spaces do not matter.
-# Letters and punctuation must match.
+# NORMALIZE TITLE
+# CASE AND EXTRA SPACES ARE IGNORED.
+# LETTERS AND PUNCTUATION MUST MATCH.
 # ============================================================
 
 def movies_name_normalize(value):
@@ -2100,7 +2097,11 @@ def movies_name_normalize(value):
 
 def movies_name_is_admin(message):
 
-    sender = getattr(message, "from_user", None)
+    sender = getattr(
+        message,
+        "from_user",
+        None
+    )
 
     if sender and sender.id in ADMINS:
         return True
@@ -2111,31 +2112,38 @@ def movies_name_is_admin(message):
         None
     )
 
-    # Telegram channel posts may hide the
-    # identity of the individual publisher.
-    # Therefore only trusted admins should
-    # have permission to publish in this channel.
+    # Telegram may hide the individual publisher
+    # of a channel post.
+    #
+    # Only trusted admins should have permission
+    # to publish in this private channel.
 
-    if sender_chat and sender_chat.id == MOVIES_NAME:
+    if (
+        sender_chat
+        and sender_chat.id == MOVIES_NAME
+    ):
         return True
 
     return False
 
 
 # ============================================================
-# PARSE CAPTION
+# PARSE MOVIE CAPTION
 #
 # FIRST LINE:
-#   Exact admin movie title
+#   ADMIN TITLE
 #
-# OPTIONAL MIDDLE LINES:
-#   Lead actors
+# OPTIONAL LINES BEFORE ORIGINAL TITLE:
+#   LEAD ACTORS
 #
-# REQUIRED LINE:
-#   Original title - YEAR
+# REQUIRED:
+#   ORIGINAL TITLE - YEAR
 #
-# OPTIONAL FINAL LINE:
-#   UPDATE
+# OPTIONAL AFTER YEAR:
+#   PRICE / OTHER TEXT
+#
+# UPDATE:
+#   MUST BE FINAL NON-EMPTY LINE
 # ============================================================
 
 def movies_name_parse(text):
@@ -2151,7 +2159,7 @@ def movies_name_parse(text):
 
     update_mode = False
 
-    # UPDATE is valid ONLY as the final non-empty line.
+    # UPDATE only works when it is the last line.
 
     if lines[-1].casefold() == "update":
 
@@ -2176,7 +2184,9 @@ def movies_name_parse(text):
 
     for index in range(1, len(lines)):
 
-        match = year_pattern.match(lines[index])
+        match = year_pattern.match(
+            lines[index]
+        )
 
         if match:
 
@@ -2191,11 +2201,15 @@ def movies_name_parse(text):
     if not original_title or not release_year:
         return None
 
+    # Lines before original title are actors.
+    # Price and other lines after the year are ignored.
+
     actor_lines = lines[1:original_index]
 
     lead_actors = (
         "\n".join(actor_lines).strip()
-        if actor_lines else None
+        if actor_lines
+        else None
     )
 
     return {
@@ -2214,13 +2228,17 @@ def movies_name_parse(text):
 
 
 # ============================================================
-# FIND EXACT MOVIE IN ITEMS
+# FIND EXACT MOVIE AND POSTER
 #
-# POSTER RELATION:
-# series.item_id = items.id
+# READ ONLY:
+#   items
+#   series
 #
-# SAME GROUP KEY = SAME MOVIE
-# DIFFERENT GROUP KEYS = DIFFERENT CANDIDATES
+# POSTER:
+#   series.file_id = items.file_id
+#
+# SAME GROUP KEY = ONE MOVIE
+# DIFFERENT GROUP KEYS = DIFFERENT MOVIES
 # ============================================================
 
 def movies_name_find_candidates(admin_title):
@@ -2248,7 +2266,7 @@ def movies_name_find_candidates(admin_title):
             FROM items i
 
             LEFT JOIN series s
-                ON s.item_id = i.id
+                ON s.file_id = i.file_id
 
             WHERE
                 LOWER(
@@ -2278,16 +2296,25 @@ def movies_name_find_candidates(admin_title):
 
         missing_group_key = False
 
-        for item_id, group_key, db_title, poster_file_id in rows:
+        for (
+            item_id,
+            group_key,
+            db_title,
+            poster_file_id
+        ) in rows:
 
             # Final exact comparison.
-            if movies_name_normalize(
-                db_title
-            ) != normalized_title:
 
+            if (
+                movies_name_normalize(db_title)
+                != normalized_title
+            ):
                 continue
 
-            if not group_key or not str(group_key).strip():
+            if (
+                not group_key
+                or not str(group_key).strip()
+            ):
 
                 missing_group_key = True
                 continue
@@ -2310,23 +2337,32 @@ def movies_name_find_candidates(admin_title):
 
             else:
 
-                groups[key]["item_ids"].append(item_id)
+                if item_id not in groups[key]["item_ids"]:
 
-                # Use the first available poster
-                # belonging to this same group.
+                    groups[key]["item_ids"].append(
+                        item_id
+                    )
 
                 if (
                     not groups[key]["poster_file_id"]
                     and poster_file_id
                 ):
 
-                    groups[key]["poster_file_id"] = poster_file_id
+                    groups[key]["poster_file_id"] = (
+                        poster_file_id
+                    )
+
+        # Do not guess when matching items
+        # have missing group keys.
 
         if missing_group_key:
 
             return {
+
                 "status": "missing_group_key",
+
                 "candidates": []
+
             }
 
         candidates = list(groups.values())
@@ -2334,8 +2370,11 @@ def movies_name_find_candidates(admin_title):
         if not candidates:
 
             return {
+
                 "status": "not_found",
+
                 "candidates": []
+
             }
 
         if len(candidates) > 1:
@@ -2363,7 +2402,7 @@ def movies_name_find_candidates(admin_title):
     except Exception as e:
 
         print(
-            "❌ MOVIE / POSTER SEARCH ERROR:",
+            "❌ ITEMS / SERIES SEARCH ERROR:",
             repr(e)
         )
 
@@ -2387,18 +2426,17 @@ def movies_name_find_candidates(admin_title):
 
 
 # ============================================================
-# SAVE / UPDATE MOVIE NAME
+# SAVE / UPDATE MOVIES_NAME
 #
-# NO UPDATE:
-#   INSERT ONLY.
-#   EXISTING RECORD = REJECT.
+# INSERT:
+#   ONLY WHEN UPDATE IS ABSENT
+#   EXISTING RECORD IS REJECTED
 #
 # UPDATE:
-#   UPDATE EXISTING RECORD ONLY.
-#   MISSING RECORD = REJECT.
+#   ONLY WHEN FINAL UPDATE MARKER EXISTS
+#   EXISTING RECORD MUST BE FOUND
 #
-# OMITTED ACTORS DURING UPDATE:
-#   KEEP OLD ACTORS.
+# OLD ACTORS ARE PRESERVED IF OMITTED
 # ============================================================
 
 def movies_name_save(
@@ -2417,6 +2455,8 @@ def movies_name_save(
         conn = get_all_chat_db_conn()
         cur = conn.cursor()
 
+        # ================= UPDATE MODE =================
+
         if update_mode:
 
             cur.execute(
@@ -2425,7 +2465,9 @@ def movies_name_save(
 
                 SET
                     original_title = %s,
+
                     release_year = %s,
+
                     lead_actors = COALESCE(
                         %s,
                         lead_actors
@@ -2459,7 +2501,7 @@ def movies_name_save(
                 "status": "updated"
             }
 
-        # INSERT MODE: never overwrite an existing record.
+        # ================= INSERT MODE =================
 
         cur.execute(
             """
@@ -2507,7 +2549,7 @@ def movies_name_save(
             conn.rollback()
 
         print(
-            "❌ MOVIES_NAME DATABASE ERROR:",
+            "❌ MOVIES_NAME SAVE ERROR:",
             repr(e)
         )
 
@@ -2529,7 +2571,7 @@ def movies_name_save(
 
 
 # ============================================================
-# SAVE SELECTED MOVIE
+# PROCESS SELECTED MOVIE
 # ============================================================
 
 def movies_name_process_selected(
@@ -2555,9 +2597,11 @@ def movies_name_process_selected(
     status = result["status"]
 
     if status == "inserted":
+
         action = "INSERTED"
 
     elif status == "updated":
+
         action = "UPDATED"
 
     elif status == "already_exists":
@@ -2568,9 +2612,9 @@ def movies_name_process_selected(
 
             "reason": (
                 "DUPLICATE RECORD.\n"
-                "This group_key already exists in movies_name.\n"
+                "This group_key already exists.\n"
                 "Nothing was changed.\n"
-                "Use UPDATE as the final caption line to update it."
+                "Use UPDATE as the final caption line."
             )
 
         }
@@ -2583,8 +2627,7 @@ def movies_name_process_selected(
 
             "reason": (
                 "UPDATE REJECTED.\n"
-                "No existing movies_name record was found "
-                "for this group_key.\n"
+                "No existing movies_name record was found.\n"
                 "No new record was created."
             )
 
@@ -2636,18 +2679,30 @@ def movies_name_send_error(item, index, reason):
         if photo:
 
             bot.send_photo(
+
                 MOVIES_NAME,
+
                 photo,
+
                 caption=caption,
+
                 parse_mode=None
+
             )
 
         else:
 
             bot.send_message(
+
                 MOVIES_NAME,
-                caption + "\n\n" + item.get("text", "")[:1500],
+
+                caption + "\n\n" + item.get(
+                    "text",
+                    ""
+                )[:1500],
+
                 parse_mode=None
+
             )
 
     except Exception as e:
@@ -2688,7 +2743,7 @@ def movies_name_update_progress(active):
 
 
 # ============================================================
-# SELECTION KEYBOARD
+# KEYBOARD
 #
 # ROW 1: YES | NEXT
 # ROW 2: BACK | NO
@@ -2730,7 +2785,7 @@ def movies_name_selection_keyboard(token):
 
 
 # ============================================================
-# SHOW CANDIDATE POSTER
+# SHOW POSTER / CANDIDATE
 # ============================================================
 
 def movies_name_show_candidate(active):
@@ -2772,6 +2827,8 @@ def movies_name_show_candidate(active):
     old_message_id = active.get(
         "selection_message_id"
     )
+
+    # ================= POSTER AVAILABLE =================
 
     if photo:
 
@@ -2827,11 +2884,14 @@ def movies_name_show_candidate(active):
 
         )
 
+    # ================= POSTER NOT AVAILABLE =================
+
     else:
 
         text = (
             caption
-            + "\n\n⚠️ Ba a samu poster a series table ta item_id ba."
+            + "\n\n⚠️ Ba a samu poster ta series.file_id ba."
+            + "\nBa za a iya tabbatar da wannan fim ta hoto ba."
         )
 
         if old_message_id:
@@ -2927,7 +2987,7 @@ def movies_name_finish_batch(token):
 
 
 # ============================================================
-# PROCESS NEXT ITEM
+# PROCESS NEXT ITEM IN BATCH
 # ============================================================
 
 def movies_name_process_next(token):
@@ -2972,7 +3032,7 @@ def movies_name_process_next(token):
                             "Admin title\n"
                             "Optional actors\n"
                             "Original title - YEAR\n"
-                            "Optional extra lines\n"
+                            "Optional price / extra lines\n"
                             "Optional final UPDATE"
                         )
 
@@ -2984,7 +3044,7 @@ def movies_name_process_next(token):
 
                     continue
 
-                # ================= SEARCH ITEMS =================
+                # ================= SEARCH MAIN DATABASE =================
 
                 match = movies_name_find_candidates(
                     movie_data["admin_title"]
@@ -3053,10 +3113,7 @@ def movies_name_process_next(token):
 
                     continue
 
-                # =================================================
-                # MULTIPLE DIFFERENT GROUP KEYS
-                # ADMIN MUST SELECT THE CORRECT POSTER
-                # =================================================
+                # ================= MULTIPLE GROUP KEYS =================
 
                 if status == "duplicate":
 
@@ -3079,10 +3136,7 @@ def movies_name_process_next(token):
 
                     return
 
-                # =================================================
-                # ONLY ONE GROUP KEY
-                # CONTINUE AUTOMATICALLY
-                # =================================================
+                # ================= ONE GROUP KEY =================
 
                 group_key = match["group_key"]
 
@@ -3218,7 +3272,7 @@ def movies_name_cancel_batch(token):
 
 
 # ============================================================
-# BUTTON CALLBACK
+# CALLBACK HANDLER
 # YES / NEXT / BACK / NO
 # ============================================================
 
@@ -3310,7 +3364,10 @@ def movies_name_selection_callback(c):
 
         if action == "next":
 
-            if active["page"] >= len(active["candidates"]) - 1:
+            if (
+                active["page"]
+                >= len(active["candidates"]) - 1
+            ):
 
                 bot.answer_callback_query(
 
@@ -3386,7 +3443,7 @@ def movies_name_selection_callback(c):
 
         if action == "yes":
 
-            # Prevent repeated clicks.
+            # Prevent double-clicks.
 
             active["waiting_selection"] = False
 
@@ -3518,7 +3575,7 @@ def movies_name_selection_callback(c):
 
 # ============================================================
 # PRIVATE CHANNEL HANDLER
-# COLLECT PHOTO / TEXT
+# PHOTO / TEXT COLLECTION
 # WAIT FOR DONE
 # ============================================================
 
@@ -3558,7 +3615,7 @@ def movies_name_channel_handler(m):
         else:
             return
 
-        # ================= DONE =================
+        # ================= DONE COMMAND =================
 
         if (
             m.content_type == "text"
@@ -3659,7 +3716,7 @@ def movies_name_channel_handler(m):
 
             return
 
-        # ================= BLOCK DURING PROCESSING =================
+        # ================= BLOCK WHILE PROCESSING =================
 
         with MOVIES_NAME_LOCK:
 
@@ -3689,7 +3746,9 @@ def movies_name_channel_handler(m):
 
             })
 
-            current_total = len(MOVIES_NAME_BATCH)
+            current_total = len(
+                MOVIES_NAME_BATCH
+            )
 
         # Silent collection until DONE.
 
@@ -3704,12 +3763,9 @@ def movies_name_channel_handler(m):
             repr(e)
         )
 
-
 # ============================================================
 # END OF MOVIE ORIGINAL NAME SYSTEM
 # ============================================================
-
-
 
 
 
