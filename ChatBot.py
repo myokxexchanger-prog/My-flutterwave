@@ -1281,6 +1281,7 @@ active_links = {}
 # --- Admins configuration ---
 ADMINS = [6603268127]
 MOVIES_NAME = -1005672878790
+MOVIE_CHECKER = -1005720534930
 
 
 # Chats where this system must remain silent.
