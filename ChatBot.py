@@ -13357,15 +13357,6 @@ from datetime import datetime
 
 # ============================================================
 # ORIGINAL MOVIE TITLE DETECTION
-#
-# - Ignores the first caption line.
-# - Searches every other line for Original Title - YEAR.
-# - Supports: Hope - 2026 / Hope- 2026 / Hope -2026 / Hope-2026
-# - Ignores price and cashback lines.
-# - Uses the newly generated group_key.
-# - Same group_key with multiple files = ONE movie record.
-# - Writes ONLY to movies_name in the all-chat database.
-# - Does not modify items or series for this feature.
 # ============================================================
 
 def series_find_original_movie_name(caption):
@@ -13376,8 +13367,6 @@ def series_find_original_movie_name(caption):
         if line.strip()
     ]
 
-    # First line is the admin/local movie title.
-    # Search starts from the second line.
     if len(lines) < 2:
         return None
 
@@ -13387,14 +13376,12 @@ def series_find_original_movie_name(caption):
 
     for line in lines[1:]:
 
-        # Ignore cashback, e.g. C200 or c1,000.
         if re.fullmatch(
             r"[cC]\s*\d[\d,]*",
             line
         ):
             continue
 
-        # Ignore price-only lines, e.g. 200 or 1,000.
         if re.fullmatch(
             r"\d[\d,]*",
             line
@@ -13422,11 +13409,6 @@ def series_find_original_movie_name(caption):
 
 # ============================================================
 # SAVE ORIGINAL MOVIE NAME
-#
-# One group_key = one movies_name record,
-# even when the movie contains many files.
-#
-# Existing record is never overwritten here.
 # ============================================================
 
 def series_save_original_movie_name(group_key, caption):
@@ -13722,13 +13704,10 @@ def series_finalize(m):
     conn.close()
 
     # ============================================================
-    # NEW ADDITION:
-    # AFTER SUCCESSFUL ITEM SAVING, REGISTER ORIGINAL MOVIE NAME.
-    #
-    # Uses this movie's group_key once.
-    # Multiple files with the same group_key remain ONE movie.
-    # Does not update or modify items / series / poster records.
+    # AUTOMATIC ORIGINAL MOVIE NAME REGISTRATION
     # ============================================================
+
+    movie_name_status = "error"
 
     if item_ids:
 
@@ -13739,6 +13718,8 @@ def series_finalize(m):
 
         if original_name_result["status"] == "inserted":
 
+            movie_name_status = "done"
+
             print(
                 "✅ MOVIES_NAME REGISTRATION COMPLETED:",
                 group_key
@@ -13746,18 +13727,24 @@ def series_finalize(m):
 
         elif original_name_result["status"] == "not_found":
 
+            movie_name_status = "error"
+
             print(
-                "ℹ️ No Original Title - YEAR line found. "
-                "Movie upload remains successful."
+                "❌ ORIGINAL TITLE - YEAR NOT FOUND."
             )
 
         elif original_name_result["status"] == "already_exists":
 
+            movie_name_status = "error"
+
             print(
-                "ℹ️ Existing movies_name record was preserved."
+                "❌ MOVIES_NAME RECORD ALREADY EXISTS:",
+                group_key
             )
 
         else:
+
+            movie_name_status = "error"
 
             print(
                 "❌ MOVIES_NAME REGISTRATION FAILED:",
@@ -13792,15 +13779,29 @@ def series_finalize(m):
     except Exception as e:
         print(f"Public Post Error: {e}")
 
-    # Final message
+    # ================= FINAL MESSAGE =================
+
+    movie_name_message = (
+        "📽Movie name:Done✅"
+        if movie_name_status == "done"
+        else "📽Movie name:Error ❌"
+    )
+
     bot.edit_message_text(
         f"✅ Completed.\n{len(item_ids)}/{total_files} saved successfully.",
         ADMIN_ID,
         progress_msg.message_id
     )
 
-    bot.send_message(uid, f"🎉 Series an adana dukka lafiya.\n💰 Cashback: ₦{cashback_amount}")
+    bot.send_message(
+        uid,
+        f"🎉 Series an adana dukka lafiya.\n"
+        f"💰 Cashback: ₦{cashback_amount}\n"
+        f"{movie_name_message}"
+    )
+
     del series_sessions[uid]
+
 
 
 @bot.callback_query_handler(func=lambda c: True)
