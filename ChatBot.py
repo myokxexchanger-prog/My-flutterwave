@@ -103,14 +103,18 @@ def get_all_chat_db_conn():
 # ============================================================
 
 
-
 # =============================
 # ENSURE BOT_ORDER TABLE STRUCTURE
 # =============================
 
 def ensure_bot_order_table():
 
+    chat_conn = None
+
     try:
+        # Create a fresh All Chat DB connection
+        chat_conn = get_all_chat_db_conn()
+        chat_cur = chat_conn.cursor()
 
         # Create table if it does not exist
         chat_cur.execute("""
@@ -127,7 +131,6 @@ def ensure_bot_order_table():
             )
         """)
 
-        # Helper function
         def ensure_column(column_name, column_type):
 
             chat_cur.execute("""
@@ -147,10 +150,9 @@ def ensure_bot_order_table():
                 print(f"✅ bot_order column '{column_name}' added")
 
             else:
-
                 print(f"✅ bot_order column '{column_name}' already exists")
 
-        # Required new columns
+        # Required columns
         ensure_column("task_id", "UUID")
         ensure_column("group_key", "TEXT")
         ensure_column("selected_movie_title", "TEXT")
@@ -164,11 +166,18 @@ def ensure_bot_order_table():
 
     except Exception as e:
 
-        chat_conn.rollback()
+        if chat_conn:
+            chat_conn.rollback()
 
-        print("❌ BOT_ORDER MIGRATION ERROR:", e)
+        print("❌ BOT_ORDER MIGRATION ERROR:", repr(e))
+        logging.exception("BOT_ORDER MIGRATION FAILED")
 
-        logging.exception("BOT_ORDER TABLE MIGRATION FAILED")
+        raise
+
+    finally:
+
+        if chat_conn:
+            chat_conn.close()
 
 
 # =============================
@@ -176,7 +185,6 @@ def ensure_bot_order_table():
 # =============================
 
 ensure_bot_order_table()
-
 
 
 
