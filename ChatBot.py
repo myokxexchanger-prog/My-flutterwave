@@ -3948,6 +3948,7 @@ def movies_name_channel_handler(m):
 
 
 
+
 # ============================================================
 # AIfims.py — BOT 1 GROUP VIDEO + AI MOVIE MATCHING + ORDER
 # Uses the existing bot and existing database connection functions.
@@ -3981,6 +3982,9 @@ CLIP_RESULT_CHECK_INTERVAL = 2
 CLIP_RESULT_THREAD_STARTED = False
 _CLIP_RESULT_LOCK = threading.Lock()
 _CLIP_RESULT_DELIVERY_LOCK = threading.Lock()
+# Active Change Movie sessions: one pending replacement per operator.
+_CHANGE_MOVIE_SESSIONS = {}
+_CHANGE_MOVIE_LOCK = threading.Lock()
 
 # Debug-to-admin system removed. Calls remain harmless for compatibility.
 def group_clip_debug(*args, **kwargs):
@@ -4571,7 +4575,7 @@ def group_clip_send_checker_pending(payload,order_id,movie_title,movie_year):
     if not MOVIE_CHECKER:
         raise RuntimeError("MOVIE_CHECKER bai da Telegram group ID. Duba CONFIGURATION a saman AIfims.py.")
     keyboard = types.InlineKeyboardMarkup()
-    keyboard.add(types.InlineKeyboardButton("🔄 Change Movie",callback_data=f"ai_change_movie:{order_id}"))
+    keyboard.add(types.InlineKeyboardButton("🔄 Change Movie",callback_data=f"changer:{order_id}"))
     sent = bot.copy_message(
         chat_id=MOVIE_CHECKER,from_chat_id=int(payload["telegram_chat_id"]),
         message_id=int(payload["telegram_message_id"]),
@@ -5039,43 +5043,6 @@ def group_clip_start_result_worker():
 
 
 # ============================================================
-# 20. CHANGE MOVIE BUTTON — ADMIN-ONLY PLACEHOLDER
-# ============================================================
-@bot.callback_query_handler(func=lambda call: bool(call.data and call.data.startswith("ai_change_movie:")))
-def group_clip_admin_change_movie_callback(call):
-    try:
-        if not call.from_user or int(call.from_user.id) != CLIP_ADMIN_ID:
-            bot.answer_callback_query(call.id,"Wannan aikin na admin ne kawai.",show_alert=True)
-            return
-        order_id = call.data.split(":",1)[1].strip()
-        conn = get_all_chat_db_conn()
-        cur = None
-        try:
-            cur = conn.cursor()
-            cur.execute("""
-                SELECT paid,checker_chat_id,checker_message_id,
-                       selected_movie_title,selected_movie_year
-                FROM bot_order WHERE id=%s
-            """,(order_id,))
-            row = cur.fetchone()
-        finally:
-            if cur: cur.close()
-            conn.close()
-        if not row:
-            bot.answer_callback_query(call.id,"Ba a samu order din ba.",show_alert=True)
-        elif int(row[0] or 0) == 1:
-            bot.answer_callback_query(call.id,"An riga an biya. Ba za a iya canza fim ba.",show_alert=True)
-        else:
-            bot.answer_callback_query(call.id,"An gano order. An adana message ID domin tsarin Change Movie.",show_alert=True)
-            logging.info("ADMIN CHANGE MOVIE CLICK order=%s checker_chat=%s message=%s",
-                         order_id,row[1],row[2])
-    except Exception:
-        logging.exception("CHANGE MOVIE CALLBACK FAILED")
-        try: bot.answer_callback_query(call.id,"An samu matsala.",show_alert=True)
-        except Exception: pass
-
-
-# ============================================================
 # 21. MARK ORDER PAID — CALL FROM VERIFIED FLUTTERWAVE WEBHOOK
 # ============================================================
 def group_clip_mark_ai_order_paid(order_id,verified_reference=None):
@@ -5204,6 +5171,388 @@ group_clip_start_result_worker()
 # END AIfims.py
 # ============================================================
 
+# ============================================================
+# Buttons block
+# 20. CHANGE MOVIE — MULTI-OPERATOR INDEPENDENT SESSIONS
+# ============================================================
+
+_CHANGE_MOVIE_SESSIONS = {}       # operator_id -> session
+_CHANGE_MOVIE_ORDER_LOCKS = {}    # order_id -> operator_id
+_CHANGE_MOVIE_LOCK = threading.RLock()
+
+
+def group_clip_change_movie_file_id(message):
+    if getattr(message, "video", None):
+        return message.video.file_id
+    if getattr(message, "document", None):
+        return message.document.file_id
+    return None
+
+
+def group_clip_change_movie_keyboard(order_id, include_done=False):
+    keyboard = types.InlineKeyboardMarkup()
+
+    if include_done:
+        keyboard.add(types.InlineKeyboardButton(
+            "✅ Done",
+            callback_data=f"changer_done:{order_id}"
+        ))
+
+    keyboard.add(types.InlineKeyboardButton(
+        "❌ Cancel",
+        callback_data=f"changer_cancel:{order_id}"
+    ))
+
+    return keyboard
+
+
+# ------------------------------------------------------------
+# 1. CHANGE MOVIE BUTTON CALLBACK
+# ------------------------------------------------------------
+
+@bot.callback_query_handler(
+    func=lambda call: bool(
+        call.data and call.data.startswith("changer:")
+    )
+)
+def group_clip_change_movie_callback(call):
+    try:
+        if not call.message or int(call.message.chat.id) != int(MOVIE_CHECKER):
+            bot.answer_callback_query(
+                call.id,
+                "Wannan button din na MOVIE_CHECKER ne kawai.",
+                show_alert=True
+            )
+            return
+
+        if not call.from_user:
+            bot.answer_callback_query(call.id, "Ba a gane mai aikin ba.", show_alert=True)
+            return
+
+        order_id = call.data.split(":", 1)[1].strip()
+        operator_id = int(call.from_user.id)
+
+        if not order_id:
+            bot.answer_callback_query(call.id, "Order ID bai dace ba.", show_alert=True)
+            return
+
+        conn = get_all_chat_db_conn()
+        cur = conn.cursor()
+        try:
+            cur.execute("""
+                SELECT paid, checker_chat_id, checker_message_id
+                FROM bot_order
+                WHERE id=%s
+                LIMIT 1
+            """, (order_id,))
+            order = cur.fetchone()
+        finally:
+            cur.close()
+            conn.close()
+
+        if not order:
+            bot.answer_callback_query(call.id, "Ba a samu order din ba.", show_alert=True)
+            return
+
+        paid, checker_chat_id, checker_message_id = order
+
+        if int(paid or 0) == 1:
+            bot.answer_callback_query(
+                call.id,
+                "An riga an biya order din. Ba za a iya canza fim ba.",
+                show_alert=True
+            )
+            return
+
+        if int(checker_chat_id or 0) != int(MOVIE_CHECKER):
+            bot.answer_callback_query(
+                call.id,
+                "Wannan order ba na MOVIE_CHECKER ba ne.",
+                show_alert=True
+            )
+            return
+
+        with _CHANGE_MOVIE_LOCK:
+            if operator_id in _CHANGE_MOVIE_SESSIONS:
+                bot.answer_callback_query(
+                    call.id,
+                    "Kana da wani aikin Change Movie da kake yi. Ka gama ko ka yi Cancel tukuna.",
+                    show_alert=True
+                )
+                return
+
+            current_operator = _CHANGE_MOVIE_ORDER_LOCKS.get(order_id)
+            if current_operator is not None:
+                bot.answer_callback_query(
+                    call.id,
+                    "Wani ya riga ya fara aikin wannan order. Ka jira ya gama.",
+                    show_alert=True
+                )
+                return
+
+            _CHANGE_MOVIE_ORDER_LOCKS[order_id] = operator_id
+            _CHANGE_MOVIE_SESSIONS[operator_id] = {
+                "order_id": order_id,
+                "file_id": None,
+                "file_type": None,
+                "upload_message_id": None,
+                "checker_message_id": checker_message_id,
+            }
+
+        bot.answer_callback_query(call.id, "An bude maka session.")
+        bot.send_message(
+            MOVIE_CHECKER,
+            "🎬 <b>CHANGE MOVIE SESSION</b>\n\n"
+            "Bani sabon fim din da za a musanya wa wannan user.\n\n"
+            "📁 Ka turo File ko Video a cikin wannan group din.\n"
+            "Sai ka danna <b>Done</b> idan ka gama.\n"
+            "Idan ka yi kuskure, danna <b>Cancel</b>.\n\n"
+            f"🆔 Order: <code>{group_clip_safe(order_id)}</code>\n"
+            f"👤 Mai aiki: {group_clip_safe(group_clip_user_name(call.from_user))}",
+            parse_mode="HTML",
+            reply_markup=group_clip_change_movie_keyboard(order_id)
+        )
+        logging.info(
+            "CHANGE MOVIE STARTED order=%s operator=%s",
+            order_id, operator_id
+        )
+
+    except Exception:
+        logging.exception("CHANGE MOVIE CALLBACK FAILED")
+        try:
+            bot.answer_callback_query(
+                call.id, "An samu matsala wajen bude session.", show_alert=True
+            )
+        except Exception:
+            pass
+
+
+# ------------------------------------------------------------
+# 2. RECEIVE FILE / VIDEO — OPERATOR SESSION ONLY
+# ------------------------------------------------------------
+
+@bot.message_handler(
+    content_types=["video", "document"],
+    func=lambda message: bool(
+        message
+        and message.chat
+        and int(message.chat.id) == int(MOVIE_CHECKER)
+        and message.from_user
+        and not message.from_user.is_bot
+    )
+)
+def group_clip_change_movie_receive_file(message):
+    operator_id = int(message.from_user.id)
+
+    with _CHANGE_MOVIE_LOCK:
+        session = _CHANGE_MOVIE_SESSIONS.get(operator_id)
+        if not session:
+            return
+
+        file_id = group_clip_change_movie_file_id(message)
+        if not file_id:
+            return
+
+        session["file_id"] = file_id
+        session["file_type"] = "video" if message.video else "document"
+        session["upload_message_id"] = int(message.message_id)
+        order_id = session["order_id"]
+
+    bot.send_message(
+        MOVIE_CHECKER,
+        "📥 <b>An karbi sabon fim.</b>\n\n"
+        "Idan wannan shi ne fim din da za a saka, danna <b>Done</b>.\n"
+        "Idan ba daidai ba ne, ka sake turo wani file ko ka yi Cancel.",
+        parse_mode="HTML",
+        reply_markup=group_clip_change_movie_keyboard(
+            order_id,
+            include_done=True
+        )
+    )
+
+
+# ------------------------------------------------------------
+# 3. DONE — SAVE NEW FILE_ID TO bot_order_items
+# ------------------------------------------------------------
+
+@bot.callback_query_handler(
+    func=lambda call: bool(
+        call.data and call.data.startswith("changer_done:")
+    )
+)
+def group_clip_change_movie_done_callback(call):
+    try:
+        if not call.message or int(call.message.chat.id) != int(MOVIE_CHECKER):
+            bot.answer_callback_query(call.id, "A MOVIE_CHECKER kawai.", show_alert=True)
+            return
+
+        if not call.from_user:
+            bot.answer_callback_query(call.id, "Ba a gane mai aikin ba.", show_alert=True)
+            return
+
+        order_id = call.data.split(":", 1)[1].strip()
+        operator_id = int(call.from_user.id)
+
+        with _CHANGE_MOVIE_LOCK:
+            session = _CHANGE_MOVIE_SESSIONS.get(operator_id)
+            if (
+                not session
+                or session.get("order_id") != order_id
+                or not session.get("file_id")
+                or _CHANGE_MOVIE_ORDER_LOCKS.get(order_id) != operator_id
+            ):
+                bot.answer_callback_query(
+                    call.id,
+                    "Wannan ba session dinka ba ne ko kuma ba ka turo sabon file ba.",
+                    show_alert=True
+                )
+                return
+
+            new_file_id = session["file_id"]
+
+        conn = get_all_chat_db_conn()
+        cur = conn.cursor()
+        try:
+            cur.execute("""
+                SELECT paid, item_id, checker_chat_id
+                FROM bot_order
+                WHERE id=%s
+                FOR UPDATE
+            """, (order_id,))
+            order = cur.fetchone()
+
+            if not order:
+                conn.rollback()
+                bot.answer_callback_query(call.id, "Ba a samu order din ba.", show_alert=True)
+                return
+
+            paid, item_id, checker_chat_id = order
+            if int(paid or 0) == 1:
+                conn.rollback()
+                bot.answer_callback_query(
+                    call.id,
+                    "An riga an biya order din. Ba za a iya canza shi ba.",
+                    show_alert=True
+                )
+                return
+
+            if int(checker_chat_id or 0) != int(MOVIE_CHECKER):
+                conn.rollback()
+                bot.answer_callback_query(
+                    call.id, "Order din ba na MOVIE_CHECKER ba ne.", show_alert=True
+                )
+                return
+
+            cur.execute("""
+                UPDATE bot_order_items
+                SET file_id=%s
+                WHERE order_id=%s AND item_id=%s
+            """, (new_file_id, order_id, int(item_id)))
+
+            if cur.rowcount < 1:
+                conn.rollback()
+                bot.answer_callback_query(
+                    call.id,
+                    "Ba a samu file record na order din ba.",
+                    show_alert=True
+                )
+                return
+
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            cur.close()
+            conn.close()
+
+        with _CHANGE_MOVIE_LOCK:
+            _CHANGE_MOVIE_SESSIONS.pop(operator_id, None)
+            _CHANGE_MOVIE_ORDER_LOCKS.pop(order_id, None)
+
+        bot.answer_callback_query(call.id, "An canza fim din cikin nasara.")
+        bot.send_message(
+            MOVIE_CHECKER,
+            "✅ <b>DONE!</b>\n"
+            "An sabunta file_id na wannan order cikin nasara.",
+            parse_mode="HTML"
+        )
+        logging.info(
+            "CHANGE MOVIE COMPLETED order=%s operator=%s",
+            order_id, operator_id
+        )
+
+    except Exception:
+        logging.exception("CHANGE MOVIE DONE FAILED")
+        try:
+            bot.answer_callback_query(
+                call.id,
+                "An samu matsala. Ba a tabbatar da canjin ba.",
+                show_alert=True
+            )
+        except Exception:
+            pass
+
+
+# ------------------------------------------------------------
+# 4. CANCEL — RELEASE ONLY THIS OPERATOR'S SESSION
+# ------------------------------------------------------------
+
+@bot.callback_query_handler(
+    func=lambda call: bool(
+        call.data and call.data.startswith("changer_cancel:")
+    )
+)
+def group_clip_change_movie_cancel_callback(call):
+    try:
+        if not call.message or int(call.message.chat.id) != int(MOVIE_CHECKER):
+            bot.answer_callback_query(call.id, "A MOVIE_CHECKER kawai.", show_alert=True)
+            return
+
+        if not call.from_user:
+            bot.answer_callback_query(call.id, "Ba a gane mai aikin ba.", show_alert=True)
+            return
+
+        order_id = call.data.split(":", 1)[1].strip()
+        operator_id = int(call.from_user.id)
+
+        with _CHANGE_MOVIE_LOCK:
+            session = _CHANGE_MOVIE_SESSIONS.get(operator_id)
+            if (
+                not session
+                or session.get("order_id") != order_id
+                or _CHANGE_MOVIE_ORDER_LOCKS.get(order_id) != operator_id
+            ):
+                bot.answer_callback_query(
+                    call.id,
+                    "Wannan session ba naka ba ne.",
+                    show_alert=True
+                )
+                return
+
+            _CHANGE_MOVIE_SESSIONS.pop(operator_id, None)
+            _CHANGE_MOVIE_ORDER_LOCKS.pop(order_id, None)
+
+        bot.answer_callback_query(call.id, "An soke aikinka.")
+        bot.send_message(
+            MOVIE_CHECKER,
+            "❌ An soke wannan Change Movie session.\n"
+            "Yanzu za ka iya sake danna Change Movie daga farko."
+        )
+        logging.info(
+            "CHANGE MOVIE CANCELLED order=%s operator=%s",
+            order_id, operator_id
+        )
+
+    except Exception:
+        logging.exception("CHANGE MOVIE CANCEL FAILED")
+        try:
+            bot.answer_callback_query(call.id, "An samu matsala.", show_alert=True)
+        except Exception:
+            pass
+
+
+#End button block
 
 
 # ============================================================
