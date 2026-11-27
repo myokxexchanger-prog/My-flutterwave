@@ -3947,6 +3947,7 @@ def movies_name_channel_handler(m):
 # ============================================================
 
 
+
 # ============================================================
 # AIfims.py — BOT 1 GROUP VIDEO + AI MOVIE MATCHING + ORDER
 # Uses the existing bot and existing database connection functions.
@@ -3981,45 +3982,14 @@ CLIP_RESULT_THREAD_STARTED = False
 _CLIP_RESULT_LOCK = threading.Lock()
 _CLIP_RESULT_DELIVERY_LOCK = threading.Lock()
 
-# Prevent repeated debug messages for the same task/stage.
-_CLIP_DEBUG_SENT = set()
-_CLIP_DEBUG_LOCK = threading.Lock()
-
-
-# ============================================================
-# DEBUG SYSTEM — SEND EVERY AI/DB/TELEGRAM/FLUTTERWAVE STAGE TO ADMIN
-# Diagnostic only: does not change the existing processing decisions.
-# ============================================================
-def group_clip_debug(stage, task_id=None, details=None, error=None):
-    debug_key = (str(task_id or "GLOBAL"), str(stage))
-    with _CLIP_DEBUG_LOCK:
-        if debug_key in _CLIP_DEBUG_SENT:
-            return
-        try:
-            lines = [
-                "🧪 <b>AIFIMS DEBUG</b>",
-                f"<b>Stage:</b> {group_clip_safe(stage)}",
-                f"<b>Task ID:</b> <code>{group_clip_safe(task_id or 'N/A')}</code>",
-            ]
-            if details:
-                lines.append("<b>Details:</b>")
-                lines.append(group_clip_safe(str(details)[:2200]))
-            if error:
-                lines.append("<b>Error:</b>")
-                lines.append(f"<code>{group_clip_safe(str(error)[:1800])}</code>")
-            message_text = "\n".join(lines)
-            logging.info("AIFIMS DEBUG | stage=%s | task=%s | details=%s | error=%s",
-                         stage, task_id, details, error)
-            bot.send_message(CLIP_ADMIN_ID, message_text, parse_mode="HTML")
-            _CLIP_DEBUG_SENT.add(debug_key)
-        except Exception:
-            logging.exception("AIFIMS DEBUG ADMIN DELIVERY FAILED | stage=%s | task=%s",
-                              stage, task_id)
+# Debug-to-admin system removed. Calls remain harmless for compatibility.
+def group_clip_debug(*args, **kwargs):
+    return None
 
 
 AI_MOVIE_COMPANY_PRIORITY = (
-    "Algaita", "Sultan", "Fikira", "Mega", "Gwani",
-    "C man", "D love", "Badawa", "PK studio",
+    "Algaita", "Sultan", "Mega", "Fikira", "Gwani",
+    "Ysf zamani", "C man", "D love", "Alhussain", "Badawa", "Pk studio",
 )
 
 # ============================================================
@@ -4450,18 +4420,19 @@ def group_clip_fetch_items_for_group_keys(group_keys):
 # 13. COMPANY DETECTION + PRIORITY
 # ============================================================
 def group_clip_detect_company(title):
-    parenthetical = re.findall(r"\(([^()]*)\)", str(title or ""))
-    for section in parenthetical:
-        normalized_section = f" {group_clip_normalize_words(section)} "
-        for company in AI_MOVIE_COMPANY_PRIORITY:
-            token = f" {group_clip_normalize_words(company)} "
-            if token.strip() and token in normalized_section:
-                return company
-    normalized = f" {group_clip_normalize_words(title)} "
+    """Detect known priority companies first; otherwise detect an unknown company label."""
+    text = str(title or "")
+    parenthetical = re.findall(r"\(([^()]*)\)", text)
+    sections = parenthetical + [text]
     for company in AI_MOVIE_COMPANY_PRIORITY:
-        token = f" {group_clip_normalize_words(company)} "
-        if token.strip() and token in normalized:
+        token = group_clip_normalize_words(company)
+        if token and any(token in group_clip_normalize_words(section) for section in sections):
             return company
+    # An unlisted company in parentheses is still a company; keep its supplied spelling.
+    for section in parenthetical:
+        candidate = re.sub(r"[^A-Za-z0-9 &'_-]", " ", section).strip(" -_'")
+        if candidate and len(candidate) <= 45:
+            return candidate
     return None
 
 
@@ -4475,20 +4446,26 @@ def group_clip_select_movie_group(group_rows, item_rows):
         key = movie["group_key"]
         usable = [x for x in by_group.get(key, []) if x.get("file_id")]
         if usable:
+            company_matches = [group_clip_detect_company(x.get("title") or "") for x in usable]
+            company_matches = [x for x in company_matches if x]
+            company = None
+            if company_matches:
+                known = [x for x in company_matches if x.casefold() in {v.casefold() for v in AI_MOVIE_COMPANY_PRIORITY}]
+                if known:
+                    company = min(known, key=lambda x: next(i for i,v in enumerate(AI_MOVIE_COMPANY_PRIORITY) if v.casefold()==x.casefold()))
+                else:
+                    company = company_matches[0]
             candidates.append({"group_key":key,"items":sorted(usable,key=lambda x:int(x["id"])),
-                               "first_item_id":min(int(x["id"]) for x in usable),"company":None})
+                               "first_item_id":min(int(x["id"]) for x in usable),"company":company})
     if not candidates:
         return None, "no_files"
-    if len(candidates) == 1:
-        return candidates[0], "single_match"
-    for candidate in candidates:
-        matches = [group_clip_detect_company(x.get("title") or "") for x in candidate["items"]]
-        matches = [x for x in matches if x]
-        if matches:
-            candidate["company"] = min(matches,key=lambda x:AI_MOVIE_COMPANY_PRIORITY.index(x))
-    ranked = [x for x in candidates if x["company"]]
+    known_rank = {name.casefold(): i for i, name in enumerate(AI_MOVIE_COMPANY_PRIORITY)}
+    ranked = [x for x in candidates if x["company"] and x["company"].casefold() in known_rank]
     if ranked:
-        return min(ranked,key=lambda x:(AI_MOVIE_COMPANY_PRIORITY.index(x["company"]),x["first_item_id"])), "company_priority"
+        return min(ranked,key=lambda x:(known_rank[x["company"].casefold()],x["first_item_id"])), "company_priority"
+    unknown = [x for x in candidates if x["company"]]
+    if unknown:
+        return min(unknown,key=lambda x:x["first_item_id"]), "new_company"
     return min(candidates,key=lambda x:x["first_item_id"]), "earliest_inserted"
 
 
@@ -4503,18 +4480,29 @@ def group_clip_create_ai_order(task_id,user_id,selected_movie,movie_title,movie_
     total = int(first_item.get("price") or 0)
     if total <= 0:
         raise ValueError("Farashin fim bai dace ba.")
-    order_id = str(uuid.uuid4())
     group_key = str(selected_movie["group_key"])
     conn = get_all_chat_db_conn()
     cur = None
     try:
         cur = conn.cursor()
-        cur.execute("SELECT id,amount FROM bot_order WHERE task_id=%s ORDER BY created_at DESC LIMIT 1",
-                    (str(task_id),))
+        # Reuse the user's existing unpaid order for this exact movie group.
+        cur.execute("""
+            SELECT id,amount,task_id FROM bot_order
+            WHERE user_id=%s AND group_key=%s AND paid=0
+            ORDER BY created_at DESC LIMIT 1
+        """,(int(user_id),group_key))
         existing = cur.fetchone()
         if existing:
+            order_id, old_amount, old_task_id = str(existing[0]), int(existing[1]), str(existing[2])
+            cur.execute("""
+                UPDATE tasks SET payload=COALESCE(payload,'{}'::jsonb)||%s::jsonb,updated_at=NOW()
+                WHERE task_id=%s
+            """,(json.dumps({"movie_order_created":True,"bot_order_id":order_id,
+                               "selected_group_key":group_key,"selected_movie_title":movie_title,
+                               "selected_movie_year":int(movie_year)}),str(task_id)))
             conn.commit()
-            return str(existing[0]),int(existing[1]),selected_items
+            return order_id,old_amount,selected_items
+        order_id = str(uuid.uuid4())
         cur.execute("""
             INSERT INTO bot_order (id,user_id,movie_id,item_id,amount,paid,pay_ref,type,
                 task_id,group_key,selected_movie_title,selected_movie_year)
@@ -4609,15 +4597,120 @@ def group_clip_send_checker_pending(payload,order_id,movie_title,movie_year):
 # ============================================================
 # 17. SEND PAYMENT LINK TO CUSTOMER
 # ============================================================
-def group_clip_send_payment_to_user(user_id,order_id,amount,movie_title,movie_year,payment_url):
+def group_clip_company_label(movie_title, selected_items):
+    names = [group_clip_detect_company(x.get("title") or "") for x in selected_items]
+    names = [x for x in names if x]
+    if names:
+        known = [x for x in names if x.casefold() in {v.casefold() for v in AI_MOVIE_COMPANY_PRIORITY}]
+        if known:
+            return min(known, key=lambda x: next(i for i,v in enumerate(AI_MOVIE_COMPANY_PRIORITY) if v.casefold()==x.casefold()))
+        return names[0]
+    return "Complete"
+
+
+def group_clip_payment_caption(amount, company_label):
+    return ("<b> You can buy full movie now</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"<b>Complete</b>       │  <b>Fassarar {group_clip_safe(company_label)}</b>\n"
+            f"<b>Amount</b>          │  <b>₦{int(amount):,}</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            "Biya yanzu domin samun cikakken fim ɗin.\n\n"
+            "<b>Click here 👇👇</b>")
+
+
+def group_clip_send_payment_to_user(user_id,order_id,amount,movie_title,movie_year,payment_url,
+                                    payload=None,selected_items=None):
     keyboard = types.InlineKeyboardMarkup()
-    keyboard.add(types.InlineKeyboardButton("💳 Pay Now",url=payment_url))
-    text = ("<b>🎬 AN SAMU FIM ƊINKA!</b>\n\n"
-        f"<b>Movie:</b> {group_clip_safe(movie_title)}\n<b>Year:</b> {int(movie_year)}\n"
-        f"<b>Amount:</b> ₦{int(amount):,}\n<b>Order ID:</b> <code>{group_clip_safe(order_id)}</code>\n\n"
-        "Danna Pay Now domin biyan kuɗi. Bayan an tabbatar da biyan kuɗi za a kammala maka order ɗinka.\n\n"
-        "<i>Mun gode da amfani da AlgaitaBot 🙏</i>")
-    return bot.send_message(int(user_id),text,parse_mode="HTML",reply_markup=keyboard)
+    keyboard.add(types.InlineKeyboardButton("💳 Pay ₦%s" % f"{int(amount):,}",url=payment_url,style="primary"))
+    keyboard.add(types.InlineKeyboardButton("👛 Pay with Wallet",callback_data=f"walletpay:{order_id}",style="success"))
+    company_label = group_clip_company_label(movie_title, selected_items or [])
+    caption = group_clip_payment_caption(amount,company_label)
+    if payload and payload.get("telegram_chat_id") and payload.get("telegram_message_id"):
+        sent = bot.copy_message(chat_id=int(user_id),from_chat_id=int(payload["telegram_chat_id"]),
+                                message_id=int(payload["telegram_message_id"]),caption=caption,
+                                parse_mode="HTML",reply_markup=keyboard)
+    else:
+        sent = bot.send_message(int(user_id),caption,parse_mode="HTML",reply_markup=keyboard)
+    return sent
+
+
+def group_clip_pending_count(user_id):
+    conn = get_all_chat_db_conn()
+    cur = None
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM bot_order WHERE user_id=%s AND paid=0 AND type='AI order'",(int(user_id),))
+        return int(cur.fetchone()[0] or 0)
+    finally:
+        if cur: cur.close()
+        conn.close()
+
+
+def group_clip_send_pending_block(message, task_id):
+    keyboard = types.InlineKeyboardMarkup()
+    keyboard.add(types.InlineKeyboardButton("View Orders",callback_data="ai_view_orders",style="success"))
+    caption = ("<b>BAZA'A SAKE KARBAR VIDEO DAGA GAREKA</b>\n"
+               "<b>HAR SAI KA KAMMALA BIYAN PENDING ORDERS DINKA</b>")
+    sent = bot.copy_message(chat_id=message.from_user.id,from_chat_id=message.chat.id,
+                             message_id=message.message_id,caption=caption,
+                             parse_mode="HTML",reply_markup=keyboard)
+    conn = get_all_chat_db_conn()
+    cur = None
+    try:
+        cur = conn.cursor()
+        cur.execute("UPDATE tasks SET payload=COALESCE(payload,'{}'::jsonb)||%s::jsonb,updated_at=NOW() WHERE task_id=%s",
+                    (json.dumps({"pending_blocked":True,"bot1_delivered":True,"blocked_dm_chat_id":sent.chat.id,
+                                 "blocked_dm_message_id":sent.message_id}),str(task_id)))
+        conn.commit()
+    except Exception:
+        conn.rollback(); raise
+    finally:
+        if cur: cur.close()
+        conn.close()
+    return sent
+
+
+@bot.callback_query_handler(func=lambda c: bool(c.data and c.data == "ai_view_orders"))
+def group_clip_view_pending_orders(call):
+    user_id = int(call.from_user.id)
+    try:
+        bot.answer_callback_query(call.id,"Ana loda pending orders ɗinka...")
+        conn = get_all_chat_db_conn()
+        cur = None
+        try:
+            cur = conn.cursor(cursor_factory=RealDictCursor)
+            cur.execute("""
+                SELECT o.id,o.amount,o.task_id,o.selected_movie_title,o.selected_movie_year,
+                       t.payload
+                FROM bot_order o LEFT JOIN tasks t ON t.task_id=o.task_id
+                WHERE o.user_id=%s AND o.paid=0 AND o.type='AI order'
+                ORDER BY o.created_at ASC
+            """,(user_id,))
+            orders = cur.fetchall()
+        finally:
+            if cur: cur.close()
+            conn.close()
+        try: bot.delete_message(call.message.chat.id,call.message.message_id)
+        except Exception: logging.exception("VIEW ORDERS MESSAGE DELETE FAILED")
+        if not orders:
+            bot.send_message(user_id,"Babu pending orders a yanzu.")
+            return
+        for order in orders:
+            payload = group_clip_json_dict(order.get("payload"))
+            old_dm_id = payload.get("blocked_dm_message_id")
+            if old_dm_id:
+                try: bot.delete_message(user_id,int(old_dm_id))
+                except Exception: pass
+            oid, amount = str(order["id"]), int(order["amount"] or 0)
+            title = order.get("selected_movie_title") or "Complete"
+            year = int(order.get("selected_movie_year") or 0)
+            link = group_clip_create_payment_link(user_id,oid,amount,f"{title} ({year})")
+            group_clip_send_payment_to_user(user_id,oid,amount,title,year,link,payload=payload)
+    except Exception:
+        logging.exception("VIEW PENDING AI ORDERS FAILED")
+        try: bot.send_message(user_id,"An samu matsala wajen nuna pending orders. Ka sake gwadawa.")
+        except Exception: pass
+
 
 
 def group_clip_send_not_found_to_user(payload):
@@ -4737,17 +4830,21 @@ def group_clip_process_completed_task(task_id,payload,result_json):
         # creates/returns a valid link for the same order reference.
         payment_url = group_clip_create_payment_link(
             user_id,order_id,amount,f"{movie_title} ({movie_year})")
-        group_clip_send_payment_to_user(user_id,order_id,amount,movie_title,movie_year,payment_url)
+        payment_message = group_clip_send_payment_to_user(user_id,order_id,amount,movie_title,movie_year,payment_url,
+                                        payload=payload,selected_items=group_clip_fetch_items_for_group_keys([existing.get("group_key")]) if existing.get("group_key") else [])
         conn = get_all_chat_db_conn()
         cur = None
         try:
             cur = conn.cursor()
             cur.execute("""
                 UPDATE tasks SET payload=COALESCE(payload,'{}'::jsonb)||%s::jsonb,updated_at=NOW()
-                WHERE task_id=%s
+                WHERE task_id=(SELECT task_id FROM bot_order WHERE id=%s LIMIT 1)
             """,(json.dumps({"bot1_delivered":True,"movie_order_created":True,
                                "bot_order_id":order_id,"checker_message_id":checker_message.message_id,
-                               "checker_chat_id":MOVIE_CHECKER}),str(task_id)))
+                               "checker_chat_id":MOVIE_CHECKER,"order_message_chat_id":user_id,
+                               "order_message_id":getattr(payment_message,"message_id",None)}),str(order_id)))
+            cur.execute("UPDATE tasks SET payload=COALESCE(payload,'{}'::jsonb)||%s::jsonb,updated_at=NOW() WHERE task_id=%s",
+                        (json.dumps({"bot1_delivered":True,"movie_order_created":True,"bot_order_id":order_id}),str(task_id)))
             conn.commit()
         except Exception:
             conn.rollback()
@@ -4851,7 +4948,7 @@ def group_clip_process_completed_task(task_id,payload,result_json):
     group_clip_debug("Ana aika Pay Now zuwa DM na user",task_id,
                      {"user_id":user_id,"order_id":order_id})
     payment_message = group_clip_send_payment_to_user(
-        user_id,order_id,amount,movie_title,movie_year,payment_url)
+        user_id,order_id,amount,movie_title,movie_year,payment_url,payload=payload,selected_items=selected_items)
     group_clip_debug("An aika sakon Pay Now ga user",task_id,
                      {"user_id":user_id,"telegram_message_id":payment_message.message_id})
 
@@ -4861,10 +4958,13 @@ def group_clip_process_completed_task(task_id,payload,result_json):
         cur = conn.cursor()
         cur.execute("""
             UPDATE tasks SET payload=COALESCE(payload,'{}'::jsonb)||%s::jsonb,updated_at=NOW()
-            WHERE task_id=%s
+            WHERE task_id=(SELECT task_id FROM bot_order WHERE id=%s LIMIT 1)
         """,(json.dumps({"bot1_delivered":True,"movie_order_created":True,
                            "bot_order_id":order_id,"checker_message_id":checker_message.message_id,
-                           "checker_chat_id":MOVIE_CHECKER}),str(task_id)))
+                           "checker_chat_id":MOVIE_CHECKER,"order_message_chat_id":user_id,
+                           "order_message_id":payment_message.message_id}),str(order_id)))
+        cur.execute("UPDATE tasks SET payload=COALESCE(payload,'{}'::jsonb)||%s::jsonb,updated_at=NOW() WHERE task_id=%s",
+                    (json.dumps({"bot1_delivered":True,"movie_order_created":True,"bot_order_id":order_id}),str(task_id)))
         conn.commit()
     except Exception:
         conn.rollback()
@@ -5004,6 +5104,24 @@ def group_clip_mark_ai_order_paid(order_id,verified_reference=None):
     finally:
         if cur: cur.close()
         conn.close()
+    # Delete the pending order video/caption from the customer's DM after verified payment.
+    try:
+        conn2 = get_all_chat_db_conn()
+        cur2 = None
+        try:
+            cur2 = conn2.cursor(cursor_factory=RealDictCursor)
+            cur2.execute("SELECT payload FROM tasks WHERE task_id=(SELECT task_id FROM bot_order WHERE id=%s LIMIT 1)",(str(order_id),))
+            task_row = cur2.fetchone()
+        finally:
+            if cur2: cur2.close()
+            conn2.close()
+        saved_payload = group_clip_json_dict(task_row.get("payload") if task_row else {})
+        dm_chat = saved_payload.get("order_message_chat_id")
+        dm_message = saved_payload.get("order_message_id")
+        if dm_chat and dm_message:
+            bot.delete_message(int(dm_chat),int(dm_message))
+    except Exception:
+        logging.exception("PAID ORDER CUSTOMER MESSAGE DELETE FAILED order=%s",order_id)
     if checker_chat_id and checker_message_id:
         try:
             caption = ("<b>🎬 AI MOVIE ORDER</b>\n━━━━━━━━━━━━━━━━━━━━\n"
@@ -5056,6 +5174,19 @@ def bot1_group_video_receiver(message):
                     parse_mode="HTML")
             except Exception: logging.exception("TASK FAILURE NOTICE FAILED")
             return
+        try:
+            if group_clip_pending_count(message.from_user.id) >= 10:
+                try:
+                    if ack_message:
+                        bot.delete_message(message.from_user.id,ack_message.message_id)
+                except Exception:
+                    pass
+                group_clip_send_pending_block(message,task_id)
+                group_clip_send_random_group_reply(message)
+                group_clip_restrict_user_2_hours(message)
+                return
+        except Exception:
+            logging.exception("PENDING ORDER LIMIT CHECK FAILED")
         try: group_clip_send_random_group_reply(message)
         except Exception: logging.exception("RANDOM GROUP REPLY FAILED")
         group_clip_restrict_user_2_hours(message)
@@ -5072,8 +5203,6 @@ group_clip_start_result_worker()
 # ============================================================
 # END AIfims.py
 # ============================================================
-
-
 
 
 
