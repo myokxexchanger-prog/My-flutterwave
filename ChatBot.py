@@ -5933,28 +5933,51 @@ def handle_ai_order_payment(
             conn.close()
 
         # =====================================================
-        # 3. GET FULL USER NAME FROM TELEGRAM
+        # 3. GET FULL USER NAME DIRECTLY FROM TELEGRAM
+        # NOT FROM DATABASE
         # =====================================================
 
         try:
 
-            full_name, username = ai_order_get_user_info(user_id)
+            telegram_user = bot.get_chat(
+                int(user_id)
+            )
 
-            full_name = str(
-                full_name or "Malam"
+            first_name = str(
+                getattr(telegram_user, "first_name", "") or ""
+            ).strip()
+
+            last_name = str(
+                getattr(telegram_user, "last_name", "") or ""
+            ).strip()
+
+            username = str(
+                getattr(telegram_user, "username", "") or ""
+            ).strip()
+
+            full_name = " ".join(
+                part for part in (first_name, last_name) if part
             ).strip()
 
             if not full_name:
                 full_name = "Malam"
 
+            logging.info(
+                "AI TELEGRAM USER INFO SUCCESS user=%s name=%s username=%s",
+                user_id,
+                full_name,
+                username
+            )
+
         except Exception:
 
             logging.exception(
-                "AI USER INFORMATION FETCH FAILED user=%s",
+                "AI TELEGRAM USER INFORMATION FAILED user=%s",
                 user_id
             )
 
             full_name = "Malam"
+            username = ""
 
         # =====================================================
         # 4. PAYMENT NOTIFICATION
@@ -5966,6 +5989,12 @@ def handle_ai_order_payment(
             order_id=order_id,
             movie_title=movie_title,
             amount=paid_amount
+        )
+
+        logging.info(
+            "AI PAYMENT NOTIFICATION RESULT order=%s sent=%s",
+            order_id,
+            notification_sent
         )
 
         # =====================================================
@@ -6340,6 +6369,153 @@ def handle_ai_order_payment(
 
 #Start Asister webhook block
 
+
+# =============================================================
+# AI NOTIFICATION DEBUG
+# SEND DEBUG TO ADMIN_ID AND SERVER LOG
+# =============================================================
+
+def ai_order_notification_debug(stage, details=None):
+
+    try:
+
+        message = (
+            "🔍 <b>AI NOTIFICATION DEBUG</b>\n\n"
+            f"<b>STAGE:</b> {group_clip_safe(stage)}\n"
+        )
+
+        if details is not None:
+            message += (
+                "\n<b>DETAILS:</b>\n"
+                f"<code>{group_clip_safe(str(details)[:3000])}</code>"
+            )
+
+        logging.info(
+            "AI NOTIFICATION DEBUG | STAGE=%s | DETAILS=%s",
+            stage,
+            details
+        )
+
+        admin_targets = []
+
+        admins = globals().get("ADMINS") or []
+
+        if isinstance(admins, (list, tuple, set)):
+            admin_targets.extend(admins)
+        elif admins:
+            admin_targets.append(admins)
+
+        admin_id = globals().get("ADMIN_ID")
+
+        if admin_id:
+            admin_targets.append(admin_id)
+
+        admin_targets = list(dict.fromkeys(admin_targets))
+
+        if not admin_targets:
+
+            logging.error(
+                "AI NOTIFICATION DEBUG: NO ADMIN_ID OR ADMINS CONFIGURED"
+            )
+
+            return False
+
+        sent_any = False
+
+        for target in admin_targets:
+
+            try:
+
+                bot.send_message(
+                    chat_id=target,
+                    text=message,
+                    parse_mode="HTML"
+                )
+
+                sent_any = True
+
+            except Exception:
+
+                logging.exception(
+                    "AI NOTIFICATION DEBUG SEND FAILED admin=%s",
+                    target
+                )
+
+        return sent_any
+
+    except Exception:
+
+        logging.exception(
+            "AI NOTIFICATION DEBUG FUNCTION FAILED"
+        )
+
+        return False
+
+
+# =============================================================
+# AI GET FULL USER NAME DIRECTLY FROM TELEGRAM
+# NOT FROM DATABASE
+# =============================================================
+
+def ai_order_get_telegram_user_info(user_id):
+
+    try:
+
+        ai_order_notification_debug(
+            "USER LOOKUP STEP 1 — CALLING TELEGRAM get_chat",
+            f"User ID: {user_id}"
+        )
+
+        telegram_user = bot.get_chat(
+            int(user_id)
+        )
+
+        first_name = str(
+            getattr(telegram_user, "first_name", "") or ""
+        ).strip()
+
+        last_name = str(
+            getattr(telegram_user, "last_name", "") or ""
+        ).strip()
+
+        username = str(
+            getattr(telegram_user, "username", "") or ""
+        ).strip()
+
+        full_name = " ".join(
+            part for part in (first_name, last_name) if part
+        ).strip()
+
+        if not full_name:
+            full_name = "Malam"
+
+        ai_order_notification_debug(
+            "USER LOOKUP STEP 2 — TELEGRAM USER FOUND",
+            f"User ID: {user_id}\n"
+            f"First Name: {first_name}\n"
+            f"Last Name: {last_name}\n"
+            f"Full Name: {full_name}\n"
+            f"Username: {username}"
+        )
+
+        return full_name, username
+
+    except Exception as e:
+
+        ai_order_notification_debug(
+            "USER LOOKUP ERROR — TELEGRAM get_chat FAILED",
+            f"User ID: {user_id}\n"
+            f"Error: {str(e)}"
+        )
+
+        logging.exception(
+            "AI TELEGRAM USER INFORMATION FAILED user=%s",
+            user_id
+        )
+
+        return "Malam", ""
+
+
 # =============================================================
 # AI PAYMENT NOTIFICATION
 # AI_NOTIFICATION IS DEFINED AT THE TOP OF YOUR MAIN FILE
@@ -6352,22 +6528,139 @@ def ai_order_send_payment_notification(
     amount
 ):
 
+    ai_order_notification_debug(
+        "NOTIFICATION STEP 1 — FUNCTION ENTERED",
+        f"User ID: {user_id}\n"
+        f"Order ID: {order_id}\n"
+        f"Movie: {movie_title}\n"
+        f"Amount: {amount}"
+    )
+
+    # ---------------------------------------------------------
+    # CHECK NOTIFICATION GROUP CONFIGURATION
+    # ---------------------------------------------------------
+
     notification_group = globals().get("AI_NOTIFICATION")
 
+    ai_order_notification_debug(
+        "NOTIFICATION STEP 2 — GROUP ID READ FROM GLOBALS",
+        f"AI_NOTIFICATION: {notification_group}\n"
+        f"Type: {type(notification_group).__name__}"
+    )
+
     if not notification_group:
-        logging.error("AI_NOTIFICATION GROUP NOT CONFIGURED")
+
+        ai_order_notification_debug(
+            "NOTIFICATION ERROR 1 — AI_NOTIFICATION IS EMPTY"
+        )
+
+        logging.error(
+            "AI_NOTIFICATION GROUP NOT CONFIGURED"
+        )
+
         return False
 
     try:
 
-        full_name, username = ai_order_get_user_info(user_id)
+        notification_group = int(notification_group)
+
+    except Exception as e:
+
+        ai_order_notification_debug(
+            "NOTIFICATION ERROR 2 — GROUP ID IS NOT INTEGER",
+            f"Group ID: {notification_group}\n"
+            f"Error: {str(e)}"
+        )
+
+        logging.exception(
+            "AI_NOTIFICATION GROUP ID CONVERSION FAILED"
+        )
+
+        return False
+
+    # ---------------------------------------------------------
+    # CHECK BOT CAN ACCESS THE GROUP
+    # ---------------------------------------------------------
+
+    try:
+
+        ai_order_notification_debug(
+            "NOTIFICATION STEP 3 — CHECKING TELEGRAM GROUP ACCESS",
+            f"Group ID: {notification_group}"
+        )
+
+        group_info = bot.get_chat(
+            notification_group
+        )
+
+        ai_order_notification_debug(
+            "NOTIFICATION STEP 4 — TELEGRAM GROUP ACCESS SUCCESS",
+            f"Group ID: {notification_group}\n"
+            f"Group Title: {getattr(group_info, 'title', 'N/A')}\n"
+            f"Group Type: {getattr(group_info, 'type', 'N/A')}"
+        )
+
+    except Exception as e:
+
+        ai_order_notification_debug(
+            "NOTIFICATION ERROR 3 — BOT CANNOT ACCESS GROUP",
+            f"Group ID: {notification_group}\n"
+            f"Error: {str(e)}"
+        )
+
+        logging.exception(
+            "AI NOTIFICATION GROUP ACCESS FAILED"
+        )
+
+        return False
+
+    # ---------------------------------------------------------
+    # GET USER INFORMATION DIRECTLY FROM TELEGRAM
+    # ---------------------------------------------------------
+
+    try:
+
+        ai_order_notification_debug(
+            "NOTIFICATION STEP 5 — GETTING USER DETAILS",
+            f"User ID: {user_id}"
+        )
+
+        full_name, username = ai_order_get_telegram_user_info(
+            user_id
+        )
+
+        ai_order_notification_debug(
+            "NOTIFICATION STEP 6 — USER DETAILS RECEIVED",
+            f"Full Name: {full_name}\n"
+            f"Username: {username}"
+        )
+
+    except Exception as e:
+
+        ai_order_notification_debug(
+            "NOTIFICATION ERROR 4 — USER INFORMATION FAILED",
+            str(e)
+        )
+
+        logging.exception(
+            "AI NOTIFICATION USER INFORMATION FAILED"
+        )
+
+        full_name = "Malam"
+        username = ""
+
+    # ---------------------------------------------------------
+    # BUILD NOTIFICATION MESSAGE
+    # ---------------------------------------------------------
+
+    try:
 
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         message = f"""🤖 <b>AI ORDER PAYMENT SUCCESSFUL</b>
 
 👤 <b>Name:</b> {group_clip_safe(full_name)}
-🔗 <b>Username:</b> {group_clip_safe(username)}
+🔗 <b>Username:</b> {group_clip_safe(username or "N/A")}
 🆔 <b>User ID:</b> <code>{int(user_id)}</code>
 
 🎬 <b>Items:</b> {group_clip_safe(movie_title)}
@@ -6379,15 +6672,70 @@ def ai_order_send_payment_notification(
 
 <i>Wannan sabon tsarin sanarwar AI ne, ba tsohon wallet notification ba.</i>"""
 
-        bot.send_message(
+        ai_order_notification_debug(
+            "NOTIFICATION STEP 7 — MESSAGE BUILT",
+            f"Group ID: {notification_group}\n"
+            f"Order ID: {order_id}\n"
+            f"Message Length: {len(message)}"
+        )
+
+    except Exception as e:
+
+        ai_order_notification_debug(
+            "NOTIFICATION ERROR 5 — MESSAGE BUILD FAILED",
+            str(e)
+        )
+
+        logging.exception(
+            "AI NOTIFICATION MESSAGE BUILD FAILED"
+        )
+
+        return False
+
+    # ---------------------------------------------------------
+    # SEND NOTIFICATION TO TELEGRAM GROUP
+    # ---------------------------------------------------------
+
+    try:
+
+        ai_order_notification_debug(
+            "NOTIFICATION STEP 8 — CALLING bot.send_message",
+            f"Target Group ID: {notification_group}\n"
+            f"Order ID: {order_id}"
+        )
+
+        sent_message = bot.send_message(
             notification_group,
             message,
             parse_mode="HTML"
         )
 
+        ai_order_notification_debug(
+            "NOTIFICATION STEP 9 — TELEGRAM CONFIRMED MESSAGE SENT",
+            f"Group ID: {notification_group}\n"
+            f"Message ID: {sent_message.message_id}\n"
+            f"Order ID: {order_id}"
+        )
+
+        logging.info(
+            "AI PAYMENT NOTIFICATION SENT SUCCESSFULLY "
+            "group=%s message_id=%s order=%s",
+            notification_group,
+            sent_message.message_id,
+            order_id
+        )
+
         return True
 
-    except Exception:
+    except Exception as e:
+
+        ai_order_notification_debug(
+            "NOTIFICATION ERROR 6 — bot.send_message FAILED",
+            f"Group ID: {notification_group}\n"
+            f"Order ID: {order_id}\n"
+            f"Exception: {type(e).__name__}\n"
+            f"Error: {str(e)}"
+        )
 
         logging.exception(
             "AI PAYMENT NOTIFICATION FAILED order=%s",
