@@ -1672,124 +1672,31 @@ def send_feedback_prompt(user_id, order_id):
 
 
 
-# =============================================================
-# WEBHOOK DEBUG SYSTEM — SEND EVERYTHING TO ADMIN
-# =============================================================
 
 import html
-import json
-import traceback
-from datetime import datetime
-
-
-def webhook_debug(stage, details=None):
-    try:
-        admin_id = globals().get("ADMIN_ID")
-
-        if not admin_id:
-            logging.error(
-                "WEBHOOK DEBUG: ADMIN_ID NOT CONFIGURED | %s | %s",
-                stage, details
-            )
-            return
-
-        message = (
-            "🔍 <b>WEBHOOK DEBUG</b>\n"
-            "━━━━━━━━━━━━━━━━━━\n"
-            f"📍 <b>Stage:</b> {html.escape(str(stage))}\n"
-            f"⏰ <b>Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-            f"📄 <b>Details:</b>\n"
-            f"<pre>{html.escape(str(details or 'None'))[:3000]}</pre>"
-        )
-
-        bot.send_message(
-            admin_id,
-            message,
-            parse_mode="HTML"
-        )
-
-    except Exception as debug_error:
-        logging.exception("WEBHOOK DEBUG TELEGRAM FAILED: %s", debug_error)
-
 
 def clean_html(text):
     if not text:
         return ""
     return html.escape(str(text))
 
-
-# =============================================================
-# FLUTTERWAVE WEBHOOK
-# =============================================================
-
 @app.route("/webhook", methods=["POST"])
 def flutterwave_webhook():
-
-    webhook_debug(
-        "STEP 1 — WEBHOOK ENDPOINT CALLED",
-        "Flutterwave POST request reached /webhook"
-    )
-
     try:
-        webhook_debug(
-            "STEP 2 — REQUEST RECEIVED",
-            {
-                "method": request.method,
-                "content_type": request.content_type,
-                "remote_addr": request.remote_addr,
-                "headers": dict(request.headers)
-            }
-        )
-
         # ================= SECURITY & VALIDATION (FLUTTERWAVE) =================
         signature = request.headers.get("verif-hash")
-
-        webhook_debug(
-            "STEP 3 — SIGNATURE CHECK",
-            {
-                "signature_received": bool(signature),
-                "secret_configured": bool(FLW_WEBHOOK_SECRET),
-                "signature_matches": (
-                    signature == FLW_WEBHOOK_SECRET
-                    if signature else False
-                )
-            }
-        )
-
-        if not signature:
-            webhook_debug("STOP — MISSING SIGNATURE", "Flutterwave did not send verif-hash")
+        if not signature: 
             return "Missing signature", 401
 
-        if signature != FLW_WEBHOOK_SECRET:
-            webhook_debug("STOP — INVALID SIGNATURE", "verif-hash does not match FLW_WEBHOOK_SECRET")
+        if signature != FLW_WEBHOOK_SECRET: 
             return "Invalid signature", 401
-
-        webhook_debug("STEP 4 — SIGNATURE VERIFIED", "Security check passed")
 
         # ================= PAYLOAD =================
         payload = request.json or {}
         data = payload.get("data", {})
 
-        webhook_debug(
-            "STEP 5 — FLUTTERWAVE PAYLOAD",
-            json.dumps(payload, default=str)[:3000]
-        )
-
         status = (data.get("status") or "").lower()
-
-        webhook_debug(
-            "STEP 6 — PAYMENT STATUS",
-            {
-                "status": status,
-                "tx_ref": data.get("tx_ref"),
-                "amount": data.get("amount"),
-                "currency": data.get("currency"),
-                "transaction_id": data.get("id")
-            }
-        )
-
-        if status not in ("successful", "success"):
-            webhook_debug("STOP — PAYMENT NOT SUCCESSFUL", status)
+        if status not in ("successful", "success"): 
             return "Ignored", 200
 
         raw_reference = data.get("tx_ref")
@@ -1798,41 +1705,18 @@ def flutterwave_webhook():
         # Safe amount conversion
         try:
             paid_amount = int(float(data.get("amount", 0)))
-        except Exception as amount_error:
+        except:
             paid_amount = 0
-            webhook_debug("AMOUNT CONVERSION ERROR", repr(amount_error))
 
-        webhook_debug(
-            "STEP 7 — PAYMENT DETAILS PARSED",
-            {
-                "raw_reference": raw_reference,
-                "paid_amount": paid_amount,
-                "currency": currency
-            }
-        )
-
-        # FIX REFERENCE — ORIGINAL LOGIC PRESERVED
+        # ✅ FIX REFERENCE: Ciro order_id ta hanyar split (kamar yadda aka gyara maka)
         order_id = raw_reference.split("_")[0] if raw_reference else None
 
-        webhook_debug(
-            "STEP 8 — ORDER ID EXTRACTED",
-            {
-                "raw_reference": raw_reference,
-                "extracted_order_id": order_id
-            }
-        )
-
         if not order_id:
-            webhook_debug("STOP — ORDER ID MISSING", raw_reference)
             return "Order ID missing", 200
 
         # ================= DB =================
-        webhook_debug("STEP 9 — CONNECTING MAIN DATABASE", "Calling get_conn()")
-
         conn = get_conn()
         cur = conn.cursor()
-
-        webhook_debug("STEP 10 — MAIN DATABASE CONNECTED", "Searching orders table")
 
         cur.execute(
             """
@@ -1842,16 +1726,7 @@ def flutterwave_webhook():
             """,
             (order_id,)
         )
-
         row = cur.fetchone()
-
-        webhook_debug(
-            "STEP 11 — ORDERS TABLE RESULT",
-            {
-                "order_found": bool(row),
-                "row": row
-            }
-        )
 
         if row:
             user_id, expected_amount, paid, order_type = row
@@ -1863,13 +1738,8 @@ def flutterwave_webhook():
         # =====================================================
 
         if not row:
-
-            webhook_debug("STEP 12 — ORDER NOT FOUND", "Checking wallet_deposits")
-
             wallet_conn = get_wallet_conn()
             wallet_cur = wallet_conn.cursor()
-
-            webhook_debug("STEP 13 — WALLET DATABASE CONNECTED", "Searching wallet_deposits")
 
             wallet_cur.execute(
                 """
@@ -1882,49 +1752,18 @@ def flutterwave_webhook():
 
             dep = wallet_cur.fetchone()
 
-            webhook_debug(
-                "STEP 14 — WALLET DEPOSIT RESULT",
-                {
-                    "deposit_found": bool(dep),
-                    "deposit": dep
-                }
-            )
-
             if not dep:
-                webhook_debug(
-                    "STEP 15 — NOT FOUND IN ORDERS OR WALLET",
-                    "Preparing to call handle_ai_order_payment()"
-                )
-
                 wallet_cur.close()
                 wallet_conn.close()
                 cur.close()
                 conn.close()
 
                 # ================= AI ORDER FALLBACK =================
+                # Ana kiran mataimaki ne kawai idan babu order a orders
+                # kuma babu deposit a wallet_deposits.
                 ai_order_handler = globals().get("handle_ai_order_payment")
-
-                webhook_debug(
-                    "STEP 16 — AI HANDLER CHECK",
-                    {
-                        "handler_exists": callable(ai_order_handler),
-                        "handler": str(ai_order_handler)
-                    }
-                )
-
                 if callable(ai_order_handler):
                     try:
-                        webhook_debug(
-                            "STEP 17 — CALLING AI PAYMENT HANDLER",
-                            {
-                                "order_id": order_id,
-                                "raw_reference": raw_reference,
-                                "paid_amount": paid_amount,
-                                "currency": currency,
-                                "payload": data
-                            }
-                        )
-
                         ai_handled = ai_order_handler(
                             order_id=order_id,
                             raw_reference=raw_reference,
@@ -1932,70 +1771,29 @@ def flutterwave_webhook():
                             currency=currency,
                             payload=data
                         )
-
-                        webhook_debug(
-                            "STEP 18 — AI HANDLER RETURNED",
-                            {
-                                "ai_handled": ai_handled,
-                                "type": str(type(ai_handled))
-                            }
-                        )
-
                         if ai_handled:
-                            webhook_debug("AI ORDER HANDLED SUCCESSFULLY", order_id)
                             return "OK", 200
-
                     except Exception as ai_error:
-                        webhook_debug(
-                            "AI HANDLER EXCEPTION",
-                            traceback.format_exc()
-                        )
                         print(f"AI Order Webhook Handler Error: {ai_error}")
 
-                else:
-                    webhook_debug(
-                        "AI HANDLER NOT FOUND",
-                        "handle_ai_order_payment is not callable"
-                    )
-
-                webhook_debug("FINAL RESULT — ORDER NOT FOUND", order_id)
                 return "Order not found", 200
 
             user_id, expected_amount, status = dep
 
-            webhook_debug(
-                "STEP 19 — WALLET DEPOSIT DETAILS",
-                {
-                    "user_id": user_id,
-                    "expected_amount": expected_amount,
-                    "status": status
-                }
-            )
-
             if status == "success":
-                webhook_debug("WALLET ALREADY PROCESSED", order_id)
                 wallet_cur.close()
                 wallet_conn.close()
                 cur.close()
                 conn.close()
                 return "Already processed", 200
 
+            # ✅ GYARA: Maimakon != expected_amount, mun yi amfani da < domin amincewa da biya
             if paid_amount < expected_amount or currency != "NGN":
-                webhook_debug(
-                    "WALLET WRONG PAYMENT",
-                    {
-                        "paid_amount": paid_amount,
-                        "expected_amount": expected_amount,
-                        "currency": currency
-                    }
-                )
                 wallet_cur.close()
                 wallet_conn.close()
                 cur.close()
                 conn.close()
                 return "Wrong payment", 200
-
-            webhook_debug("STEP 20 — CREDITING WALLET", order_id)
 
             wallet_cur.execute(
                 """
@@ -2030,19 +1828,19 @@ def flutterwave_webhook():
             )
 
             wallet_conn.commit()
-            webhook_debug("STEP 21 — WALLET COMMIT SUCCESS", order_id)
-
             wallet_cur.close()
             wallet_conn.close()
 
+            # ================= DELETE ORIGINAL ORDER MESSAGE =================
             if order_id in ORDER_MESSAGES:
                 chat_id, message_id = ORDER_MESSAGES[order_id]
                 try:
                     bot.delete_message(chat_id, message_id)
-                except Exception:
-                    webhook_debug("WALLET MESSAGE DELETE ERROR", traceback.format_exc())
+                except:
+                    pass
                 del ORDER_MESSAGES[order_id]
 
+            # ================= USER INFO =================
             cur.execute(
                 """
                 SELECT first_name, last_name
@@ -2059,13 +1857,13 @@ def flutterwave_webhook():
                 try:
                     chat = bot.get_chat(user_id)
                     full_name = f"{chat.first_name or ''} {chat.last_name or ''}".strip()
-                except Exception:
+                except:
                     full_name = "User"
 
             try:
                 chat = bot.get_chat(user_id)
                 tg_username = f"@{chat.username}" if chat.username else "unknown"
-            except Exception:
+            except:
                 tg_username = "unknown"
 
             safe_full_name_topup = clean_html(full_name)
@@ -2077,8 +1875,6 @@ def flutterwave_webhook():
                     callback_data="wallet"
                 )
             )
-
-            webhook_debug("STEP 22 — SENDING WALLET SUCCESS TO USER", user_id)
 
             bot.send_message(
                 user_id,
@@ -2095,8 +1891,6 @@ Use the button below to open your wallet.
                 parse_mode="HTML",
                 reply_markup=wallet_kb
             )
-
-            webhook_debug("STEP 23 — WALLET USER MESSAGE SENT", user_id)
 
             if PAYMENT_NOTIFY_GROUP:
                 from datetime import datetime, timedelta
@@ -2122,47 +1916,35 @@ Use the button below to open your wallet.
 
             cur.close()
             conn.close()
-
-            webhook_debug("WALLET WEBHOOK COMPLETED", order_id)
             return "OK", 200
 
         if paid == 1:
-            webhook_debug("STEP 24 — MOVIE ORDER ALREADY PAID", order_id)
             cur.close()
             conn.close()
             return "Already processed", 200
 
+        # ✅ GYARA: Maimakon != expected_amount, mun yi amfani da < domin amincewa da biya
         if paid_amount < expected_amount or currency != "NGN":
-            webhook_debug(
-                "STEP 25 — MOVIE ORDER WRONG PAYMENT",
-                {
-                    "paid_amount": paid_amount,
-                    "expected_amount": expected_amount,
-                    "currency": currency
-                }
-            )
             cur.close()
             conn.close()
             return "Wrong payment", 200
 
         # ================= MARK AS PAID =================
-        webhook_debug("STEP 26 — MARKING MOVIE ORDER AS PAID", order_id)
-
         cur.execute(
             "UPDATE orders SET paid=1 WHERE id=%s",
             (order_id,)
         )
 
-        webhook_debug("STEP 27 — MOVIE ORDER UPDATE EXECUTED", order_id)
-
+        # ================= DELETE ORIGINAL ORDER MESSAGE =================
         if order_id in ORDER_MESSAGES:
             chat_id, message_id = ORDER_MESSAGES[order_id]
             try:
                 bot.delete_message(chat_id, message_id)
-            except Exception:
-                webhook_debug("MOVIE ORDER MESSAGE DELETE ERROR", traceback.format_exc())
+            except:
+                pass
             del ORDER_MESSAGES[order_id]
 
+        # ================= USER INFO =================
         cur.execute(
             """
             SELECT first_name, last_name
@@ -2179,13 +1961,13 @@ Use the button below to open your wallet.
             try:
                 chat = bot.get_chat(user_id)
                 full_name = f"{chat.first_name or ''} {chat.last_name or ''}".strip()
-            except Exception:
+            except:
                 full_name = "User"
 
         try:
             chat = bot.get_chat(user_id)
             tg_username = f"@{chat.username}" if chat.username else "unknown"
-        except Exception:
+        except:
             tg_username = "unknown"
 
         safe_full_name = clean_html(full_name)
@@ -2195,9 +1977,6 @@ Use the button below to open your wallet.
         # ================== FILM ORDER =======================
         # =====================================================
         if order_type == "film":
-
-            webhook_debug("STEP 28 — FILM ORDER DETECTED", order_id)
-
             cur.execute(
                 """
                 SELECT i.title, i.group_key, COALESCE(i.cashback_amount, 0)
@@ -2209,18 +1988,9 @@ Use the button below to open your wallet.
             )
             rows = cur.fetchall()
 
-            webhook_debug(
-                "STEP 29 — FILM ORDER ITEMS FETCHED",
-                {
-                    "items_count": len(rows),
-                    "items": rows
-                }
-            )
-
             if not rows:
                 cur.close()
                 conn.close()
-                webhook_debug("FILM ORDER EMPTY", order_id)
                 return "Empty order", 200
 
             groups = {}
@@ -2244,6 +2014,7 @@ Use the button below to open your wallet.
             titles_text = ", ".join(lines) if lines else "N/A"
             safe_titles_text = clean_html(titles_text)
 
+            # ================= CASHBACK REWARD LOGIC =================
             if total_custom_cashback > 0:
                 cashback = total_custom_cashback
                 is_custom_cashback = True
@@ -2252,15 +2023,6 @@ Use the button below to open your wallet.
                 if cashback > 200:
                     cashback = 200
                 is_custom_cashback = False
-
-            webhook_debug(
-                "STEP 30 — CASHBACK CALCULATED",
-                {
-                    "cashback": cashback,
-                    "custom_cashback": total_custom_cashback,
-                    "is_custom_cashback": is_custom_cashback
-                }
-            )
 
             if cashback > 0:
                 wallet_conn = get_wallet_conn()
@@ -2303,7 +2065,7 @@ Use the button below to open your wallet.
                 cb_kb = InlineKeyboardMarkup()
                 cb_kb.add(
                     InlineKeyboardButton(
-                        "💼 View Wallet",
+                        "💼 View Wallet", 
                         callback_data=f"view_cb_bal:{user_wallet_balance}",
                         style="primary"
                     )
@@ -2316,15 +2078,13 @@ Use the button below to open your wallet.
                     f"View your wallet to see available balance"
                 )
 
-                webhook_debug("STEP 31 — SENDING CASHBACK MESSAGE", user_id)
                 bot.send_message(user_id, cb_text, parse_mode="HTML", reply_markup=cb_kb)
 
             conn.commit()
             cur.close()
             conn.close()
 
-            webhook_debug("STEP 32 — MOVIE ORDER COMMITTED", order_id)
-
+            # ================= SABON TSARIN SAKON PAYMENT SUCCESSFUL =================
             kb = InlineKeyboardMarkup()
             kb.add(
                 InlineKeyboardButton(
@@ -2347,11 +2107,7 @@ Use the button below to open your wallet.
                 f"👇👇👇"
             )
 
-            webhook_debug("STEP 33 — SENDING MOVIE SUCCESS TO USER", user_id)
-
             bot.send_message(user_id, success_text, parse_mode="HTML", reply_markup=kb)
-
-            webhook_debug("STEP 34 — MOVIE SUCCESS MESSAGE SENT", user_id)
 
             if PAYMENT_NOTIFY_GROUP:
                 from datetime import datetime, timedelta
@@ -2374,16 +2130,12 @@ Use the button below to open your wallet.
                     parse_mode="HTML"
                 )
 
-            webhook_debug("MOVIE ORDER WEBHOOK COMPLETED", order_id)
             return "OK", 200
 
         # =====================================================
         # ================== VIP ORDER ========================
         # =====================================================
         elif order_type == "vip":
-
-            webhook_debug("STEP 35 — VIP ORDER DETECTED", order_id)
-
             from datetime import datetime, timedelta
 
             start_date = datetime.now()
@@ -2401,16 +2153,8 @@ Use the button below to open your wallet.
                 member = bot.get_chat_member(VIP_GROUP_ID, user_id)
                 if member.status in ["member", "administrator", "creator"]:
                     already_in_group = True
-            except Exception:
+            except:
                 already_in_group = False
-
-            webhook_debug(
-                "STEP 36 — VIP MEMBERSHIP CHECK",
-                {
-                    "user_id": user_id,
-                    "already_in_group": already_in_group
-                }
-            )
 
             if already_in_group:
                 cur.execute(
@@ -2435,8 +2179,6 @@ Use the button below to open your wallet.
                 cur.close()
                 conn.close()
 
-                webhook_debug("STEP 37 — VIP RENEWAL DB COMMITTED", order_id)
-
                 bot.send_message(
                     user_id,
                     f"""💎 <b>AN SABUNTA VIP NAKA</b>
@@ -2452,8 +2194,6 @@ ci gaba da ziyartar VIP Group kawai.
 Na gode da kasancewa tare da mu 🙏""",
                     parse_mode="HTML"
                 )
-
-                webhook_debug("STEP 38 — VIP RENEWAL USER MESSAGE SENT", user_id)
 
                 if PAYMENT_NOTIFY_GROUP:
                     now = (datetime.now() + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
@@ -2479,8 +2219,8 @@ Na gode da kasancewa tare da mu 🙏""",
                         ADMIN_ID,
                         f"🔔 VIP RENEWAL\n\n👤 {safe_full_name}\n🆔 {user_id}\n💰 ₦{paid_amount}\n\nYa sabunta VIP dinsa."
                     )
-                except Exception:
-                    webhook_debug("VIP ADMIN MESSAGE ERROR", traceback.format_exc())
+                except:
+                    pass
 
             else:
                 cur.execute(
@@ -2504,8 +2244,6 @@ Na gode da kasancewa tare da mu 🙏""",
                 conn.commit()
                 cur.close()
                 conn.close()
-
-                webhook_debug("STEP 39 — VIP ACTIVATION DB COMMITTED", order_id)
 
                 vip_kb = InlineKeyboardMarkup()
                 vip_kb.add(
@@ -2533,8 +2271,6 @@ Na gode da kasancewa tare da mu 🙏""",
                     reply_markup=vip_kb
                 )
 
-                webhook_debug("STEP 40 — VIP ACTIVATION MESSAGE SENT", user_id)
-
                 if PAYMENT_NOTIFY_GROUP:
                     now = (datetime.now() + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
 
@@ -2554,26 +2290,11 @@ Na gode da kasancewa tare da mu 🙏""",
                         parse_mode="HTML"
                     )
 
-            webhook_debug("VIP WEBHOOK COMPLETED", order_id)
             return "OK", 200
-
-        webhook_debug(
-            "STEP 41 — UNKNOWN ORDER TYPE",
-            {
-                "order_id": order_id,
-                "order_type": order_type
-            }
-        )
 
         return "OK", 200
 
     except Exception as e:
-
-        webhook_debug(
-            "🔥 WEBHOOK FATAL ERROR",
-            traceback.format_exc()
-        )
-
         print(f"Webhook Error: {e}")
         return "Internal Error", 500
 
@@ -6011,6 +5732,477 @@ def group_clip_change_movie_cancel_callback(call):
 
 
 #End button block
+
+
+
+
+
+# =============================================================
+# AI PAYMENT WEBHOOK HANDLER — MISSING MAIN FUNCTION
+# CONNECTS FLUTTERWAVE → AI ORDER → PAYMENT → NOTIFICATION → DELIVERY
+# =============================================================
+
+def handle_ai_order_payment(
+    order_id,
+    raw_reference,
+    paid_amount,
+    currency,
+    payload
+):
+
+    ai_order_debug(
+        "AI HANDLER STEP 1 — WEBHOOK CALL RECEIVED",
+        f"Order ID: {order_id}\n"
+        f"Reference: {raw_reference}\n"
+        f"Paid Amount: {paid_amount}\n"
+        f"Currency: {currency}"
+    )
+
+    try:
+
+        # =====================================================
+        # 1. VALIDATE PAYMENT INFORMATION
+        # =====================================================
+
+        ai_order_debug(
+            "AI HANDLER STEP 2 — VALIDATING PAYMENT",
+            str(payload)
+        )
+
+        if currency != "NGN":
+            ai_order_debug(
+                "AI PAYMENT REJECTED — WRONG CURRENCY",
+                str(currency)
+            )
+            return False
+
+        if int(paid_amount or 0) <= 0:
+            ai_order_debug(
+                "AI PAYMENT REJECTED — INVALID AMOUNT",
+                str(paid_amount)
+            )
+            return False
+
+        if not raw_reference or not str(raw_reference).startswith(
+            str(order_id) + "_"
+        ):
+            ai_order_debug(
+                "AI PAYMENT REJECTED — REFERENCE MISMATCH",
+                f"Order ID: {order_id}\nReference: {raw_reference}"
+            )
+            return False
+
+        ai_order_debug(
+            "AI HANDLER STEP 3 — PAYMENT VALIDATION PASSED"
+        )
+
+        # =====================================================
+        # 2. CONNECT TO ALL CHAT DATABASE
+        # =====================================================
+
+        ai_order_debug(
+            "AI HANDLER STEP 4 — CONNECTING TO ALL CHAT DB"
+        )
+
+        conn = get_all_chat_db_conn()
+        cur = None
+
+        try:
+
+            cur = conn.cursor(
+                cursor_factory=RealDictCursor
+            )
+
+            ai_order_debug(
+                "AI HANDLER STEP 5 — DATABASE CONNECTED"
+            )
+
+            # -------------------------------------------------
+            # FIND AI ORDER
+            # -------------------------------------------------
+
+            cur.execute(
+                """
+                SELECT
+                    id,
+                    user_id,
+                    amount,
+                    paid,
+                    type,
+                    group_key,
+                    selected_movie_title
+                FROM bot_order
+                WHERE id=%s
+                LIMIT 1
+                """,
+                (str(order_id),)
+            )
+
+            order = cur.fetchone()
+
+            ai_order_debug(
+                "AI HANDLER STEP 6 — BOT ORDER SEARCH RESULT",
+                str(order)
+            )
+
+            if not order:
+
+                ai_order_debug(
+                    "AI ORDER NOT FOUND IN bot_order",
+                    str(order_id)
+                )
+
+                return False
+
+            user_id = order.get("user_id")
+            expected_amount = int(order.get("amount") or 0)
+            already_paid = order.get("paid")
+            group_key = order.get("group_key")
+            movie_title = (
+                order.get("selected_movie_title")
+                or "AI MOVIE ORDER"
+            )
+
+            ai_order_debug(
+                "AI HANDLER STEP 7 — ORDER DETAILS",
+                f"User ID: {user_id}\n"
+                f"Expected Amount: {expected_amount}\n"
+                f"Paid: {already_paid}\n"
+                f"Type: {order.get('type')}\n"
+                f"Group Key: {group_key}\n"
+                f"Movie: {movie_title}"
+            )
+
+            # -------------------------------------------------
+            # CHECK PAYMENT AMOUNT
+            # -------------------------------------------------
+
+            if int(paid_amount) < expected_amount:
+
+                ai_order_debug(
+                    "AI PAYMENT REJECTED — AMOUNT TOO SMALL",
+                    f"Expected: {expected_amount}\n"
+                    f"Received: {paid_amount}"
+                )
+
+                return False
+
+            ai_order_debug(
+                "AI HANDLER STEP 8 — PAYMENT AMOUNT VERIFIED"
+            )
+
+            # -------------------------------------------------
+            # CHECK ALREADY PAID
+            # -------------------------------------------------
+
+            if already_paid:
+
+                ai_order_debug(
+                    "AI ORDER ALREADY PAID",
+                    f"Order ID: {order_id}\n"
+                    f"Reference: {raw_reference}"
+                )
+
+                return True
+
+            # -------------------------------------------------
+            # MARK AI ORDER AS PAID
+            # -------------------------------------------------
+
+            ai_order_debug(
+                "AI HANDLER STEP 9 — MARKING ORDER AS PAID"
+            )
+
+            cur.execute(
+                """
+                UPDATE bot_order
+                SET paid=TRUE,
+                    pay_ref=%s
+                WHERE id=%s
+                  AND paid=FALSE
+                """,
+                (
+                    str(raw_reference),
+                    str(order_id)
+                )
+            )
+
+            updated_rows = cur.rowcount
+
+            ai_order_debug(
+                "AI HANDLER STEP 10 — PAYMENT UPDATE RESULT",
+                f"Updated rows: {updated_rows}"
+            )
+
+            if updated_rows != 1:
+
+                conn.rollback()
+
+                ai_order_debug(
+                    "AI PAYMENT UPDATE FAILED",
+                    f"Updated rows: {updated_rows}"
+                )
+
+                return False
+
+            conn.commit()
+
+            ai_order_debug(
+                "AI HANDLER STEP 11 — PAYMENT COMMITTED",
+                f"Order ID: {order_id}"
+            )
+
+        except Exception:
+
+            conn.rollback()
+
+            ai_order_debug_exception(
+                "AI HANDLER DATABASE ERROR"
+            )
+
+            raise
+
+        finally:
+
+            if cur:
+                cur.close()
+
+            conn.close()
+
+        # =====================================================
+        # 3. PAYMENT NOTIFICATION
+        # =====================================================
+
+        ai_order_debug(
+            "AI HANDLER STEP 12 — SENDING ADMIN NOTIFICATION",
+            f"Order ID: {order_id}"
+        )
+
+        notification_sent = ai_order_send_payment_notification(
+            user_id=user_id,
+            order_id=order_id,
+            movie_title=movie_title,
+            amount=paid_amount
+        )
+
+        ai_order_debug(
+            "AI HANDLER STEP 13 — NOTIFICATION RESULT",
+            f"Sent: {notification_sent}"
+        )
+
+        # =====================================================
+        # 4. FETCH DELIVERY ITEMS
+        # =====================================================
+
+        if not group_key:
+
+            ai_order_debug(
+                "AI DELIVERY STOPPED — GROUP KEY MISSING",
+                f"Order ID: {order_id}"
+            )
+
+            return False
+
+        ai_order_debug(
+            "AI HANDLER STEP 14 — FETCHING DELIVERY ITEMS",
+            f"Order ID: {order_id}\nGroup Key: {group_key}"
+        )
+
+        delivery_items = ai_order_fetch_delivery_items(
+            order_id=order_id,
+            group_key=group_key
+        )
+
+        ai_order_debug(
+            "AI HANDLER STEP 15 — DELIVERY ITEMS FETCH RESULT",
+            f"Items found: {len(delivery_items)}"
+        )
+
+        if not delivery_items:
+
+            ai_order_debug(
+                "AI DELIVERY STOPPED — NO DELIVERY ITEMS",
+                f"Order ID: {order_id}"
+            )
+
+            return False
+
+        # =====================================================
+        # 5. SORT DELIVERY ITEMS
+        # =====================================================
+
+        ai_order_debug(
+            "AI HANDLER STEP 16 — SORTING DELIVERY ITEMS"
+        )
+
+        delivery_items = ai_order_sort_delivery_items(
+            delivery_items
+        )
+
+        total_items = len(delivery_items)
+
+        ai_order_debug(
+            "AI HANDLER STEP 17 — DELIVERY ITEMS SORTED",
+            f"Total items: {total_items}"
+        )
+
+        # =====================================================
+        # 6. SEND FILES TO USER
+        # =====================================================
+
+        ai_order_debug(
+            "AI HANDLER STEP 18 — STARTING TELEGRAM DELIVERY",
+            f"User ID: {user_id}\n"
+            f"Total files: {total_items}"
+        )
+
+        delivered_count = 0
+        failed_count = 0
+
+        for index, item in enumerate(delivery_items, start=1):
+
+            try:
+
+                ai_order_debug(
+                    "AI DELIVERY STEP 19 — PREPARING FILE",
+                    f"Index: {index}/{total_items}\n"
+                    f"Item ID: {item.get('item_id')}\n"
+                    f"Title: {item.get('title')}\n"
+                    f"File name: {item.get('file_name')}"
+                )
+
+                caption = ai_order_build_caption(
+                    item=item,
+                    item_index=index,
+                    total_items=total_items,
+                    order_title=movie_title
+                )
+
+                file_id = item.get("file_id")
+
+                if not file_id:
+
+                    failed_count += 1
+
+                    ai_order_debug(
+                        "AI DELIVERY ERROR — FILE ID EMPTY",
+                        f"Item ID: {item.get('item_id')}"
+                    )
+
+                    continue
+
+                file_name = str(
+                    item.get("file_name") or ""
+                ).lower()
+
+                video_extensions = (
+                    ".mp4",
+                    ".mkv",
+                    ".mov",
+                    ".avi",
+                    ".webm",
+                    ".m4v"
+                )
+
+                if file_name.endswith(video_extensions):
+
+                    bot.send_video(
+                        chat_id=user_id,
+                        video=file_id,
+                        caption=caption,
+                        parse_mode="HTML",
+                        supports_streaming=True
+                    )
+
+                else:
+
+                    bot.send_document(
+                        chat_id=user_id,
+                        document=file_id,
+                        caption=caption,
+                        parse_mode="HTML"
+                    )
+
+                delivered_count += 1
+
+                ai_order_debug(
+                    "AI DELIVERY STEP 20 — FILE SENT SUCCESSFULLY",
+                    f"Item: {index}/{total_items}\n"
+                    f"Item ID: {item.get('item_id')}\n"
+                    f"Delivered: {delivered_count}"
+                )
+
+            except Exception:
+
+                failed_count += 1
+
+                ai_order_debug_exception(
+                    f"AI DELIVERY ERROR — ITEM {index}"
+                )
+
+                logging.exception(
+                    "AI DELIVERY FAILED order=%s item=%s",
+                    order_id,
+                    item.get("item_id")
+                )
+
+        # =====================================================
+        # 7. FINAL DELIVERY REPORT
+        # =====================================================
+
+        ai_order_debug(
+            "AI HANDLER STEP 21 — DELIVERY FINISHED",
+            f"Order ID: {order_id}\n"
+            f"User ID: {user_id}\n"
+            f"Total files: {total_items}\n"
+            f"Delivered: {delivered_count}\n"
+            f"Failed: {failed_count}\n"
+            f"Admin notification: {notification_sent}"
+        )
+
+        # =====================================================
+        # 8. FINAL STATUS
+        # =====================================================
+
+        if delivered_count == total_items:
+
+            ai_order_debug(
+                "AI ORDER COMPLETED SUCCESSFULLY",
+                f"Order ID: {order_id}\n"
+                f"Delivered: {delivered_count}/{total_items}"
+            )
+
+            return True
+
+        ai_order_debug(
+            "AI ORDER PARTIALLY DELIVERED",
+            f"Order ID: {order_id}\n"
+            f"Delivered: {delivered_count}/{total_items}\n"
+            f"Failed: {failed_count}"
+        )
+
+        return False
+
+    except Exception:
+
+        ai_order_debug_exception(
+            "AI PAYMENT HANDLER FATAL ERROR"
+        )
+
+        logging.exception(
+            "AI PAYMENT HANDLER FAILED order=%s",
+            order_id
+        )
+
+        return False
+
+
+# =============================================================
+# AI PAYMENT HANDLER — END
+# =============================================================
+
+
+
 
 
 
