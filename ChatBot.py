@@ -1672,31 +1672,124 @@ def send_feedback_prompt(user_id, order_id):
 
 
 
+# =============================================================
+# WEBHOOK DEBUG SYSTEM — SEND EVERYTHING TO ADMIN
+# =============================================================
 
 import html
+import json
+import traceback
+from datetime import datetime
+
+
+def webhook_debug(stage, details=None):
+    try:
+        admin_id = globals().get("ADMIN_ID")
+
+        if not admin_id:
+            logging.error(
+                "WEBHOOK DEBUG: ADMIN_ID NOT CONFIGURED | %s | %s",
+                stage, details
+            )
+            return
+
+        message = (
+            "🔍 <b>WEBHOOK DEBUG</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"📍 <b>Stage:</b> {html.escape(str(stage))}\n"
+            f"⏰ <b>Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"📄 <b>Details:</b>\n"
+            f"<pre>{html.escape(str(details or 'None'))[:3000]}</pre>"
+        )
+
+        bot.send_message(
+            admin_id,
+            message,
+            parse_mode="HTML"
+        )
+
+    except Exception as debug_error:
+        logging.exception("WEBHOOK DEBUG TELEGRAM FAILED: %s", debug_error)
+
 
 def clean_html(text):
     if not text:
         return ""
     return html.escape(str(text))
 
+
+# =============================================================
+# FLUTTERWAVE WEBHOOK
+# =============================================================
+
 @app.route("/webhook", methods=["POST"])
 def flutterwave_webhook():
+
+    webhook_debug(
+        "STEP 1 — WEBHOOK ENDPOINT CALLED",
+        "Flutterwave POST request reached /webhook"
+    )
+
     try:
+        webhook_debug(
+            "STEP 2 — REQUEST RECEIVED",
+            {
+                "method": request.method,
+                "content_type": request.content_type,
+                "remote_addr": request.remote_addr,
+                "headers": dict(request.headers)
+            }
+        )
+
         # ================= SECURITY & VALIDATION (FLUTTERWAVE) =================
         signature = request.headers.get("verif-hash")
-        if not signature: 
+
+        webhook_debug(
+            "STEP 3 — SIGNATURE CHECK",
+            {
+                "signature_received": bool(signature),
+                "secret_configured": bool(FLW_WEBHOOK_SECRET),
+                "signature_matches": (
+                    signature == FLW_WEBHOOK_SECRET
+                    if signature else False
+                )
+            }
+        )
+
+        if not signature:
+            webhook_debug("STOP — MISSING SIGNATURE", "Flutterwave did not send verif-hash")
             return "Missing signature", 401
 
-        if signature != FLW_WEBHOOK_SECRET: 
+        if signature != FLW_WEBHOOK_SECRET:
+            webhook_debug("STOP — INVALID SIGNATURE", "verif-hash does not match FLW_WEBHOOK_SECRET")
             return "Invalid signature", 401
+
+        webhook_debug("STEP 4 — SIGNATURE VERIFIED", "Security check passed")
 
         # ================= PAYLOAD =================
         payload = request.json or {}
         data = payload.get("data", {})
 
+        webhook_debug(
+            "STEP 5 — FLUTTERWAVE PAYLOAD",
+            json.dumps(payload, default=str)[:3000]
+        )
+
         status = (data.get("status") or "").lower()
-        if status not in ("successful", "success"): 
+
+        webhook_debug(
+            "STEP 6 — PAYMENT STATUS",
+            {
+                "status": status,
+                "tx_ref": data.get("tx_ref"),
+                "amount": data.get("amount"),
+                "currency": data.get("currency"),
+                "transaction_id": data.get("id")
+            }
+        )
+
+        if status not in ("successful", "success"):
+            webhook_debug("STOP — PAYMENT NOT SUCCESSFUL", status)
             return "Ignored", 200
 
         raw_reference = data.get("tx_ref")
@@ -1705,18 +1798,41 @@ def flutterwave_webhook():
         # Safe amount conversion
         try:
             paid_amount = int(float(data.get("amount", 0)))
-        except:
+        except Exception as amount_error:
             paid_amount = 0
+            webhook_debug("AMOUNT CONVERSION ERROR", repr(amount_error))
 
-        # ✅ FIX REFERENCE: Ciro order_id ta hanyar split (kamar yadda aka gyara maka)
+        webhook_debug(
+            "STEP 7 — PAYMENT DETAILS PARSED",
+            {
+                "raw_reference": raw_reference,
+                "paid_amount": paid_amount,
+                "currency": currency
+            }
+        )
+
+        # FIX REFERENCE — ORIGINAL LOGIC PRESERVED
         order_id = raw_reference.split("_")[0] if raw_reference else None
 
+        webhook_debug(
+            "STEP 8 — ORDER ID EXTRACTED",
+            {
+                "raw_reference": raw_reference,
+                "extracted_order_id": order_id
+            }
+        )
+
         if not order_id:
+            webhook_debug("STOP — ORDER ID MISSING", raw_reference)
             return "Order ID missing", 200
 
         # ================= DB =================
+        webhook_debug("STEP 9 — CONNECTING MAIN DATABASE", "Calling get_conn()")
+
         conn = get_conn()
         cur = conn.cursor()
+
+        webhook_debug("STEP 10 — MAIN DATABASE CONNECTED", "Searching orders table")
 
         cur.execute(
             """
@@ -1726,7 +1842,16 @@ def flutterwave_webhook():
             """,
             (order_id,)
         )
+
         row = cur.fetchone()
+
+        webhook_debug(
+            "STEP 11 — ORDERS TABLE RESULT",
+            {
+                "order_found": bool(row),
+                "row": row
+            }
+        )
 
         if row:
             user_id, expected_amount, paid, order_type = row
@@ -1738,8 +1863,13 @@ def flutterwave_webhook():
         # =====================================================
 
         if not row:
+
+            webhook_debug("STEP 12 — ORDER NOT FOUND", "Checking wallet_deposits")
+
             wallet_conn = get_wallet_conn()
             wallet_cur = wallet_conn.cursor()
+
+            webhook_debug("STEP 13 — WALLET DATABASE CONNECTED", "Searching wallet_deposits")
 
             wallet_cur.execute(
                 """
@@ -1752,18 +1882,49 @@ def flutterwave_webhook():
 
             dep = wallet_cur.fetchone()
 
+            webhook_debug(
+                "STEP 14 — WALLET DEPOSIT RESULT",
+                {
+                    "deposit_found": bool(dep),
+                    "deposit": dep
+                }
+            )
+
             if not dep:
+                webhook_debug(
+                    "STEP 15 — NOT FOUND IN ORDERS OR WALLET",
+                    "Preparing to call handle_ai_order_payment()"
+                )
+
                 wallet_cur.close()
                 wallet_conn.close()
                 cur.close()
                 conn.close()
 
                 # ================= AI ORDER FALLBACK =================
-                # Ana kiran mataimaki ne kawai idan babu order a orders
-                # kuma babu deposit a wallet_deposits.
                 ai_order_handler = globals().get("handle_ai_order_payment")
+
+                webhook_debug(
+                    "STEP 16 — AI HANDLER CHECK",
+                    {
+                        "handler_exists": callable(ai_order_handler),
+                        "handler": str(ai_order_handler)
+                    }
+                )
+
                 if callable(ai_order_handler):
                     try:
+                        webhook_debug(
+                            "STEP 17 — CALLING AI PAYMENT HANDLER",
+                            {
+                                "order_id": order_id,
+                                "raw_reference": raw_reference,
+                                "paid_amount": paid_amount,
+                                "currency": currency,
+                                "payload": data
+                            }
+                        )
+
                         ai_handled = ai_order_handler(
                             order_id=order_id,
                             raw_reference=raw_reference,
@@ -1771,29 +1932,70 @@ def flutterwave_webhook():
                             currency=currency,
                             payload=data
                         )
+
+                        webhook_debug(
+                            "STEP 18 — AI HANDLER RETURNED",
+                            {
+                                "ai_handled": ai_handled,
+                                "type": str(type(ai_handled))
+                            }
+                        )
+
                         if ai_handled:
+                            webhook_debug("AI ORDER HANDLED SUCCESSFULLY", order_id)
                             return "OK", 200
+
                     except Exception as ai_error:
+                        webhook_debug(
+                            "AI HANDLER EXCEPTION",
+                            traceback.format_exc()
+                        )
                         print(f"AI Order Webhook Handler Error: {ai_error}")
 
+                else:
+                    webhook_debug(
+                        "AI HANDLER NOT FOUND",
+                        "handle_ai_order_payment is not callable"
+                    )
+
+                webhook_debug("FINAL RESULT — ORDER NOT FOUND", order_id)
                 return "Order not found", 200
 
             user_id, expected_amount, status = dep
 
+            webhook_debug(
+                "STEP 19 — WALLET DEPOSIT DETAILS",
+                {
+                    "user_id": user_id,
+                    "expected_amount": expected_amount,
+                    "status": status
+                }
+            )
+
             if status == "success":
+                webhook_debug("WALLET ALREADY PROCESSED", order_id)
                 wallet_cur.close()
                 wallet_conn.close()
                 cur.close()
                 conn.close()
                 return "Already processed", 200
 
-            # ✅ GYARA: Maimakon != expected_amount, mun yi amfani da < domin amincewa da biya
             if paid_amount < expected_amount or currency != "NGN":
+                webhook_debug(
+                    "WALLET WRONG PAYMENT",
+                    {
+                        "paid_amount": paid_amount,
+                        "expected_amount": expected_amount,
+                        "currency": currency
+                    }
+                )
                 wallet_cur.close()
                 wallet_conn.close()
                 cur.close()
                 conn.close()
                 return "Wrong payment", 200
+
+            webhook_debug("STEP 20 — CREDITING WALLET", order_id)
 
             wallet_cur.execute(
                 """
@@ -1828,19 +2030,19 @@ def flutterwave_webhook():
             )
 
             wallet_conn.commit()
+            webhook_debug("STEP 21 — WALLET COMMIT SUCCESS", order_id)
+
             wallet_cur.close()
             wallet_conn.close()
 
-            # ================= DELETE ORIGINAL ORDER MESSAGE =================
             if order_id in ORDER_MESSAGES:
                 chat_id, message_id = ORDER_MESSAGES[order_id]
                 try:
                     bot.delete_message(chat_id, message_id)
-                except:
-                    pass
+                except Exception:
+                    webhook_debug("WALLET MESSAGE DELETE ERROR", traceback.format_exc())
                 del ORDER_MESSAGES[order_id]
 
-            # ================= USER INFO =================
             cur.execute(
                 """
                 SELECT first_name, last_name
@@ -1857,13 +2059,13 @@ def flutterwave_webhook():
                 try:
                     chat = bot.get_chat(user_id)
                     full_name = f"{chat.first_name or ''} {chat.last_name or ''}".strip()
-                except:
+                except Exception:
                     full_name = "User"
 
             try:
                 chat = bot.get_chat(user_id)
                 tg_username = f"@{chat.username}" if chat.username else "unknown"
-            except:
+            except Exception:
                 tg_username = "unknown"
 
             safe_full_name_topup = clean_html(full_name)
@@ -1875,6 +2077,8 @@ def flutterwave_webhook():
                     callback_data="wallet"
                 )
             )
+
+            webhook_debug("STEP 22 — SENDING WALLET SUCCESS TO USER", user_id)
 
             bot.send_message(
                 user_id,
@@ -1891,6 +2095,8 @@ Use the button below to open your wallet.
                 parse_mode="HTML",
                 reply_markup=wallet_kb
             )
+
+            webhook_debug("STEP 23 — WALLET USER MESSAGE SENT", user_id)
 
             if PAYMENT_NOTIFY_GROUP:
                 from datetime import datetime, timedelta
@@ -1916,35 +2122,47 @@ Use the button below to open your wallet.
 
             cur.close()
             conn.close()
+
+            webhook_debug("WALLET WEBHOOK COMPLETED", order_id)
             return "OK", 200
 
         if paid == 1:
+            webhook_debug("STEP 24 — MOVIE ORDER ALREADY PAID", order_id)
             cur.close()
             conn.close()
             return "Already processed", 200
 
-        # ✅ GYARA: Maimakon != expected_amount, mun yi amfani da < domin amincewa da biya
         if paid_amount < expected_amount or currency != "NGN":
+            webhook_debug(
+                "STEP 25 — MOVIE ORDER WRONG PAYMENT",
+                {
+                    "paid_amount": paid_amount,
+                    "expected_amount": expected_amount,
+                    "currency": currency
+                }
+            )
             cur.close()
             conn.close()
             return "Wrong payment", 200
 
         # ================= MARK AS PAID =================
+        webhook_debug("STEP 26 — MARKING MOVIE ORDER AS PAID", order_id)
+
         cur.execute(
             "UPDATE orders SET paid=1 WHERE id=%s",
             (order_id,)
         )
 
-        # ================= DELETE ORIGINAL ORDER MESSAGE =================
+        webhook_debug("STEP 27 — MOVIE ORDER UPDATE EXECUTED", order_id)
+
         if order_id in ORDER_MESSAGES:
             chat_id, message_id = ORDER_MESSAGES[order_id]
             try:
                 bot.delete_message(chat_id, message_id)
-            except:
-                pass
+            except Exception:
+                webhook_debug("MOVIE ORDER MESSAGE DELETE ERROR", traceback.format_exc())
             del ORDER_MESSAGES[order_id]
 
-        # ================= USER INFO =================
         cur.execute(
             """
             SELECT first_name, last_name
@@ -1961,13 +2179,13 @@ Use the button below to open your wallet.
             try:
                 chat = bot.get_chat(user_id)
                 full_name = f"{chat.first_name or ''} {chat.last_name or ''}".strip()
-            except:
+            except Exception:
                 full_name = "User"
 
         try:
             chat = bot.get_chat(user_id)
             tg_username = f"@{chat.username}" if chat.username else "unknown"
-        except:
+        except Exception:
             tg_username = "unknown"
 
         safe_full_name = clean_html(full_name)
@@ -1977,6 +2195,9 @@ Use the button below to open your wallet.
         # ================== FILM ORDER =======================
         # =====================================================
         if order_type == "film":
+
+            webhook_debug("STEP 28 — FILM ORDER DETECTED", order_id)
+
             cur.execute(
                 """
                 SELECT i.title, i.group_key, COALESCE(i.cashback_amount, 0)
@@ -1988,9 +2209,18 @@ Use the button below to open your wallet.
             )
             rows = cur.fetchall()
 
+            webhook_debug(
+                "STEP 29 — FILM ORDER ITEMS FETCHED",
+                {
+                    "items_count": len(rows),
+                    "items": rows
+                }
+            )
+
             if not rows:
                 cur.close()
                 conn.close()
+                webhook_debug("FILM ORDER EMPTY", order_id)
                 return "Empty order", 200
 
             groups = {}
@@ -2014,7 +2244,6 @@ Use the button below to open your wallet.
             titles_text = ", ".join(lines) if lines else "N/A"
             safe_titles_text = clean_html(titles_text)
 
-            # ================= CASHBACK REWARD LOGIC =================
             if total_custom_cashback > 0:
                 cashback = total_custom_cashback
                 is_custom_cashback = True
@@ -2023,6 +2252,15 @@ Use the button below to open your wallet.
                 if cashback > 200:
                     cashback = 200
                 is_custom_cashback = False
+
+            webhook_debug(
+                "STEP 30 — CASHBACK CALCULATED",
+                {
+                    "cashback": cashback,
+                    "custom_cashback": total_custom_cashback,
+                    "is_custom_cashback": is_custom_cashback
+                }
+            )
 
             if cashback > 0:
                 wallet_conn = get_wallet_conn()
@@ -2065,7 +2303,7 @@ Use the button below to open your wallet.
                 cb_kb = InlineKeyboardMarkup()
                 cb_kb.add(
                     InlineKeyboardButton(
-                        "💼 View Wallet", 
+                        "💼 View Wallet",
                         callback_data=f"view_cb_bal:{user_wallet_balance}",
                         style="primary"
                     )
@@ -2078,13 +2316,15 @@ Use the button below to open your wallet.
                     f"View your wallet to see available balance"
                 )
 
+                webhook_debug("STEP 31 — SENDING CASHBACK MESSAGE", user_id)
                 bot.send_message(user_id, cb_text, parse_mode="HTML", reply_markup=cb_kb)
 
             conn.commit()
             cur.close()
             conn.close()
 
-            # ================= SABON TSARIN SAKON PAYMENT SUCCESSFUL =================
+            webhook_debug("STEP 32 — MOVIE ORDER COMMITTED", order_id)
+
             kb = InlineKeyboardMarkup()
             kb.add(
                 InlineKeyboardButton(
@@ -2107,7 +2347,11 @@ Use the button below to open your wallet.
                 f"👇👇👇"
             )
 
+            webhook_debug("STEP 33 — SENDING MOVIE SUCCESS TO USER", user_id)
+
             bot.send_message(user_id, success_text, parse_mode="HTML", reply_markup=kb)
+
+            webhook_debug("STEP 34 — MOVIE SUCCESS MESSAGE SENT", user_id)
 
             if PAYMENT_NOTIFY_GROUP:
                 from datetime import datetime, timedelta
@@ -2130,12 +2374,16 @@ Use the button below to open your wallet.
                     parse_mode="HTML"
                 )
 
+            webhook_debug("MOVIE ORDER WEBHOOK COMPLETED", order_id)
             return "OK", 200
 
         # =====================================================
         # ================== VIP ORDER ========================
         # =====================================================
         elif order_type == "vip":
+
+            webhook_debug("STEP 35 — VIP ORDER DETECTED", order_id)
+
             from datetime import datetime, timedelta
 
             start_date = datetime.now()
@@ -2153,8 +2401,16 @@ Use the button below to open your wallet.
                 member = bot.get_chat_member(VIP_GROUP_ID, user_id)
                 if member.status in ["member", "administrator", "creator"]:
                     already_in_group = True
-            except:
+            except Exception:
                 already_in_group = False
+
+            webhook_debug(
+                "STEP 36 — VIP MEMBERSHIP CHECK",
+                {
+                    "user_id": user_id,
+                    "already_in_group": already_in_group
+                }
+            )
 
             if already_in_group:
                 cur.execute(
@@ -2179,6 +2435,8 @@ Use the button below to open your wallet.
                 cur.close()
                 conn.close()
 
+                webhook_debug("STEP 37 — VIP RENEWAL DB COMMITTED", order_id)
+
                 bot.send_message(
                     user_id,
                     f"""💎 <b>AN SABUNTA VIP NAKA</b>
@@ -2194,6 +2452,8 @@ ci gaba da ziyartar VIP Group kawai.
 Na gode da kasancewa tare da mu 🙏""",
                     parse_mode="HTML"
                 )
+
+                webhook_debug("STEP 38 — VIP RENEWAL USER MESSAGE SENT", user_id)
 
                 if PAYMENT_NOTIFY_GROUP:
                     now = (datetime.now() + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
@@ -2219,8 +2479,8 @@ Na gode da kasancewa tare da mu 🙏""",
                         ADMIN_ID,
                         f"🔔 VIP RENEWAL\n\n👤 {safe_full_name}\n🆔 {user_id}\n💰 ₦{paid_amount}\n\nYa sabunta VIP dinsa."
                     )
-                except:
-                    pass
+                except Exception:
+                    webhook_debug("VIP ADMIN MESSAGE ERROR", traceback.format_exc())
 
             else:
                 cur.execute(
@@ -2244,6 +2504,8 @@ Na gode da kasancewa tare da mu 🙏""",
                 conn.commit()
                 cur.close()
                 conn.close()
+
+                webhook_debug("STEP 39 — VIP ACTIVATION DB COMMITTED", order_id)
 
                 vip_kb = InlineKeyboardMarkup()
                 vip_kb.add(
@@ -2271,6 +2533,8 @@ Na gode da kasancewa tare da mu 🙏""",
                     reply_markup=vip_kb
                 )
 
+                webhook_debug("STEP 40 — VIP ACTIVATION MESSAGE SENT", user_id)
+
                 if PAYMENT_NOTIFY_GROUP:
                     now = (datetime.now() + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
 
@@ -2290,13 +2554,30 @@ Na gode da kasancewa tare da mu 🙏""",
                         parse_mode="HTML"
                     )
 
+            webhook_debug("VIP WEBHOOK COMPLETED", order_id)
             return "OK", 200
+
+        webhook_debug(
+            "STEP 41 — UNKNOWN ORDER TYPE",
+            {
+                "order_id": order_id,
+                "order_type": order_type
+            }
+        )
 
         return "OK", 200
 
     except Exception as e:
+
+        webhook_debug(
+            "🔥 WEBHOOK FATAL ERROR",
+            traceback.format_exc()
+        )
+
         print(f"Webhook Error: {e}")
         return "Internal Error", 500
+
+
 
 
 # 
