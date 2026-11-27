@@ -10498,7 +10498,7 @@ Balance: ₦{balance}
         text = f"""Malam {name}
 Yi hakuri baka da kudi a wallet din ka
 
-💰 {name} Wallet
+?? {name} Wallet
 🆔 Wallet ID: <code>{uid}</code>
 
 Balance: ₦0
@@ -10717,13 +10717,18 @@ Zabi adadin da zaka deposit zuwa wallet din ka👇👇
 
 
 
+
 from datetime import datetime, timedelta
 import html
+import json
+import logging
+
 
 def clean_html(text):
     if not text:
         return ""
     return html.escape(str(text))
+
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("walletpay:"))
 def wallet_pay_handler(call):
@@ -10732,11 +10737,14 @@ def wallet_pay_handler(call):
 
     try:
         _, order_id = call.data.split(":", 1)
-    except:
+    except Exception:
         bot.answer_callback_query(call.id, "Invalid order.")
         return
 
-    # ================= MAIN DB =================
+    # =========================================================
+    # 1. CHECK OLD ORDERS TABLE FIRST
+    # =========================================================
+
     conn = get_conn()
     cur = conn.cursor()
 
@@ -10751,11 +10759,800 @@ def wallet_pay_handler(call):
 
     row = cur.fetchone()
 
+    # =========================================================
+    # 2. IF NOT FOUND IN OLD ORDERS, CHECK NEW AI BOT_ORDER
+    # USE get_all_chat_db_conn(), NOT get_conn()
+    # =========================================================
+
     if not row:
+
         cur.close()
         conn.close()
-        bot.answer_callback_query(call.id, "Order not found.")
-        return
+
+        ai_conn = get_all_chat_db_conn()
+        ai_cur = ai_conn.cursor(
+            cursor_factory=RealDictCursor
+        )
+
+        wallet_conn = None
+        wallet_cur = None
+
+        try:
+
+            ai_cur.execute(
+                """
+                SELECT
+                    id,
+                    user_id,
+                    amount,
+                    paid,
+                    type,
+                    group_key,
+                    selected_movie_title,
+                    selected_movie_year,
+                    task_id,
+                    checker_chat_id,
+                    checker_message_id
+                FROM bot_order
+                WHERE id=%s
+                LIMIT 1
+                """,
+                (str(order_id),)
+            )
+
+            ai_order = ai_cur.fetchone()
+
+            if not ai_order:
+
+                bot.answer_callback_query(
+                    call.id,
+                    "Order not found.",
+                    show_alert=True
+                )
+                return
+
+            ai_user_id = int(ai_order.get("user_id") or 0)
+            ai_amount = int(ai_order.get("amount") or 0)
+            ai_paid = int(ai_order.get("paid") or 0)
+
+            group_key = ai_order.get("group_key")
+            movie_title = (
+                ai_order.get("selected_movie_title")
+                or "AI SHORT VIDEO"
+            )
+            movie_year = ai_order.get("selected_movie_year")
+            task_id = ai_order.get("task_id")
+
+            checker_chat_id = ai_order.get("checker_chat_id")
+            checker_message_id = ai_order.get("checker_message_id")
+
+            if ai_user_id != user_id:
+
+                bot.answer_callback_query(
+                    call.id,
+                    "This order does not belong to you.",
+                    show_alert=True
+                )
+                return
+
+            if ai_paid == 1:
+
+                bot.answer_callback_query(
+                    call.id,
+                    "Order already paid.",
+                    show_alert=True
+                )
+                return
+
+            if ai_amount <= 0:
+
+                bot.answer_callback_query(
+                    call.id,
+                    "Invalid order amount.",
+                    show_alert=True
+                )
+                return
+
+            # -------------------------------------------------
+            # GET CUSTOMER PAYMENT MESSAGE IDS FROM TASKS
+            # -------------------------------------------------
+
+            order_message_chat_id = None
+            order_message_id = None
+
+            if task_id:
+
+                ai_cur.execute(
+                    """
+                    SELECT payload
+                    FROM tasks
+                    WHERE task_id=%s
+                    LIMIT 1
+                    """,
+                    (str(task_id),)
+                )
+
+                task_row = ai_cur.fetchone()
+
+                if task_row:
+
+                    task_payload = task_row.get("payload")
+
+                    if isinstance(task_payload, str):
+
+                        try:
+                            task_payload = json.loads(task_payload)
+                        except Exception:
+                            task_payload = {}
+
+                    if isinstance(task_payload, dict):
+
+                        order_message_chat_id = task_payload.get(
+                            "order_message_chat_id"
+                        )
+
+                        order_message_id = task_payload.get(
+                            "order_message_id"
+                        )
+
+            # -------------------------------------------------
+            # CHECK DELIVERY ITEMS BEFORE TAKING WALLET MONEY
+            # -------------------------------------------------
+
+            if not group_key:
+
+                bot.answer_callback_query(
+                    call.id,
+                    "AI order group key is missing.",
+                    show_alert=True
+                )
+                return
+
+            delivery_items = ai_order_fetch_delivery_items(
+                order_id=order_id,
+                group_key=group_key
+            )
+
+            if not delivery_items:
+
+                bot.answer_callback_query(
+                    call.id,
+                    "Ba a samu fim din da za a tura ba.",
+                    show_alert=True
+                )
+                return
+
+            delivery_items = ai_order_sort_delivery_items(
+                delivery_items
+            )
+
+            total_items = len(delivery_items)
+
+            # -------------------------------------------------
+            # GET TELEGRAM USER INFORMATION
+            # -------------------------------------------------
+
+            try:
+
+                telegram_user = bot.get_chat(
+                    int(user_id)
+                )
+
+                first_name = str(
+                    getattr(telegram_user, "first_name", "") or ""
+                ).strip()
+
+                last_name = str(
+                    getattr(telegram_user, "last_name", "") or ""
+                ).strip()
+
+                tg_username = str(
+                    getattr(telegram_user, "username", "") or ""
+                ).strip()
+
+                full_name = " ".join(
+                    part for part in (first_name, last_name) if part
+                ).strip()
+
+                if not full_name:
+                    full_name = "Malam"
+
+            except Exception:
+
+                logging.exception(
+                    "AI WALLET TELEGRAM USER LOOKUP FAILED user=%s",
+                    user_id
+                )
+
+                full_name = "Malam"
+                tg_username = ""
+
+            safe_full_name = clean_html(full_name)
+            safe_tg_username = clean_html(
+                "@" + tg_username if tg_username else "unknown"
+            )
+
+            # -------------------------------------------------
+            # CHECK WALLET BALANCE
+            # -------------------------------------------------
+
+            wallet_conn = get_wallet_conn()
+            wallet_cur = wallet_conn.cursor()
+
+            wallet_cur.execute(
+                """
+                SELECT balance
+                FROM wallet_balance
+                WHERE user_id=%s
+                FOR UPDATE
+                """,
+                (user_id,)
+            )
+
+            wallet_row = wallet_cur.fetchone()
+            balance = int(wallet_row[0]) if wallet_row else 0
+
+            if balance < ai_amount:
+
+                bot.answer_callback_query(
+                    call.id,
+                    (
+                        f"❌ Insufficient wallet balance\n\n"
+                        f"Your balance: ₦{balance}\n"
+                        f"Movie price: ₦{ai_amount}\n\n"
+                        f"Please click PAY NOW to complete payment."
+                    ),
+                    show_alert=True
+                )
+                return
+
+            # -------------------------------------------------
+            # DEDUCT WALLET BALANCE
+            # -------------------------------------------------
+
+            wallet_cur.execute(
+                """
+                UPDATE wallet_balance
+                SET balance = balance - %s,
+                    updated_at = NOW()
+                WHERE user_id=%s
+                  AND balance >= %s
+                """,
+                (ai_amount, user_id, ai_amount)
+            )
+
+            if wallet_cur.rowcount != 1:
+
+                wallet_conn.rollback()
+
+                bot.answer_callback_query(
+                    call.id,
+                    "Wallet balance could not be deducted.",
+                    show_alert=True
+                )
+                return
+
+            wallet_cur.execute(
+                """
+                INSERT INTO wallet_transactions
+                (user_id, amount, type, reference, description)
+                VALUES (%s,%s,'purchase',%s,'AI Short Video Movie Purchase')
+                """,
+                (user_id, ai_amount, str(order_id))
+            )
+
+            wallet_conn.commit()
+
+            # -------------------------------------------------
+            # MARK AI ORDER AS PAID
+            # -------------------------------------------------
+
+            ai_cur.execute(
+                """
+                UPDATE bot_order
+                SET paid=1,
+                    pay_ref=%s
+                WHERE id=%s
+                  AND user_id=%s
+                  AND paid=0
+                """,
+                (
+                    "WALLET_" + str(order_id),
+                    str(order_id),
+                    user_id
+                )
+            )
+
+            if ai_cur.rowcount != 1:
+
+                ai_conn.rollback()
+
+                # Refund wallet if the order could not be marked paid.
+                wallet_cur.execute(
+                    """
+                    UPDATE wallet_balance
+                    SET balance = balance + %s,
+                        updated_at = NOW()
+                    WHERE user_id=%s
+                    """,
+                    (ai_amount, user_id)
+                )
+
+                wallet_cur.execute(
+                    """
+                    INSERT INTO wallet_transactions
+                    (user_id, amount, type, reference, description)
+                    VALUES (%s,%s,'refund',%s,'AI Wallet Payment Refund')
+                    """,
+                    (
+                        user_id,
+                        ai_amount,
+                        "AI_REFUND_" + str(order_id)
+                    )
+                )
+
+                wallet_conn.commit()
+
+                bot.answer_callback_query(
+                    call.id,
+                    "Order payment update failed. Wallet refunded.",
+                    show_alert=True
+                )
+                return
+
+            ai_conn.commit()
+
+            bot.answer_callback_query(
+                call.id,
+                "Payment successful! Sending your movie.",
+                show_alert=False
+            )
+
+            # -------------------------------------------------
+            # DELETE CUSTOMER ORDER / PAY NOW MESSAGE
+            # -------------------------------------------------
+
+            if order_message_chat_id and order_message_id:
+
+                try:
+
+                    bot.delete_message(
+                        chat_id=int(order_message_chat_id),
+                        message_id=int(order_message_id)
+                    )
+
+                except Exception:
+
+                    logging.exception(
+                        "AI WALLET CUSTOMER ORDER MESSAGE DELETE FAILED order=%s",
+                        order_id
+                    )
+
+            # -------------------------------------------------
+            # EDIT MOVIE CHECKER MESSAGE TO PAID
+            # REMOVE CHANGE MOVIE BUTTON
+            # -------------------------------------------------
+
+            if checker_chat_id and checker_message_id:
+
+                try:
+
+                    paid_caption = (
+                        "AI MOVIE ORDER — PAID\n\n"
+                        f"User ID: {user_id}\n"
+                        f"Movie: {movie_title}\n"
+                        f"Year: {movie_year or 'N/A'}\n"
+                        f"Order ID: {order_id}\n\n"
+                        "PAYMENT METHOD: WALLET\n"
+                        "STATUS: PAID"
+                    )
+
+                    bot.edit_message_caption(
+                        chat_id=int(checker_chat_id),
+                        message_id=int(checker_message_id),
+                        caption=paid_caption,
+                        reply_markup=None
+                    )
+
+                except Exception:
+
+                    logging.exception(
+                        "AI WALLET CHECKER MESSAGE EDIT FAILED order=%s",
+                        order_id
+                    )
+
+            # -------------------------------------------------
+            # SEND AI WALLET NOTIFICATION
+            # -------------------------------------------------
+
+            now = (
+                datetime.now() + timedelta(hours=1)
+            ).strftime("%Y-%m-%d %H:%M:%S")
+
+            grouped_titles = {}
+
+            for item in delivery_items:
+
+                title = str(
+                    item.get("title")
+                    or movie_title
+                    or "AI SHORT VIDEO"
+                ).strip()
+
+                item_group_key = (
+                    item.get("group_key")
+                    or f"single_{item.get('item_id')}"
+                )
+
+                if item_group_key not in grouped_titles:
+
+                    grouped_titles[item_group_key] = {
+                        "title": title,
+                        "count": 0
+                    }
+
+                grouped_titles[item_group_key]["count"] += 1
+
+            title_lines = []
+
+            for group in grouped_titles.values():
+
+                if group["count"] > 1:
+
+                    title_lines.append(
+                        f"{group['title']} ({group['count']})"
+                    )
+
+                else:
+
+                    title_lines.append(
+                        group["title"]
+                    )
+
+            ai_titles_text = ", ".join(title_lines)
+            safe_ai_titles = clean_html(ai_titles_text)
+
+            if PAYMENT_NOTIFY_GROUP_WALLET:
+
+                try:
+
+                    bot.send_message(
+                        PAYMENT_NOTIFY_GROUP_WALLET,
+                        f"""🎊✅ <b>AI SHORT VIDEO PAYMENT</b>
+
+👤 <b>Name:</b> {safe_full_name}
+🔗 <b>Username:</b> {safe_tg_username}
+🆔 <b>User ID:</b> <code>{user_id}</code>
+
+🎬 <b>Items:</b> {safe_ai_titles}
+📦 <b>Items Count:</b> {total_items}
+
+🗃 <b>Order ID:</b> <code>{clean_html(order_id)}</code>
+
+💳 <b>Payment Method:</b> Wallet
+💰 <b>Amount:</b> ₦{ai_amount}
+⏰ <b>Time:</b> {now}
+""",
+                        parse_mode="HTML"
+                    )
+
+                except Exception:
+
+                    logging.exception(
+                        "AI WALLET PAYMENT NOTIFICATION FAILED order=%s",
+                        order_id
+                    )
+
+            # -------------------------------------------------
+            # SEND PAYMENT SUCCESS MESSAGE TO USER
+            # -------------------------------------------------
+
+            greeting_message = (
+                "🎉🎊ALHAMDULILAH 🎈😍\n\n"
+                f"Sannu da kokari {full_name} 🥰\n\n"
+                "An karbi biyan ka 🥰\n"
+                "Kuma ga fim din da ka turo Short video dinsa Complete 😍\n"
+                "👇👇👇👇👇👇👇👇👇"
+            )
+
+            try:
+
+                bot.send_message(
+                    chat_id=user_id,
+                    text=greeting_message
+                )
+
+            except Exception:
+
+                logging.exception(
+                    "AI WALLET CUSTOMER GREETING FAILED order=%s",
+                    order_id
+                )
+
+            # -------------------------------------------------
+            # AUTOMATICALLY DELIVER AI MOVIE FILES
+            # NO DOWNLOAD BUTTON
+            # -------------------------------------------------
+
+            delivered_count = 0
+            failed_count = 0
+
+            for index, item in enumerate(
+                delivery_items,
+                start=1
+            ):
+
+                try:
+
+                    file_id = item.get("file_id")
+
+                    if not file_id:
+
+                        failed_count += 1
+                        continue
+
+                    caption = ai_order_build_caption(
+                        item=item,
+                        item_index=index,
+                        total_items=total_items,
+                        order_title=movie_title
+                    )
+
+                    file_name = str(
+                        item.get("file_name") or ""
+                    ).lower()
+
+                    video_extensions = (
+                        ".mp4",
+                        ".mkv",
+                        ".mov",
+                        ".avi",
+                        ".webm",
+                        ".m4v"
+                    )
+
+                    if file_name.endswith(video_extensions):
+
+                        bot.send_video(
+                            chat_id=user_id,
+                            video=file_id,
+                            caption=caption,
+                            parse_mode="HTML",
+                            supports_streaming=True
+                        )
+
+                    else:
+
+                        bot.send_document(
+                            chat_id=user_id,
+                            document=file_id,
+                            caption=caption,
+                            parse_mode="HTML"
+                        )
+
+                    delivered_count += 1
+
+                except Exception:
+
+                    logging.exception(
+                        "AI WALLET DELIVERY FIRST ATTEMPT FAILED order=%s item=%s",
+                        order_id,
+                        item.get("item_id")
+                    )
+
+                    # Retry once.
+                    try:
+
+                        file_id = item.get("file_id")
+
+                        if not file_id:
+                            raise ValueError("AI delivery file_id is empty")
+
+                        caption = ai_order_build_caption(
+                            item=item,
+                            item_index=index,
+                            total_items=total_items,
+                            order_title=movie_title
+                        )
+
+                        file_name = str(
+                            item.get("file_name") or ""
+                        ).lower()
+
+                        video_extensions = (
+                            ".mp4",
+                            ".mkv",
+                            ".mov",
+                            ".avi",
+                            ".webm",
+                            ".m4v"
+                        )
+
+                        if file_name.endswith(video_extensions):
+
+                            bot.send_video(
+                                chat_id=user_id,
+                                video=file_id,
+                                caption=caption,
+                                parse_mode="HTML",
+                                supports_streaming=True
+                            )
+
+                        else:
+
+                            bot.send_document(
+                                chat_id=user_id,
+                                document=file_id,
+                                caption=caption,
+                                parse_mode="HTML"
+                            )
+
+                        delivered_count += 1
+
+                    except Exception:
+
+                        failed_count += 1
+
+                        logging.exception(
+                            "AI WALLET DELIVERY RETRY FAILED order=%s item=%s",
+                            order_id,
+                            item.get("item_id")
+                        )
+
+            # -------------------------------------------------
+            # DELIVERY FAILURE MESSAGE AND ADMIN ALERT
+            # -------------------------------------------------
+
+            if failed_count > 0:
+
+                admin_username = str(
+                    globals().get(
+                        "ADMIN_USERNAME",
+                        "CEOalgaitabot"
+                    )
+                ).strip().lstrip("@")
+
+                help_markup = InlineKeyboardMarkup()
+
+                help_markup.add(
+                    InlineKeyboardButton(
+                        text="ADMIN HELP",
+                        url=f"https://t.me/{admin_username}"
+                    )
+                )
+
+                try:
+
+                    bot.send_message(
+                        chat_id=user_id,
+                        text=(
+                            "❌AN SAMU MATSALA WAJEN AIKO FIM DINKA, "
+                            "TANGARDAR NA'URA🥹\n"
+                            "Dan Allah tuntubi Admin\n"
+                            "👇👇"
+                        ),
+                        reply_markup=help_markup
+                    )
+
+                except Exception:
+
+                    logging.exception(
+                        "AI WALLET DELIVERY FAILURE MESSAGE FAILED user=%s",
+                        user_id
+                    )
+
+                admin_targets = globals().get("ADMINS") or []
+
+                if not admin_targets:
+
+                    single_admin = globals().get("ADMIN_ID")
+
+                    if single_admin:
+                        admin_targets = [single_admin]
+
+                for admin_id in admin_targets:
+
+                    try:
+
+                        bot.send_message(
+                            chat_id=admin_id,
+                            text=(
+                                "❌ AI WALLET MOVIE DELIVERY FAILED\n\n"
+                                f"User ID: {user_id}\n"
+                                f"Order ID: {order_id}\n"
+                                "Customer's movie delivery failed after retry."
+                            )
+                        )
+
+                    except Exception:
+
+                        logging.exception(
+                            "AI WALLET DELIVERY ADMIN ALERT FAILED admin=%s",
+                            admin_id
+                        )
+
+            # -------------------------------------------------
+            # SEND THANK YOU MESSAGE
+            # -------------------------------------------------
+
+            if delivered_count > 0:
+
+                try:
+
+                    bot.send_message(
+                        chat_id=user_id,
+                        text=(
+                            "Mun gode da amfani da AlgaitaBot🙏\n"
+                            "Fatan zaka ji dadin kallo, idan kana da korafi "
+                            "Tuntubi Admin🤗💚"
+                        )
+                    )
+
+                except Exception:
+
+                    logging.exception(
+                        "AI WALLET THANK YOU MESSAGE FAILED order=%s",
+                        order_id
+                    )
+
+            logging.info(
+                "AI WALLET ORDER FINISHED order=%s delivered=%s failed=%s",
+                order_id,
+                delivered_count,
+                failed_count
+            )
+
+            return
+
+        except Exception:
+
+            if wallet_conn:
+                try:
+                    wallet_conn.rollback()
+                except Exception:
+                    pass
+
+            if ai_conn:
+                try:
+                    ai_conn.rollback()
+                except Exception:
+                    pass
+
+            logging.exception(
+                "AI WALLET PAYMENT HANDLER FAILED order=%s",
+                order_id
+            )
+
+            bot.answer_callback_query(
+                call.id,
+                "An samu matsala wajen biyan wannan order.",
+                show_alert=True
+            )
+
+            return
+
+        finally:
+
+            if wallet_cur:
+                wallet_cur.close()
+
+            if wallet_conn:
+                wallet_conn.close()
+
+            if ai_cur:
+                ai_cur.close()
+
+            if ai_conn:
+                ai_conn.close()
+
+    # =========================================================
+    # 3. OLD ORDER NOT FOUND — KEEP OLD SYSTEM RESPONSE
+    # =========================================================
+
+    # If an order was not found in either table, this is an
+    # invalid order. The AI branch above already handles this.
+    # This line is reached only for a valid old order.
+    # =========================================================
 
     order_user, amount, paid, order_type = row
 
@@ -10969,7 +11766,6 @@ def wallet_pay_handler(call):
 """,
             parse_mode="HTML"
         )
-
 
 # ==========================================
 # TRANSFER MONEY START
