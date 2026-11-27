@@ -1,4 +1,11 @@
 
+import html
+
+def clean_html(text):
+    if not text:
+        return ""
+    return html.escape(str(text))
+
 @app.route("/webhook", methods=["POST"])
 def flutterwave_webhook():
     try:
@@ -166,6 +173,8 @@ def flutterwave_webhook():
             except:
                 tg_username = "unknown"
 
+            safe_full_name_topup = clean_html(full_name)
+
             wallet_kb = InlineKeyboardMarkup()
             wallet_kb.add(
                 InlineKeyboardButton(
@@ -176,7 +185,7 @@ def flutterwave_webhook():
 
             bot.send_message(
                 user_id,
-                f"""🎉 <b>CONGRATULATIONS MALAM {full_name}</b>
+                f"""🎉 <b>CONGRATULATIONS MALAM {safe_full_name_topup}</b>
 
 💰 <b>Your wallet credited:</b> ₦{paid_amount}
 
@@ -198,8 +207,8 @@ Use the button below to open your wallet.
                     PAYMENT_NOTIFY_GROUP,
                     f"""💰 <b>TOP-UP SUCCESSFUL</b>
 
-👤 <b>Name:</b> {full_name}
-🔗 <b>Username:</b> {tg_username}
+👤 <b>Name:</b> {safe_full_name_topup}
+🔗 <b>Username:</b> {clean_html(tg_username)}
 🆔 <b>User ID:</b> <code>{user_id}</code>
 
 💳 <b>Top-up:</b> ₦{paid_amount}
@@ -268,6 +277,9 @@ Use the button below to open your wallet.
         except:
             tg_username = "unknown"
 
+        safe_full_name = clean_html(full_name)
+        safe_tg_username = clean_html(tg_username)
+
         # =====================================================
         # ================== FILM ORDER =======================
         # =====================================================
@@ -295,7 +307,6 @@ Use the button below to open your wallet.
                 key = group_key or f"single_{title}"
                 if key not in groups:
                     groups[key] = {"title": title, "count": 0}
-                    # Idan fims na cikin group guda ne, sau daya kawai za a dauki custom cashback din don gudun ninki (doubling)
                     if cb_amount and cb_amount > 0:
                         total_custom_cashback += cb_amount
                 groups[key]["count"] += 1
@@ -308,14 +319,13 @@ Use the button below to open your wallet.
                     lines.append(f"{g['title']}")
 
             titles_text = ", ".join(lines) if lines else "N/A"
+            safe_titles_text = clean_html(titles_text)
 
             # ================= CASHBACK REWARD LOGIC =================
             if total_custom_cashback > 0:
-                # 1. SABON TSARI: IDAN FIM(IN) YANA DA CUSTOM CASHBACK A DATABASE
                 cashback = total_custom_cashback
                 is_custom_cashback = True
             else:
-                # 2. TSOHON TSARI: IDAN FIM(IN) BASHI DA CUSTOM CASHBACK
                 cashback = (paid_amount // 200) * CASHBACK
                 if cashback > 200:
                     cashback = 200
@@ -346,7 +356,6 @@ Use the button below to open your wallet.
                     (user_id, cashback, order_id)
                 )
 
-                # Samun jimillar balance dake cikin wallet din user bayan an kara cashback
                 wallet_cur.execute(
                     """
                     SELECT balance FROM wallet_balance WHERE user_id=%s
@@ -360,7 +369,6 @@ Use the button below to open your wallet.
                 wallet_cur.close()
                 wallet_conn.close()
 
-                # ================= SABON TSARIN SAKON CASHBACK =================
                 cb_kb = InlineKeyboardMarkup()
                 cb_kb.add(
                     InlineKeyboardButton(
@@ -371,13 +379,13 @@ Use the button below to open your wallet.
                 )
 
                 cb_text = (
-                    f"🎁 **Cashback Reward**🎉\n\n"
-                    f"Wallet ID: `{user_id}`\n"
+                    f"🎁 <b>Cashback Reward</b>🎉\n\n"
+                    f"Wallet ID: <code>{user_id}</code>\n"
                     f"You received ₦{cashback} cashback,\n"
                     f"View your wallet to see available balance"
                 )
 
-                bot.send_message(user_id, cb_text, parse_mode="Markdown", reply_markup=cb_kb)
+                bot.send_message(user_id, cb_text, parse_mode="HTML", reply_markup=cb_kb)
 
             conn.commit()
             cur.close()
@@ -394,19 +402,19 @@ Use the button below to open your wallet.
             )
 
             success_text = (
-                f"🎉 **PAYMENT SUCCESSFUL!**\n"
+                f"🎉 <b>PAYMENT SUCCESSFUL!</b>\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
-                f"Mun Gode {full_name}\n\n"
-                f"🎬 **Film:** {titles_text}\n"
-                f"💵 **Amount Paid:** ₦{paid_amount}\n"
+                f"Mun Gode {safe_full_name}\n\n"
+                f"🎬 <b>Film:</b> {safe_titles_text}\n"
+                f"💵 <b>Amount Paid:</b> ₦{paid_amount}\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
-                f"🎁 **Cashback Earned:** ₦{cashback}\n\n"
+                f"🎁 <b>Cashback Earned:</b> ₦{cashback}\n\n"
                 f"✅ Biyan ya kammala! 😊\n"
                 f"Danna DOWNLOAD domin sauke fim din\n"
                 f"👇👇👇"
             )
 
-            bot.send_message(user_id, success_text, parse_mode="Markdown", reply_markup=kb)
+            bot.send_message(user_id, success_text, parse_mode="HTML", reply_markup=kb)
 
             if PAYMENT_NOTIFY_GROUP:
                 from datetime import datetime, timedelta
@@ -416,11 +424,11 @@ Use the button below to open your wallet.
                     PAYMENT_NOTIFY_GROUP,
                     f"""✅ <b>NEW PAYMENT RECEIVED</b>
 
-👤 <b>Name:</b> {full_name}
-🔗 <b>Username:</b> {tg_username}
+👤 <b>Name:</b> {safe_full_name}
+🔗 <b>Username:</b> {safe_tg_username}
 🆔 <b>User ID:</b> <code>{user_id}</code>
 
-🎬 <b>Items:</b> {titles_text}
+🎬 <b>Items:</b> {safe_titles_text}
 🗃 <b>Order ID:</b> <code>{order_id}</code>
 
 💰 <b>Amount:</b> ₦{paid_amount}
@@ -501,8 +509,8 @@ Na gode da kasancewa tare da mu 🙏""",
                         PAYMENT_NOTIFY_GROUP,
                         f"""💎 <b>VIP RENEWAL PAYMENT</b>
 
-👤 <b>Name:</b> {full_name}
-🔗 <b>Username:</b> {tg_username}
+👤 <b>Name:</b> {safe_full_name}
+🔗 <b>Username:</b> {safe_tg_username}
 🆔 <b>User ID:</b> <code>{user_id}</code>
 
 🗃 <b>Order ID:</b> <code>{order_id}</code>
@@ -516,7 +524,7 @@ Na gode da kasancewa tare da mu 🙏""",
                 try:
                     bot.send_message(
                         ADMIN_ID,
-                        f"🔔 VIP RENEWAL\n\n👤 {full_name}\n🆔 {user_id}\n💰 ₦{paid_amount}\n\nYa sabunta VIP dinsa."
+                        f"🔔 VIP RENEWAL\n\n👤 {safe_full_name}\n🆔 {user_id}\n💰 ₦{paid_amount}\n\nYa sabunta VIP dinsa."
                     )
                 except:
                     pass
@@ -556,7 +564,7 @@ Na gode da kasancewa tare da mu 🙏""",
                     user_id,
                     f"""💎 <b>VIP SUBSCRIPTION ACTIVATED</b>
 
-👤 <b>Name:</b> {full_name}
+👤 <b>Name:</b> {safe_full_name}
 🆔 <b>User ID:</b> <code>{user_id}</code>
 
 💳 <b>Amount Paid:</b> ₦{paid_amount}
@@ -577,8 +585,8 @@ Na gode da kasancewa tare da mu 🙏""",
                         PAYMENT_NOTIFY_GROUP,
                         f"""💎 <b>NEW VIP SUBSCRIPTION</b>
 
-👤 <b>Name:</b> {full_name}
-🔗 <b>Username:</b> {tg_username}
+👤 <b>Name:</b> {safe_full_name}
+🔗 <b>Username:</b> {safe_tg_username}
 🆔 <b>User ID:</b> <code>{user_id}</code>
 
 🗃 <b>Order ID:</b> <code>{order_id}</code>
@@ -596,4 +604,3 @@ Na gode da kasancewa tare da mu 🙏""",
     except Exception as e:
         print(f"Webhook Error: {e}")
         return "Internal Error", 500
-
