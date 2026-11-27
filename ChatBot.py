@@ -5735,11 +5735,9 @@ def group_clip_change_movie_cancel_callback(call):
 
 
 
-
-
 # =============================================================
-# AI PAYMENT WEBHOOK HANDLER — MISSING MAIN FUNCTION
-# CONNECTS FLUTTERWAVE → AI ORDER → PAYMENT → NOTIFICATION → DELIVERY
+# AI PAYMENT WEBHOOK HANDLER — FIXED INTEGER PAID
+# FLUTTERWAVE → AI ORDER → PAYMENT → NOTIFICATION → DELIVERY
 # =============================================================
 
 def handle_ai_order_payment(
@@ -5769,27 +5767,34 @@ def handle_ai_order_payment(
             str(payload)
         )
 
-        if currency != "NGN":
+        if str(currency).upper() != "NGN":
+
             ai_order_debug(
                 "AI PAYMENT REJECTED — WRONG CURRENCY",
                 str(currency)
             )
+
             return False
 
         if int(paid_amount or 0) <= 0:
+
             ai_order_debug(
                 "AI PAYMENT REJECTED — INVALID AMOUNT",
                 str(paid_amount)
             )
+
             return False
 
         if not raw_reference or not str(raw_reference).startswith(
             str(order_id) + "_"
         ):
+
             ai_order_debug(
                 "AI PAYMENT REJECTED — REFERENCE MISMATCH",
-                f"Order ID: {order_id}\nReference: {raw_reference}"
+                f"Order ID: {order_id}\n"
+                f"Reference: {raw_reference}"
             )
+
             return False
 
         ai_order_debug(
@@ -5855,9 +5860,19 @@ def handle_ai_order_payment(
                 return False
 
             user_id = order.get("user_id")
-            expected_amount = int(order.get("amount") or 0)
-            already_paid = order.get("paid")
+
+            expected_amount = int(
+                order.get("amount") or 0
+            )
+
+            # IMPORTANT:
+            # bot_order.paid IS INTEGER (0 OR 1)
+            already_paid = int(
+                order.get("paid") or 0
+            )
+
             group_key = order.get("group_key")
+
             movie_title = (
                 order.get("selected_movie_title")
                 or "AI MOVIE ORDER"
@@ -5895,7 +5910,7 @@ def handle_ai_order_payment(
             # CHECK ALREADY PAID
             # -------------------------------------------------
 
-            if already_paid:
+            if already_paid == 1:
 
                 ai_order_debug(
                     "AI ORDER ALREADY PAID",
@@ -5907,6 +5922,10 @@ def handle_ai_order_payment(
 
             # -------------------------------------------------
             # MARK AI ORDER AS PAID
+            #
+            # FIX:
+            # paid IS INTEGER, NOT BOOLEAN.
+            # USE 1 AND 0 INSTEAD OF TRUE AND FALSE.
             # -------------------------------------------------
 
             ai_order_debug(
@@ -5916,10 +5935,10 @@ def handle_ai_order_payment(
             cur.execute(
                 """
                 UPDATE bot_order
-                SET paid=TRUE,
+                SET paid=1,
                     pay_ref=%s
                 WHERE id=%s
-                  AND paid=FALSE
+                  AND paid=0
                 """,
                 (
                     str(raw_reference),
@@ -6005,7 +6024,8 @@ def handle_ai_order_payment(
 
         ai_order_debug(
             "AI HANDLER STEP 14 — FETCHING DELIVERY ITEMS",
-            f"Order ID: {order_id}\nGroup Key: {group_key}"
+            f"Order ID: {order_id}\n"
+            f"Group Key: {group_key}"
         )
 
         delivery_items = ai_order_fetch_delivery_items(
@@ -6059,7 +6079,10 @@ def handle_ai_order_payment(
         delivered_count = 0
         failed_count = 0
 
-        for index, item in enumerate(delivery_items, start=1):
+        for index, item in enumerate(
+            delivery_items,
+            start=1
+        ):
 
             try:
 
@@ -6200,8 +6223,6 @@ def handle_ai_order_payment(
 # =============================================================
 # AI PAYMENT HANDLER — END
 # =============================================================
-
-
 
 
 
