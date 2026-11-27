@@ -104,6 +104,103 @@ def get_all_chat_db_conn():
 
 
 # =============================
+# ENSURE BOT_ORDER_ITEMS TABLE STRUCTURE
+# =============================
+
+def ensure_bot_order_items_table():
+
+    chat_conn = None
+
+    try:
+        # Create a fresh All Chat DB connection
+        chat_conn = get_all_chat_db_conn()
+        chat_cur = chat_conn.cursor()
+
+        # Create table if it does not exist
+        chat_cur.execute("""
+            CREATE TABLE IF NOT EXISTS bot_order_items (
+                id BIGSERIAL PRIMARY KEY,
+
+                order_id TEXT NOT NULL
+                    REFERENCES bot_order(id)
+                    ON DELETE CASCADE,
+
+                item_id INTEGER NOT NULL,
+
+                file_id TEXT,
+
+                price INTEGER DEFAULT 0,
+
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+                UNIQUE(order_id, item_id)
+            )
+        """)
+
+        def ensure_column(column_name, column_type):
+
+            chat_cur.execute("""
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                  AND table_name = 'bot_order_items'
+                  AND column_name = %s
+            """, (column_name,))
+
+            if not chat_cur.fetchone():
+
+                chat_cur.execute(
+                    f"ALTER TABLE bot_order_items ADD COLUMN {column_name} {column_type}"
+                )
+
+                print(
+                    f"✅ bot_order_items column '{column_name}' added"
+                )
+
+            else:
+                print(
+                    f"✅ bot_order_items column '{column_name}' already exists — SKIPPED"
+                )
+
+        # Required column
+        ensure_column("file_name", "TEXT")
+
+        chat_conn.commit()
+
+        print(
+            "✅ BOT_ORDER_ITEMS TABLE STRUCTURE VERIFIED SUCCESSFULLY"
+        )
+
+    except Exception as e:
+
+        if chat_conn:
+            chat_conn.rollback()
+
+        print(
+            "❌ BOT_ORDER_ITEMS MIGRATION ERROR:",
+            repr(e)
+        )
+
+        logging.exception(
+            "BOT_ORDER_ITEMS MIGRATION FAILED"
+        )
+
+        raise
+
+    finally:
+
+        if chat_conn:
+            chat_conn.close()
+
+
+# =============================
+# RUN MIGRATION ONCE AT STARTUP
+# =============================
+
+ensure_bot_order_items_table()
+
+
+# =============================
 # ENSURE BOT_ORDER TABLE STRUCTURE
 # =============================
 
@@ -847,6 +944,8 @@ CREATE TABLE IF NOT EXISTS bot_order_items (
 
     file_id TEXT,
 
+    file_name TEXT,
+
     price INTEGER DEFAULT 0,
 
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -1571,6 +1670,7 @@ def send_feedback_prompt(user_id, order_id):
 
 
 
+
 import html
 
 def clean_html(text):
@@ -1655,6 +1755,25 @@ def flutterwave_webhook():
                 wallet_conn.close()
                 cur.close()
                 conn.close()
+
+                # ================= AI ORDER FALLBACK =================
+                # Ana kiran mataimaki ne kawai idan babu order a orders
+                # kuma babu deposit a wallet_deposits.
+                ai_order_handler = globals().get("handle_ai_order_payment")
+                if callable(ai_order_handler):
+                    try:
+                        ai_handled = ai_order_handler(
+                            order_id=order_id,
+                            raw_reference=raw_reference,
+                            paid_amount=paid_amount,
+                            currency=currency,
+                            payload=data
+                        )
+                        if ai_handled:
+                            return "OK", 200
+                    except Exception as ai_error:
+                        print(f"AI Order Webhook Handler Error: {ai_error}")
+
                 return "Order not found", 200
 
             user_id, expected_amount, status = dep
@@ -2176,7 +2295,6 @@ Na gode da kasancewa tare da mu 🙏""",
     except Exception as e:
         print(f"Webhook Error: {e}")
         return "Internal Error", 500
-
 
 
 # 
@@ -5171,6 +5289,9 @@ group_clip_start_result_worker()
 # END AIfims.py
 # ============================================================
 
+
+
+
 # ============================================================
 # Buttons block
 # 20. CHANGE MOVIE — MULTI-OPERATOR INDEPENDENT SESSIONS
@@ -5187,6 +5308,27 @@ def group_clip_change_movie_file_id(message):
     if getattr(message, "document", None):
         return message.document.file_id
     return None
+
+
+# ============================================================
+# GET ORIGINAL FILE NAME
+# ============================================================
+
+def group_clip_change_movie_file_name(message):
+
+    if getattr(message, "document", None):
+        return (
+            getattr(message.document, "file_name", None)
+            or "unknown_file"
+        ).strip()
+
+    if getattr(message, "video", None):
+        return (
+            getattr(message.video, "file_name", None)
+            or "unknown_video"
+        ).strip()
+
+    return "unknown_file"
 
 
 def group_clip_change_movie_keyboard(order_id, include_done=False):
@@ -5294,6 +5436,7 @@ def group_clip_change_movie_callback(call):
             _CHANGE_MOVIE_SESSIONS[operator_id] = {
                 "order_id": order_id,
                 "file_id": None,
+                "file_name": None,
                 "file_type": None,
                 "upload_message_id": None,
                 "checker_message_id": checker_message_id,
@@ -5353,7 +5496,11 @@ def group_clip_change_movie_receive_file(message):
         if not file_id:
             return
 
+        # KARANTA AINIHIN SUNAN FILE DAGA TELEGRAM
+        file_name = group_clip_change_movie_file_name(message)
+
         session["file_id"] = file_id
+        session["file_name"] = file_name
         session["file_type"] = "video" if message.video else "document"
         session["upload_message_id"] = int(message.message_id)
         order_id = session["order_id"]
@@ -5361,6 +5508,7 @@ def group_clip_change_movie_receive_file(message):
     bot.send_message(
         MOVIE_CHECKER,
         "📥 <b>An karbi sabon fim.</b>\n\n"
+        f"📄 <b>File name:</b> <code>{group_clip_safe(file_name)}</code>\n\n"
         "Idan wannan shi ne fim din da za a saka, danna <b>Done</b>.\n"
         "Idan ba daidai ba ne, ka sake turo wani file ko ka yi Cancel.",
         parse_mode="HTML",
@@ -5372,7 +5520,7 @@ def group_clip_change_movie_receive_file(message):
 
 
 # ------------------------------------------------------------
-# 3. DONE — SAVE NEW FILE_ID TO bot_order_items
+# 3. DONE — SAVE NEW FILE_ID AND FILE_NAME TO bot_order_items
 # ------------------------------------------------------------
 
 @bot.callback_query_handler(
@@ -5409,10 +5557,29 @@ def group_clip_change_movie_done_callback(call):
                 return
 
             new_file_id = session["file_id"]
+            new_file_name = session.get("file_name") or "unknown_file"
 
         conn = get_all_chat_db_conn()
         cur = conn.cursor()
         try:
+            # DUBA KO file_name COLUMN YANA NAN
+            cur.execute("""
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_name = 'bot_order_items'
+                      AND column_name = 'file_name'
+                )
+            """)
+            has_file_name = bool(cur.fetchone()[0])
+
+            # IDAN BABU COLUMN, A KIRKIRE SHI
+            if not has_file_name:
+                cur.execute("""
+                    ALTER TABLE bot_order_items
+                    ADD COLUMN IF NOT EXISTS file_name TEXT
+                """)
+
             cur.execute("""
                 SELECT paid, item_id, checker_chat_id
                 FROM bot_order
@@ -5443,11 +5610,18 @@ def group_clip_change_movie_done_callback(call):
                 )
                 return
 
+            # UPDATE FILE_ID DA FILE_NAME TARE
             cur.execute("""
                 UPDATE bot_order_items
-                SET file_id=%s
+                SET file_id=%s,
+                    file_name=%s
                 WHERE order_id=%s AND item_id=%s
-            """, (new_file_id, order_id, int(item_id)))
+            """, (
+                new_file_id,
+                new_file_name,
+                order_id,
+                int(item_id)
+            ))
 
             if cur.rowcount < 1:
                 conn.rollback()
@@ -5474,12 +5648,13 @@ def group_clip_change_movie_done_callback(call):
         bot.send_message(
             MOVIE_CHECKER,
             "✅ <b>DONE!</b>\n"
-            "An sabunta file_id na wannan order cikin nasara.",
+            "An sabunta file_id da file_name na wannan order cikin nasara.\n\n"
+            f"📄 <b>File name:</b> <code>{group_clip_safe(new_file_name)}</code>",
             parse_mode="HTML"
         )
         logging.info(
-            "CHANGE MOVIE COMPLETED order=%s operator=%s",
-            order_id, operator_id
+            "CHANGE MOVIE COMPLETED order=%s operator=%s file_name=%s",
+            order_id, operator_id, new_file_name
         )
 
     except Exception:
@@ -5553,6 +5728,549 @@ def group_clip_change_movie_cancel_callback(call):
 
 
 #End button block
+
+
+
+
+
+#Start Asister webhook block
+
+# =============================================================
+# AI PAYMENT NOTIFICATION — FORMAT DAGA HOTONKA
+# =============================================================
+
+AI_NOTIFICATION = -1001234567890  # SAKA AINIHIN GROUP ID NAKA
+
+
+def ai_order_send_payment_notification(
+    user_id,
+    order_id,
+    movie_title,
+    amount
+):
+    notification_group = globals().get("AI_NOTIFICATION")
+
+    if not notification_group:
+        logging.error("AI_NOTIFICATION GROUP NOT CONFIGURED")
+        return False
+
+    full_name, username = ai_order_get_user_info(user_id)
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    message = f"""🤖 <b>AI ORDER PAYMENT SUCCESSFUL</b>
+
+👤 <b>Name:</b> {group_clip_safe(full_name)}
+🔗 <b>Username:</b> {group_clip_safe(username)}
+🆔 <b>User ID:</b> <code>{int(user_id)}</code>
+
+🎬 <b>Items:</b> {group_clip_safe(movie_title)}
+
+🗃 <b>Order ID:</b> <code>{group_clip_safe(order_id)}</code>
+
+💰 <b>Amount:</b> ₦{int(amount)}
+⏰ <b>Time:</b> {now}
+
+<i>Wannan sabon tsarin sanarwar AI ne, ba tsohon wallet notification ba.</i>"""
+
+    try:
+        bot.send_message(
+            notification_group,
+            message,
+            parse_mode="HTML"
+        )
+        return True
+
+    except Exception:
+        logging.exception(
+            "AI PAYMENT NOTIFICATION FAILED order=%s",
+            order_id
+        )
+        return False
+
+
+# =============================================================
+# AI ORDER — FETCH FILE NAME AND DELIVERY FILES
+# PRIORITY:
+# 1. bot_order_items.file_name
+# 2. items.file_name USING group_key
+# =============================================================
+
+def ai_order_fetch_delivery_items(order_id, group_key):
+
+    # ---------------------------------------------------------
+    # 1. READ PURCHASED ITEMS
+    # CHECK WHETHER bot_order_items HAS file_name COLUMN
+    # ---------------------------------------------------------
+
+    order_conn = get_all_chat_db_conn()
+    order_cur = None
+
+    try:
+        order_cur = order_conn.cursor(
+            cursor_factory=RealDictCursor
+        )
+
+        order_cur.execute("""
+            SELECT EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_name = 'bot_order_items'
+                  AND column_name = 'file_name'
+            ) AS has_file_name
+        """)
+
+        column_info = order_cur.fetchone()
+        has_file_name = bool(
+            column_info and column_info.get("has_file_name")
+        )
+
+        if has_file_name:
+            order_cur.execute("""
+                SELECT item_id, file_id, price, file_name
+                FROM bot_order_items
+                WHERE order_id=%s
+                ORDER BY item_id ASC
+            """, (str(order_id),))
+
+        else:
+            order_cur.execute("""
+                SELECT item_id, file_id, price, NULL AS file_name
+                FROM bot_order_items
+                WHERE order_id=%s
+                ORDER BY item_id ASC
+            """, (str(order_id),))
+
+        purchased_items = order_cur.fetchall()
+
+    finally:
+        if order_cur:
+            order_cur.close()
+        order_conn.close()
+
+    if not purchased_items:
+        return []
+
+    purchased_ids = {
+        int(x["item_id"])
+        for x in purchased_items
+        if x.get("item_id") is not None
+    }
+
+    # ---------------------------------------------------------
+    # 2. FIND ORIGINAL MOVIE RECORDS USING group_key
+    # CHECK WHETHER items HAS file_name COLUMN
+    # ---------------------------------------------------------
+
+    movie_conn = get_conn()
+    movie_cur = None
+
+    try:
+        movie_cur = movie_conn.cursor(
+            cursor_factory=RealDictCursor
+        )
+
+        movie_cur.execute("""
+            SELECT EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_name = 'items'
+                  AND column_name = 'file_name'
+            ) AS has_file_name
+        """)
+
+        movie_column_info = movie_cur.fetchone()
+
+        items_has_file_name = bool(
+            movie_column_info
+            and movie_column_info.get("has_file_name")
+        )
+
+        if items_has_file_name:
+            movie_cur.execute("""
+                SELECT
+                    id,
+                    title,
+                    file_name,
+                    group_key
+                FROM items
+                WHERE group_key=%s
+                ORDER BY id ASC
+            """, (str(group_key),))
+
+        else:
+            movie_cur.execute("""
+                SELECT
+                    id,
+                    title,
+                    NULL AS file_name,
+                    group_key
+                FROM items
+                WHERE group_key=%s
+                ORDER BY id ASC
+            """, (str(group_key),))
+
+        movie_rows = movie_cur.fetchall()
+
+    finally:
+        if movie_cur:
+            movie_cur.close()
+        movie_conn.close()
+
+    movie_by_id = {
+        int(x["id"]): x
+        for x in movie_rows
+    }
+
+    # ---------------------------------------------------------
+    # 3. MATCH PURCHASED ITEMS
+    #
+    # bot_order_items.file_id IS ALWAYS THE FILE TO SEND.
+    # DO NOT REPLACE IT WITH items.file_id.
+    #
+    # file_name PRIORITY:
+    # bot_order_items.file_name FIRST.
+    # items.file_name SECOND IF EMPTY.
+    # ---------------------------------------------------------
+
+    delivery_items = []
+
+    for purchased in purchased_items:
+
+        item_id = int(purchased["item_id"])
+        original = movie_by_id.get(item_id)
+
+        if not original:
+            logging.error(
+                "AI ORIGINAL ITEM NOT FOUND "
+                "order=%s item_id=%s group_key=%s",
+                order_id,
+                item_id,
+                group_key
+            )
+            continue
+
+        delivery_file_id = purchased.get("file_id")
+
+        if not delivery_file_id:
+            logging.error(
+                "AI ORDER FILE ID MISSING order=%s item_id=%s",
+                order_id,
+                item_id
+            )
+            continue
+
+        # FIRST: file_name FROM bot_order_items
+        file_name = (
+            purchased.get("file_name") or ""
+        ).strip()
+
+        # SECOND: FALLBACK TO items.file_name
+        if not file_name:
+            file_name = (
+                original.get("file_name") or ""
+            ).strip()
+
+        delivery_items.append({
+            "item_id": item_id,
+            "file_id": delivery_file_id,
+            "title": original.get("title") or "",
+            "file_name": file_name,
+            "group_key": original.get("group_key")
+        })
+
+    return delivery_items
+
+
+# =============================================================
+# AI ORDER — SMART COMPANY DETECTION
+# REUSES EXISTING AI COMPANY DETECTOR
+# =============================================================
+
+def ai_order_smart_detect_company(admin_title):
+
+    title = str(admin_title or "")
+
+    try:
+        detector = globals().get(
+            "group_clip_detect_company"
+        )
+
+        if callable(detector):
+            detected = detector(title)
+
+            if detected:
+                return str(detected).strip()
+
+    except Exception:
+        logging.exception(
+            "AI ORDER COMPANY DETECTOR FAILED"
+        )
+
+    priority = globals().get(
+        "AI_MOVIE_COMPANY_PRIORITY",
+        (
+            "Algaita",
+            "Sultan",
+            "Mega",
+            "Fikira",
+            "Gwani",
+            "Ysf zamani",
+            "C man",
+            "D love",
+            "Alhussain",
+            "Badawa",
+            "Pk studio"
+        )
+    )
+
+    try:
+        normalize = globals().get(
+            "group_clip_normalize_words"
+        )
+
+        if callable(normalize):
+            normalized_title = normalize(title)
+        else:
+            normalized_title = re.sub(
+                r"[^a-z0-9]+",
+                " ",
+                title.casefold()
+            ).strip()
+
+        # Parentheses receive priority.
+        parenthetical = re.findall(
+            r"\(([^()]*)\)",
+            title
+        )
+
+        for section in parenthetical:
+
+            if callable(normalize):
+                normalized_section = normalize(section)
+            else:
+                normalized_section = re.sub(
+                    r"[^a-z0-9]+",
+                    " ",
+                    section.casefold()
+                ).strip()
+
+            for company in priority:
+
+                if callable(normalize):
+                    token = normalize(company)
+                else:
+                    token = re.sub(
+                        r"[^a-z0-9]+",
+                        " ",
+                        str(company).casefold()
+                    ).strip()
+
+                if token and token in normalized_section:
+                    return str(company)
+
+        # Search the complete admin title.
+        for company in priority:
+
+            if callable(normalize):
+                token = normalize(company)
+            else:
+                token = re.sub(
+                    r"[^a-z0-9]+",
+                    " ",
+                    str(company).casefold()
+                ).strip()
+
+            if token and re.search(
+                r"(?<!\w)" + re.escape(token) + r"(?!\w)",
+                normalized_title
+            ):
+                return str(company)
+
+    except Exception:
+        logging.exception(
+            "AI ORDER COMPANY FALLBACK FAILED"
+        )
+
+    return None
+
+
+# =============================================================
+# AI ORDER — SMART EPISODE NUMBER
+# SUPPORTS S01E02, EPISODE 02, EP 02
+# =============================================================
+
+def ai_order_get_episode_number(file_name):
+
+    name = str(file_name or "")
+
+    patterns = (
+        r"(?i)\bS\d{1,2}\s*E(\d{1,3})\b",
+        r"(?i)\bEPISODE[\s._-]*(\d{1,3})\b",
+        r"(?i)\bEP[\s._-]*(\d{1,3})\b",
+        r"(?i)\bE(\d{1,3})\b"
+    )
+
+    for pattern in patterns:
+        match = re.search(pattern, name)
+
+        if match:
+            return int(match.group(1))
+
+    numbers = re.findall(
+        r"(?<!\d)(\d{1,3})(?!\d)",
+        name
+    )
+
+    for number in numbers:
+        value = int(number)
+
+        if not (1900 <= value <= 2100):
+            return value
+
+    return 999999
+
+
+# =============================================================
+# AI ORDER — SORT EPISODES 1, 2, 3, 4, 5...
+# USE file_name FIRST
+# =============================================================
+
+def ai_order_sort_delivery_items(items):
+
+    processed_items = []
+
+    for item in items:
+
+        file_name = (
+            item.get("file_name") or ""
+        )
+
+        episode_number = ai_order_get_episode_number(
+            file_name
+        )
+
+        processed_items.append(
+            (episode_number, item)
+        )
+
+    processed_items.sort(
+        key=lambda x: (
+            x[0],
+            int(x[1].get("item_id") or 0)
+        )
+    )
+
+    return [
+        x[1]
+        for x in processed_items
+    ]
+
+
+# =============================================================
+# AI ORDER — SMART DELIVERY CAPTION
+# REUSES EXISTING DELIVER CAPTION BUILDER
+# =============================================================
+
+def ai_order_build_caption(
+    item,
+    item_index,
+    total_items,
+    order_title
+):
+
+    admin_title = (
+        item.get("title")
+        or order_title
+        or "MOVIE"
+    )
+
+    original_file_name = (
+        item.get("file_name")
+        or ""
+    )
+
+    try:
+        admin_title = smart_clean_spaces(
+            str(admin_title)
+        )
+
+        # Detect the company from the admin title.
+        company = ai_order_smart_detect_company(
+            admin_title
+        )
+
+        # Add company tag only when it is not already present.
+        if company:
+
+            normalize = globals().get(
+                "group_clip_normalize_words"
+            )
+
+            if callable(normalize):
+                normalized_title = normalize(admin_title)
+                normalized_company = normalize(company)
+            else:
+                normalized_title = re.sub(
+                    r"[^a-z0-9]+",
+                    " ",
+                    admin_title.casefold()
+                ).strip()
+
+                normalized_company = re.sub(
+                    r"[^a-z0-9]+",
+                    " ",
+                    company.casefold()
+                ).strip()
+
+            if normalized_company not in normalized_title:
+                admin_title = (
+                    f"{admin_title} ({company})"
+                )
+
+        # Use the SAME smart caption builder as old delivery.
+        caption = smart_build_delivery_caption(
+            admin_title=admin_title,
+            original_file_name=original_file_name,
+            item_index=item_index,
+            total_items=total_items
+        )
+
+        # Make the movie title line uppercase.
+        if caption:
+            first_line, separator, remaining = (
+                caption.partition("\n")
+            )
+
+            caption = (
+                first_line.upper()
+                + (
+                    separator + remaining
+                    if separator else ""
+                )
+            )
+
+        return caption
+
+    except Exception:
+
+        logging.exception(
+            "AI SMART CAPTION FAILED item=%s",
+            item.get("item_id")
+        )
+
+        fallback = smart_clean_spaces(
+            admin_title
+        ).upper()
+
+        return (
+            f"{fallback} MASTER\n"
+            "Uploader From @Algaitabot Telegram"
+        )
+
+
+#Asister webhook End
+
 
 
 # ============================================================
