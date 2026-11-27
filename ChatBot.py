@@ -5736,8 +5736,8 @@ def group_clip_change_movie_cancel_callback(call):
 
 
 # =============================================================
-# AI PAYMENT WEBHOOK HANDLER — FIXED INTEGER PAID
-# FLUTTERWAVE → AI ORDER → PAYMENT → NOTIFICATION → DELIVERY
+# AI PAYMENT WEBHOOK HANDLER
+# FLUTTERWAVE → PAYMENT → NOTIFICATION → DELIVERY → DELETE/EDIT
 # =============================================================
 
 def handle_ai_order_payment(
@@ -5748,83 +5748,41 @@ def handle_ai_order_payment(
     payload
 ):
 
-    ai_order_debug(
-        "AI HANDLER STEP 1 — WEBHOOK CALL RECEIVED",
-        f"Order ID: {order_id}\n"
-        f"Reference: {raw_reference}\n"
-        f"Paid Amount: {paid_amount}\n"
-        f"Currency: {currency}"
-    )
-
     try:
 
         # =====================================================
         # 1. VALIDATE PAYMENT INFORMATION
         # =====================================================
 
-        ai_order_debug(
-            "AI HANDLER STEP 2 — VALIDATING PAYMENT",
-            str(payload)
-        )
-
         if str(currency).upper() != "NGN":
-
-            ai_order_debug(
-                "AI PAYMENT REJECTED — WRONG CURRENCY",
-                str(currency)
-            )
-
             return False
 
-        if int(paid_amount or 0) <= 0:
-
-            ai_order_debug(
-                "AI PAYMENT REJECTED — INVALID AMOUNT",
-                str(paid_amount)
-            )
-
+        if int(float(paid_amount or 0)) <= 0:
             return False
 
         if not raw_reference or not str(raw_reference).startswith(
             str(order_id) + "_"
         ):
-
-            ai_order_debug(
-                "AI PAYMENT REJECTED — REFERENCE MISMATCH",
-                f"Order ID: {order_id}\n"
-                f"Reference: {raw_reference}"
-            )
-
             return False
-
-        ai_order_debug(
-            "AI HANDLER STEP 3 — PAYMENT VALIDATION PASSED"
-        )
 
         # =====================================================
         # 2. CONNECT TO ALL CHAT DATABASE
         # =====================================================
 
-        ai_order_debug(
-            "AI HANDLER STEP 4 — CONNECTING TO ALL CHAT DB"
-        )
-
         conn = get_all_chat_db_conn()
         cur = None
+
+        checker_chat_id = None
+        checker_message_id = None
+
+        order_message_chat_id = None
+        order_message_id = None
 
         try:
 
             cur = conn.cursor(
                 cursor_factory=RealDictCursor
             )
-
-            ai_order_debug(
-                "AI HANDLER STEP 5 — DATABASE CONNECTED"
-            )
-
-            # -------------------------------------------------
-            # FIND AI ORDER
-            # -------------------------------------------------
 
             cur.execute(
                 """
@@ -5835,7 +5793,11 @@ def handle_ai_order_payment(
                     paid,
                     type,
                     group_key,
-                    selected_movie_title
+                    selected_movie_title,
+                    selected_movie_year,
+                    task_id,
+                    checker_chat_id,
+                    checker_message_id
                 FROM bot_order
                 WHERE id=%s
                 LIMIT 1
@@ -5845,18 +5807,7 @@ def handle_ai_order_payment(
 
             order = cur.fetchone()
 
-            ai_order_debug(
-                "AI HANDLER STEP 6 — BOT ORDER SEARCH RESULT",
-                str(order)
-            )
-
             if not order:
-
-                ai_order_debug(
-                    "AI ORDER NOT FOUND IN bot_order",
-                    str(order_id)
-                )
-
                 return False
 
             user_id = order.get("user_id")
@@ -5865,8 +5816,6 @@ def handle_ai_order_payment(
                 order.get("amount") or 0
             )
 
-            # IMPORTANT:
-            # bot_order.paid IS INTEGER (0 OR 1)
             already_paid = int(
                 order.get("paid") or 0
             )
@@ -5878,59 +5827,71 @@ def handle_ai_order_payment(
                 or "AI MOVIE ORDER"
             )
 
-            ai_order_debug(
-                "AI HANDLER STEP 7 — ORDER DETAILS",
-                f"User ID: {user_id}\n"
-                f"Expected Amount: {expected_amount}\n"
-                f"Paid: {already_paid}\n"
-                f"Type: {order.get('type')}\n"
-                f"Group Key: {group_key}\n"
-                f"Movie: {movie_title}"
-            )
+            movie_year = order.get("selected_movie_year")
+
+            task_id = order.get("task_id")
+
+            checker_chat_id = order.get("checker_chat_id")
+            checker_message_id = order.get("checker_message_id")
+
+            # -------------------------------------------------
+            # FIND CUSTOMER PAYMENT MESSAGE IDs
+            # -------------------------------------------------
+
+            if task_id:
+
+                cur.execute(
+                    """
+                    SELECT payload
+                    FROM tasks
+                    WHERE task_id=%s
+                    LIMIT 1
+                    """,
+                    (str(task_id),)
+                )
+
+                task_row = cur.fetchone()
+
+                if task_row:
+
+                    task_payload = task_row.get("payload")
+
+                    if isinstance(task_payload, str):
+
+                        import json
+
+                        try:
+                            task_payload = json.loads(task_payload)
+                        except Exception:
+                            task_payload = {}
+
+                    if isinstance(task_payload, dict):
+
+                        order_message_chat_id = task_payload.get(
+                            "order_message_chat_id"
+                        )
+
+                        order_message_id = task_payload.get(
+                            "order_message_id"
+                        )
 
             # -------------------------------------------------
             # CHECK PAYMENT AMOUNT
             # -------------------------------------------------
 
-            if int(paid_amount) < expected_amount:
-
-                ai_order_debug(
-                    "AI PAYMENT REJECTED — AMOUNT TOO SMALL",
-                    f"Expected: {expected_amount}\n"
-                    f"Received: {paid_amount}"
-                )
-
+            if int(float(paid_amount)) < expected_amount:
                 return False
-
-            ai_order_debug(
-                "AI HANDLER STEP 8 — PAYMENT AMOUNT VERIFIED"
-            )
 
             # -------------------------------------------------
             # CHECK ALREADY PAID
             # -------------------------------------------------
 
             if already_paid == 1:
-
-                ai_order_debug(
-                    "AI ORDER ALREADY PAID",
-                    f"Order ID: {order_id}\n"
-                    f"Reference: {raw_reference}"
-                )
-
                 return True
 
             # -------------------------------------------------
             # MARK AI ORDER AS PAID
-            #
-            # FIX:
-            # paid IS INTEGER, NOT BOOLEAN.
-            # USE 1 AND 0 INSTEAD OF TRUE AND FALSE.
             # -------------------------------------------------
-
-            ai_order_debug(
-                "AI HANDLER STEP 9 — MARKING ORDER AS PAID"
-            )
 
             cur.execute(
                 """
@@ -5948,37 +5909,20 @@ def handle_ai_order_payment(
 
             updated_rows = cur.rowcount
 
-            ai_order_debug(
-                "AI HANDLER STEP 10 — PAYMENT UPDATE RESULT",
-                f"Updated rows: {updated_rows}"
-            )
-
             if updated_rows != 1:
 
                 conn.rollback()
-
-                ai_order_debug(
-                    "AI PAYMENT UPDATE FAILED",
-                    f"Updated rows: {updated_rows}"
-                )
-
                 return False
 
             conn.commit()
 
-            ai_order_debug(
-                "AI HANDLER STEP 11 — PAYMENT COMMITTED",
-                f"Order ID: {order_id}"
-            )
-
         except Exception:
 
             conn.rollback()
-
-            ai_order_debug_exception(
-                "AI HANDLER DATABASE ERROR"
+            logging.exception(
+                "AI HANDLER DATABASE ERROR order=%s",
+                order_id
             )
-
             raise
 
         finally:
@@ -5989,13 +5933,33 @@ def handle_ai_order_payment(
             conn.close()
 
         # =====================================================
-        # 3. PAYMENT NOTIFICATION
+        # 3. GET FULL USER NAME FROM TELEGRAM
         # =====================================================
 
-        ai_order_debug(
-            "AI HANDLER STEP 12 — SENDING ADMIN NOTIFICATION",
-            f"Order ID: {order_id}"
-        )
+        try:
+
+            full_name, username = ai_order_get_user_info(user_id)
+
+            full_name = str(
+                full_name or "Malam"
+            ).strip()
+
+            if not full_name:
+                full_name = "Malam"
+
+        except Exception:
+
+            logging.exception(
+                "AI USER INFORMATION FETCH FAILED user=%s",
+                user_id
+            )
+
+            full_name = "Malam"
+
+        # =====================================================
+        # 4. PAYMENT NOTIFICATION
+        # MUST BE SENT BEFORE MOVIE DELIVERY
+        # =====================================================
 
         notification_sent = ai_order_send_payment_notification(
             user_id=user_id,
@@ -6004,56 +5968,24 @@ def handle_ai_order_payment(
             amount=paid_amount
         )
 
-        ai_order_debug(
-            "AI HANDLER STEP 13 — NOTIFICATION RESULT",
-            f"Sent: {notification_sent}"
-        )
-
         # =====================================================
-        # 4. FETCH DELIVERY ITEMS
+        # 5. FETCH DELIVERY ITEMS
         # =====================================================
 
         if not group_key:
-
-            ai_order_debug(
-                "AI DELIVERY STOPPED — GROUP KEY MISSING",
-                f"Order ID: {order_id}"
-            )
-
             return False
-
-        ai_order_debug(
-            "AI HANDLER STEP 14 — FETCHING DELIVERY ITEMS",
-            f"Order ID: {order_id}\n"
-            f"Group Key: {group_key}"
-        )
 
         delivery_items = ai_order_fetch_delivery_items(
             order_id=order_id,
             group_key=group_key
         )
 
-        ai_order_debug(
-            "AI HANDLER STEP 15 — DELIVERY ITEMS FETCH RESULT",
-            f"Items found: {len(delivery_items)}"
-        )
-
         if not delivery_items:
-
-            ai_order_debug(
-                "AI DELIVERY STOPPED — NO DELIVERY ITEMS",
-                f"Order ID: {order_id}"
-            )
-
             return False
 
         # =====================================================
-        # 5. SORT DELIVERY ITEMS
+        # 6. SORT DELIVERY ITEMS
         # =====================================================
-
-        ai_order_debug(
-            "AI HANDLER STEP 16 — SORTING DELIVERY ITEMS"
-        )
 
         delivery_items = ai_order_sort_delivery_items(
             delivery_items
@@ -6061,20 +5993,36 @@ def handle_ai_order_payment(
 
         total_items = len(delivery_items)
 
-        ai_order_debug(
-            "AI HANDLER STEP 17 — DELIVERY ITEMS SORTED",
-            f"Total items: {total_items}"
-        )
-
         # =====================================================
-        # 6. SEND FILES TO USER
+        # 7. SEND CONGRATULATORY MESSAGE BEFORE MOVIE
         # =====================================================
 
-        ai_order_debug(
-            "AI HANDLER STEP 18 — STARTING TELEGRAM DELIVERY",
-            f"User ID: {user_id}\n"
-            f"Total files: {total_items}"
+        greeting_message = (
+            "🎉🎊ALHAMDULILAH 🎈😍\n\n"
+            f"{full_name}\n\n"
+            "An karbi biyan ka 🥰\n"
+            "Kuma ga fim din da ka turo Short video dinsa Complete 😍\n"
+            "👇👇👇👇👇👇👇👇👇"
         )
+
+        try:
+
+            bot.send_message(
+                chat_id=user_id,
+                text=greeting_message
+            )
+
+        except Exception:
+
+            logging.exception(
+                "AI CUSTOMER GREETING FAILED order=%s",
+                order_id
+            )
+
+        # =====================================================
+        # 8. SEND FILES TO USER
+        # RETRY ONCE IF DELIVERY FAILS
+        # =====================================================
 
         delivered_count = 0
         failed_count = 0
@@ -6084,48 +6032,82 @@ def handle_ai_order_payment(
             start=1
         ):
 
+            file_id = item.get("file_id")
+
+            if not file_id:
+
+                failed_count += 1
+
+                logging.error(
+                    "AI DELIVERY FILE ID EMPTY order=%s item=%s",
+                    order_id,
+                    item.get("item_id")
+                )
+
+                continue
+
+            caption = ai_order_build_caption(
+                item=item,
+                item_index=index,
+                total_items=total_items,
+                order_title=movie_title
+            )
+
+            file_name = str(
+                item.get("file_name") or ""
+            ).lower()
+
+            video_extensions = (
+                ".mp4",
+                ".mkv",
+                ".mov",
+                ".avi",
+                ".webm",
+                ".m4v"
+            )
+
+            # -------------------------------------------------
+            # FIRST ATTEMPT
+            # -------------------------------------------------
+
             try:
 
-                ai_order_debug(
-                    "AI DELIVERY STEP 19 — PREPARING FILE",
-                    f"Index: {index}/{total_items}\n"
-                    f"Item ID: {item.get('item_id')}\n"
-                    f"Title: {item.get('title')}\n"
-                    f"File name: {item.get('file_name')}"
-                )
+                if file_name.endswith(video_extensions):
 
-                caption = ai_order_build_caption(
-                    item=item,
-                    item_index=index,
-                    total_items=total_items,
-                    order_title=movie_title
-                )
-
-                file_id = item.get("file_id")
-
-                if not file_id:
-
-                    failed_count += 1
-
-                    ai_order_debug(
-                        "AI DELIVERY ERROR — FILE ID EMPTY",
-                        f"Item ID: {item.get('item_id')}"
+                    bot.send_video(
+                        chat_id=user_id,
+                        video=file_id,
+                        caption=caption,
+                        parse_mode="HTML",
+                        supports_streaming=True
                     )
 
-                    continue
+                else:
 
-                file_name = str(
-                    item.get("file_name") or ""
-                ).lower()
+                    bot.send_document(
+                        chat_id=user_id,
+                        document=file_id,
+                        caption=caption,
+                        parse_mode="HTML"
+                    )
 
-                video_extensions = (
-                    ".mp4",
-                    ".mkv",
-                    ".mov",
-                    ".avi",
-                    ".webm",
-                    ".m4v"
+                delivered_count += 1
+                continue
+
+            except Exception:
+
+                logging.exception(
+                    "AI DELIVERY FIRST ATTEMPT FAILED "
+                    "order=%s item=%s",
+                    order_id,
+                    item.get("item_id")
                 )
+
+            # -------------------------------------------------
+            # SECOND ATTEMPT — RETRY ONCE
+            # -------------------------------------------------
+
+            try:
 
                 if file_name.endswith(video_extensions):
 
@@ -6148,72 +6130,203 @@ def handle_ai_order_payment(
 
                 delivered_count += 1
 
-                ai_order_debug(
-                    "AI DELIVERY STEP 20 — FILE SENT SUCCESSFULLY",
-                    f"Item: {index}/{total_items}\n"
-                    f"Item ID: {item.get('item_id')}\n"
-                    f"Delivered: {delivered_count}"
-                )
-
             except Exception:
 
                 failed_count += 1
 
-                ai_order_debug_exception(
-                    f"AI DELIVERY ERROR — ITEM {index}"
-                )
-
                 logging.exception(
-                    "AI DELIVERY FAILED order=%s item=%s",
+                    "AI DELIVERY RETRY FAILED "
+                    "order=%s item=%s",
                     order_id,
                     item.get("item_id")
                 )
 
         # =====================================================
-        # 7. FINAL DELIVERY REPORT
+        # 9. DELIVERY FAILURE — INFORM USER AND ADMIN
         # =====================================================
 
-        ai_order_debug(
-            "AI HANDLER STEP 21 — DELIVERY FINISHED",
-            f"Order ID: {order_id}\n"
-            f"User ID: {user_id}\n"
-            f"Total files: {total_items}\n"
-            f"Delivered: {delivered_count}\n"
-            f"Failed: {failed_count}\n"
-            f"Admin notification: {notification_sent}"
-        )
+        if failed_count > 0:
+
+            admin_username = str(
+                globals().get("ADMIN_USERNAME", "CEOalgaitabot")
+            ).strip().lstrip("@")
+
+            admin_help_url = (
+                f"https://t.me/{admin_username}"
+            )
+
+            help_markup = telebot.types.InlineKeyboardMarkup()
+
+            help_markup.add(
+                telebot.types.InlineKeyboardButton(
+                    text="ADMIN HELP",
+                    url=admin_help_url
+                )
+            )
+
+            delivery_error_message = (
+                "❌AN SAMU MATSALA WAJEN AIKO FIM DINKA, "
+                "TANGARDAR NA'URA🥹\n"
+                "Dan Allah tuntubi Admin\n"
+                "👇👇"
+            )
+
+            try:
+
+                bot.send_message(
+                    chat_id=user_id,
+                    text=delivery_error_message,
+                    reply_markup=help_markup
+                )
+
+            except Exception:
+
+                logging.exception(
+                    "AI DELIVERY ERROR MESSAGE FAILED user=%s",
+                    user_id
+                )
+
+            # -------------------------------------------------
+            # SEND USER ID ONLY TO ADMIN
+            # -------------------------------------------------
+
+            admin_targets = globals().get("ADMINS") or []
+
+            if not admin_targets:
+
+                single_admin = globals().get("ADMIN_ID")
+
+                if single_admin:
+                    admin_targets = [single_admin]
+
+            for admin_id in admin_targets:
+
+                try:
+
+                    bot.send_message(
+                        chat_id=admin_id,
+                        text=(
+                            "❌ AI MOVIE DELIVERY FAILED\n\n"
+                            f"User ID: {user_id}\n"
+                            "Customer's movie delivery failed after retry."
+                        )
+                    )
+
+                except Exception:
+
+                    logging.exception(
+                        "AI DELIVERY ADMIN ALERT FAILED admin=%s",
+                        admin_id
+                    )
 
         # =====================================================
-        # 8. FINAL STATUS
+        # 10. SEND THANK YOU MESSAGE AFTER MOVIE DELIVERY
+        # =====================================================
+
+        if delivered_count > 0:
+
+            thank_you_message = (
+                "Mun gode da amfani da AlgaitaBot🙏\n"
+                "Fatan zaka ji dadin kallo, idan kana da korafi "
+                "Tuntubi Admin🤗💚"
+            )
+
+            try:
+
+                bot.send_message(
+                    chat_id=user_id,
+                    text=thank_you_message
+                )
+
+            except Exception:
+
+                logging.exception(
+                    "AI THANK YOU MESSAGE FAILED order=%s",
+                    order_id
+                )
+
+        # =====================================================
+        # 11. DELETE CUSTOMER PAY NOW MESSAGE
+        # AFTER ALL MOVIES ARE DELIVERED
+        # =====================================================
+
+        if delivered_count == total_items and total_items > 0:
+
+            if order_message_chat_id and order_message_id:
+
+                try:
+
+                    bot.delete_message(
+                        chat_id=int(order_message_chat_id),
+                        message_id=int(order_message_id)
+                    )
+
+                except Exception:
+
+                    logging.exception(
+                        "AI CUSTOMER PAYMENT MESSAGE DELETE FAILED order=%s",
+                        order_id
+                    )
+
+            # =================================================
+            # 12. EDIT MOVIE CHECKER MESSAGE TO PAID
+            # REMOVE CHANGE MOVIE BUTTON
+            # =================================================
+
+            if checker_chat_id and checker_message_id:
+
+                try:
+
+                    paid_caption = (
+                        "AI MOVIE ORDER — PAID\n\n"
+                        f"User ID: {user_id}\n"
+                        f"Movie: {movie_title}\n"
+                        f"Year: {movie_year or 'N/A'}\n"
+                        f"Order ID: {order_id}\n\n"
+                        "STATUS: PAID"
+                    )
+
+                    bot.edit_message_caption(
+                        chat_id=int(checker_chat_id),
+                        message_id=int(checker_message_id),
+                        caption=paid_caption,
+                        reply_markup=None
+                    )
+
+                except Exception:
+
+                    logging.exception(
+                        "AI MOVIE CHECKER MESSAGE EDIT FAILED order=%s",
+                        order_id
+                    )
+
+        # =====================================================
+        # 13. FINAL DELIVERY REPORT
         # =====================================================
 
         if delivered_count == total_items:
 
-            ai_order_debug(
-                "AI ORDER COMPLETED SUCCESSFULLY",
-                f"Order ID: {order_id}\n"
-                f"Delivered: {delivered_count}/{total_items}"
+            logging.info(
+                "AI ORDER COMPLETED order=%s delivered=%s",
+                order_id,
+                delivered_count
             )
 
             return True
 
-        ai_order_debug(
-            "AI ORDER PARTIALLY DELIVERED",
-            f"Order ID: {order_id}\n"
-            f"Delivered: {delivered_count}/{total_items}\n"
-            f"Failed: {failed_count}"
+        logging.warning(
+            "AI ORDER PARTIALLY DELIVERED order=%s delivered=%s failed=%s",
+            order_id,
+            delivered_count,
+            failed_count
         )
 
         return False
 
     except Exception:
 
-        ai_order_debug_exception(
-            "AI PAYMENT HANDLER FATAL ERROR"
-        )
-
         logging.exception(
-            "AI PAYMENT HANDLER FAILED order=%s",
+            "AI PAYMENT HANDLER FATAL ERROR order=%s",
             order_id
         )
 
@@ -6225,79 +6338,12 @@ def handle_ai_order_payment(
 # =============================================================
 
 
-
-
-
 #Start Asister webhook block
 
 # =============================================================
-# AI PAYMENT DEBUG — SEND ALL DEBUG TO ADMIN
+# AI PAYMENT NOTIFICATION
+# AI_NOTIFICATION IS DEFINED AT THE TOP OF YOUR MAIN FILE
 # =============================================================
-
-def ai_order_debug(stage, details=None):
-
-    try:
-        admin_id = globals().get("ADMIN_ID")
-
-        if not admin_id:
-            logging.error(
-                "AI DEBUG: ADMIN_ID NOT CONFIGURED | stage=%s",
-                stage
-            )
-            return False
-
-        message = (
-            "🔍 <b>AI PAYMENT DEBUG</b>\n\n"
-            f"📍 <b>Stage:</b> {group_clip_safe(stage)}\n"
-        )
-
-        if details:
-            message += (
-                "\n📋 <b>Details:</b>\n"
-                f"<code>{group_clip_safe(details)}</code>"
-            )
-
-        bot.send_message(
-            admin_id,
-            message,
-            parse_mode="HTML"
-        )
-
-        logging.info(
-            "AI PAYMENT DEBUG | stage=%s | details=%s",
-            stage,
-            details
-        )
-
-        return True
-
-    except Exception:
-        logging.exception("AI DEBUG TELEGRAM SEND FAILED")
-        return False
-
-
-def ai_order_debug_exception(stage):
-
-    try:
-        error_text = traceback.format_exc()
-
-        ai_order_debug(
-            stage,
-            error_text[-3500:]
-        )
-
-    except Exception:
-        logging.exception(
-            "AI DEBUG EXCEPTION REPORT FAILED"
-        )
-
-
-# =============================================================
-# AI PAYMENT NOTIFICATION — FORMAT DAGA HOTONKA
-# =============================================================
-
-AI_NOTIFICATION = -1001234567890  # SAKA AINIHIN GROUP ID NAKA
-
 
 def ai_order_send_payment_notification(
     user_id,
@@ -6305,35 +6351,16 @@ def ai_order_send_payment_notification(
     movie_title,
     amount
 ):
-    ai_order_debug(
-        "STEP 1 — PAYMENT NOTIFICATION FUNCTION ENTERED",
-        f"User ID: {user_id}\n"
-        f"Order ID: {order_id}\n"
-        f"Movie: {movie_title}\n"
-        f"Amount: {amount}"
-    )
 
     notification_group = globals().get("AI_NOTIFICATION")
 
     if not notification_group:
-        ai_order_debug(
-            "ERROR — AI_NOTIFICATION GROUP NOT CONFIGURED"
-        )
         logging.error("AI_NOTIFICATION GROUP NOT CONFIGURED")
         return False
 
-    ai_order_debug(
-        "STEP 2 — NOTIFICATION GROUP FOUND",
-        str(notification_group)
-    )
-
     try:
-        full_name, username = ai_order_get_user_info(user_id)
 
-        ai_order_debug(
-            "STEP 3 — USER INFORMATION FETCHED",
-            f"Name: {full_name}\nUsername: {username}"
-        )
+        full_name, username = ai_order_get_user_info(user_id)
 
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -6347,15 +6374,10 @@ def ai_order_send_payment_notification(
 
 🗃 <b>Order ID:</b> <code>{group_clip_safe(order_id)}</code>
 
-💰 <b>Amount:</b> ₦{int(amount)}
+💰 <b>Amount:</b> ₦{int(float(amount))}
 ⏰ <b>Time:</b> {now}
 
 <i>Wannan sabon tsarin sanarwar AI ne, ba tsohon wallet notification ba.</i>"""
-
-        ai_order_debug(
-            "STEP 4 — SENDING PAYMENT NOTIFICATION",
-            f"Group: {notification_group}\nOrder: {order_id}"
-        )
 
         bot.send_message(
             notification_group,
@@ -6363,21 +6385,15 @@ def ai_order_send_payment_notification(
             parse_mode="HTML"
         )
 
-        ai_order_debug(
-            "STEP 5 — PAYMENT NOTIFICATION SENT SUCCESSFULLY",
-            f"Order ID: {order_id}"
-        )
-
         return True
 
     except Exception:
-        ai_order_debug_exception(
-            "ERROR — PAYMENT NOTIFICATION FAILED"
-        )
+
         logging.exception(
             "AI PAYMENT NOTIFICATION FAILED order=%s",
             order_id
         )
+
         return False
 
 
@@ -6390,30 +6406,18 @@ def ai_order_send_payment_notification(
 
 def ai_order_fetch_delivery_items(order_id, group_key):
 
-    ai_order_debug(
-        "STEP 6 — DELIVERY ITEMS FETCH STARTED",
-        f"Order ID: {order_id}\nGroup Key: {group_key}"
-    )
-
     # ---------------------------------------------------------
     # 1. READ PURCHASED ITEMS
     # CHECK WHETHER bot_order_items HAS file_name COLUMN
     # ---------------------------------------------------------
 
-    ai_order_debug(
-        "STEP 7 — CONNECTING TO ALL CHAT DATABASE"
-    )
-
     order_conn = get_all_chat_db_conn()
     order_cur = None
 
     try:
+
         order_cur = order_conn.cursor(
             cursor_factory=RealDictCursor
-        )
-
-        ai_order_debug(
-            "STEP 8 — ALL CHAT DATABASE CONNECTED"
         )
 
         order_cur.execute("""
@@ -6426,16 +6430,13 @@ def ai_order_fetch_delivery_items(order_id, group_key):
         """)
 
         column_info = order_cur.fetchone()
+
         has_file_name = bool(
             column_info and column_info.get("has_file_name")
         )
 
-        ai_order_debug(
-            "STEP 9 — bot_order_items COLUMN CHECK",
-            f"file_name exists: {has_file_name}"
-        )
-
         if has_file_name:
+
             order_cur.execute("""
                 SELECT item_id, file_id, price, file_name
                 FROM bot_order_items
@@ -6444,6 +6445,7 @@ def ai_order_fetch_delivery_items(order_id, group_key):
             """, (str(order_id),))
 
         else:
+
             order_cur.execute("""
                 SELECT item_id, file_id, price, NULL AS file_name
                 FROM bot_order_items
@@ -6453,28 +6455,23 @@ def ai_order_fetch_delivery_items(order_id, group_key):
 
         purchased_items = order_cur.fetchall()
 
-        ai_order_debug(
-            "STEP 10 — PURCHASED ITEMS QUERY COMPLETED",
-            f"Order ID: {order_id}\n"
-            f"Items found: {len(purchased_items)}"
+    except Exception:
+
+        logging.exception(
+            "AI PURCHASED ITEMS QUERY FAILED order=%s",
+            order_id
         )
 
-    except Exception:
-        ai_order_debug_exception(
-            "ERROR — ALL CHAT DATABASE / PURCHASED ITEMS QUERY"
-        )
         raise
 
     finally:
+
         if order_cur:
             order_cur.close()
+
         order_conn.close()
 
     if not purchased_items:
-        ai_order_debug(
-            "ERROR — NO PURCHASED ITEMS FOUND",
-            f"Order ID: {order_id}"
-        )
         return []
 
     purchased_ids = {
@@ -6483,31 +6480,18 @@ def ai_order_fetch_delivery_items(order_id, group_key):
         if x.get("item_id") is not None
     }
 
-    ai_order_debug(
-        "STEP 11 — PURCHASED ITEM IDS FOUND",
-        str(purchased_ids)
-    )
-
     # ---------------------------------------------------------
     # 2. FIND ORIGINAL MOVIE RECORDS USING group_key
     # CHECK WHETHER items HAS file_name COLUMN
     # ---------------------------------------------------------
 
-    ai_order_debug(
-        "STEP 12 — CONNECTING TO MOVIE DATABASE",
-        f"Group Key: {group_key}"
-    )
-
     movie_conn = get_conn()
     movie_cur = None
 
     try:
+
         movie_cur = movie_conn.cursor(
             cursor_factory=RealDictCursor
-        )
-
-        ai_order_debug(
-            "STEP 13 — MOVIE DATABASE CONNECTED"
         )
 
         movie_cur.execute("""
@@ -6526,12 +6510,8 @@ def ai_order_fetch_delivery_items(order_id, group_key):
             and movie_column_info.get("has_file_name")
         )
 
-        ai_order_debug(
-            "STEP 14 — items TABLE COLUMN CHECK",
-            f"items.file_name exists: {items_has_file_name}"
-        )
-
         if items_has_file_name:
+
             movie_cur.execute("""
                 SELECT
                     id,
@@ -6544,6 +6524,7 @@ def ai_order_fetch_delivery_items(order_id, group_key):
             """, (str(group_key),))
 
         else:
+
             movie_cur.execute("""
                 SELECT
                     id,
@@ -6557,32 +6538,26 @@ def ai_order_fetch_delivery_items(order_id, group_key):
 
         movie_rows = movie_cur.fetchall()
 
-        ai_order_debug(
-            "STEP 15 — ORIGINAL MOVIE QUERY COMPLETED",
-            f"Group Key: {group_key}\n"
-            f"Movie records found: {len(movie_rows)}"
+    except Exception:
+
+        logging.exception(
+            "AI MOVIE ITEMS QUERY FAILED group_key=%s",
+            group_key
         )
 
-    except Exception:
-        ai_order_debug_exception(
-            "ERROR — MOVIE DATABASE / ITEMS QUERY"
-        )
         raise
 
     finally:
+
         if movie_cur:
             movie_cur.close()
+
         movie_conn.close()
 
     movie_by_id = {
         int(x["id"]): x
         for x in movie_rows
     }
-
-    ai_order_debug(
-        "STEP 16 — ORIGINAL MOVIES INDEXED",
-        f"Movie IDs: {list(movie_by_id.keys())}"
-    )
 
     # ---------------------------------------------------------
     # 3. MATCH PURCHASED ITEMS
@@ -6603,12 +6578,6 @@ def ai_order_fetch_delivery_items(order_id, group_key):
         original = movie_by_id.get(item_id)
 
         if not original:
-            ai_order_debug(
-                "ERROR — ORIGINAL MOVIE NOT FOUND",
-                f"Order: {order_id}\n"
-                f"Item ID: {item_id}\n"
-                f"Group Key: {group_key}"
-            )
 
             logging.error(
                 "AI ORIGINAL ITEM NOT FOUND "
@@ -6617,41 +6586,30 @@ def ai_order_fetch_delivery_items(order_id, group_key):
                 item_id,
                 group_key
             )
+
             continue
 
         delivery_file_id = purchased.get("file_id")
 
         if not delivery_file_id:
-            ai_order_debug(
-                "ERROR — PURCHASED FILE ID MISSING",
-                f"Order: {order_id}\nItem ID: {item_id}"
-            )
 
             logging.error(
                 "AI ORDER FILE ID MISSING order=%s item_id=%s",
                 order_id,
                 item_id
             )
+
             continue
 
-        # FIRST: file_name FROM bot_order_items
         file_name = (
             purchased.get("file_name") or ""
         ).strip()
 
-        # SECOND: FALLBACK TO items.file_name
         if not file_name:
+
             file_name = (
                 original.get("file_name") or ""
             ).strip()
-
-        ai_order_debug(
-            "STEP 17 — PURCHASED ITEM MATCHED",
-            f"Item ID: {item_id}\n"
-            f"Title: {original.get('title')}\n"
-            f"File ID exists: {bool(delivery_file_id)}\n"
-            f"File name: {file_name or 'EMPTY'}"
-        )
 
         delivery_items.append({
             "item_id": item_id,
@@ -6660,13 +6618,6 @@ def ai_order_fetch_delivery_items(order_id, group_key):
             "file_name": file_name,
             "group_key": original.get("group_key")
         })
-
-    ai_order_debug(
-        "STEP 18 — DELIVERY ITEMS FETCH FINISHED",
-        f"Order: {order_id}\n"
-        f"Purchased items: {len(purchased_items)}\n"
-        f"Delivery items ready: {len(delivery_items)}"
-    )
 
     return delivery_items
 
@@ -6678,32 +6629,23 @@ def ai_order_fetch_delivery_items(order_id, group_key):
 
 def ai_order_smart_detect_company(admin_title):
 
-    ai_order_debug(
-        "STEP 19 — COMPANY DETECTION STARTED",
-        str(admin_title)
-    )
-
     title = str(admin_title or "")
 
     try:
+
         detector = globals().get(
             "group_clip_detect_company"
         )
 
         if callable(detector):
+
             detected = detector(title)
 
             if detected:
-                ai_order_debug(
-                    "STEP 20 — COMPANY DETECTED",
-                    str(detected)
-                )
                 return str(detected).strip()
 
     except Exception:
-        ai_order_debug_exception(
-            "ERROR — EXISTING COMPANY DETECTOR"
-        )
+
         logging.exception(
             "AI ORDER COMPANY DETECTOR FAILED"
         )
@@ -6726,20 +6668,23 @@ def ai_order_smart_detect_company(admin_title):
     )
 
     try:
+
         normalize = globals().get(
             "group_clip_normalize_words"
         )
 
         if callable(normalize):
+
             normalized_title = normalize(title)
+
         else:
+
             normalized_title = re.sub(
                 r"[^a-z0-9]+",
                 " ",
                 title.casefold()
             ).strip()
 
-        # Parentheses receive priority.
         parenthetical = re.findall(
             r"\(([^()]*)\)",
             title
@@ -6748,8 +6693,11 @@ def ai_order_smart_detect_company(admin_title):
         for section in parenthetical:
 
             if callable(normalize):
+
                 normalized_section = normalize(section)
+
             else:
+
                 normalized_section = re.sub(
                     r"[^a-z0-9]+",
                     " ",
@@ -6759,8 +6707,11 @@ def ai_order_smart_detect_company(admin_title):
             for company in priority:
 
                 if callable(normalize):
+
                     token = normalize(company)
+
                 else:
+
                     token = re.sub(
                         r"[^a-z0-9]+",
                         " ",
@@ -6768,18 +6719,16 @@ def ai_order_smart_detect_company(admin_title):
                     ).strip()
 
                 if token and token in normalized_section:
-                    ai_order_debug(
-                        "STEP 21 — COMPANY FOUND IN PARENTHESES",
-                        str(company)
-                    )
                     return str(company)
 
-        # Search the complete admin title.
         for company in priority:
 
             if callable(normalize):
+
                 token = normalize(company)
+
             else:
+
                 token = re.sub(
                     r"[^a-z0-9]+",
                     " ",
@@ -6790,24 +6739,14 @@ def ai_order_smart_detect_company(admin_title):
                 r"(?<!\w)" + re.escape(token) + r"(?!\w)",
                 normalized_title
             ):
-                ai_order_debug(
-                    "STEP 22 — COMPANY FOUND IN TITLE",
-                    str(company)
-                )
+
                 return str(company)
 
     except Exception:
-        ai_order_debug_exception(
-            "ERROR — COMPANY DETECTION FALLBACK"
-        )
+
         logging.exception(
             "AI ORDER COMPANY FALLBACK FAILED"
         )
-
-    ai_order_debug(
-        "STEP 23 — NO COMPANY DETECTED",
-        title
-    )
 
     return None
 
@@ -6819,11 +6758,6 @@ def ai_order_smart_detect_company(admin_title):
 
 def ai_order_get_episode_number(file_name):
 
-    ai_order_debug(
-        "STEP 24 — EPISODE NUMBER EXTRACTION",
-        str(file_name)
-    )
-
     name = str(file_name or "")
 
     patterns = (
@@ -6834,17 +6768,11 @@ def ai_order_get_episode_number(file_name):
     )
 
     for pattern in patterns:
+
         match = re.search(pattern, name)
 
         if match:
-            episode = int(match.group(1))
-
-            ai_order_debug(
-                "STEP 25 — EPISODE NUMBER DETECTED",
-                f"File: {name}\nEpisode: {episode}"
-            )
-
-            return episode
+            return int(match.group(1))
 
     numbers = re.findall(
         r"(?<!\d)(\d{1,3})(?!\d)",
@@ -6852,19 +6780,11 @@ def ai_order_get_episode_number(file_name):
     )
 
     for number in numbers:
+
         value = int(number)
 
         if not (1900 <= value <= 2100):
-            ai_order_debug(
-                "STEP 26 — EPISODE NUMBER FOUND",
-                f"File: {name}\nEpisode: {value}"
-            )
             return value
-
-    ai_order_debug(
-        "STEP 27 — EPISODE NUMBER NOT FOUND",
-        name
-    )
 
     return 999999
 
@@ -6875,11 +6795,6 @@ def ai_order_get_episode_number(file_name):
 # =============================================================
 
 def ai_order_sort_delivery_items(items):
-
-    ai_order_debug(
-        "STEP 28 — DELIVERY SORTING STARTED",
-        f"Items received: {len(items)}"
-    )
 
     processed_items = []
 
@@ -6909,15 +6824,6 @@ def ai_order_sort_delivery_items(items):
         for x in processed_items
     ]
 
-    ai_order_debug(
-        "STEP 29 — DELIVERY SORTING COMPLETED",
-        "\n".join(
-            f"{x.get('item_id')} | {x.get('file_name')} | "
-            f"Episode {ai_order_get_episode_number(x.get('file_name'))}"
-            for x in sorted_items
-        )
-    )
-
     return sorted_items
 
 
@@ -6933,14 +6839,6 @@ def ai_order_build_caption(
     order_title
 ):
 
-    ai_order_debug(
-        "STEP 30 — DELIVERY CAPTION FUNCTION ENTERED",
-        f"Item: {item.get('item_id')}\n"
-        f"Index: {item_index}\n"
-        f"Total: {total_items}\n"
-        f"Order title: {order_title}"
-    )
-
     admin_title = (
         item.get("title")
         or order_title
@@ -6953,21 +6851,15 @@ def ai_order_build_caption(
     )
 
     try:
-        ai_order_debug(
-            "STEP 31 — CLEANING ADMIN TITLE",
-            str(admin_title)
-        )
 
         admin_title = smart_clean_spaces(
             str(admin_title)
         )
 
-        # Detect the company from the admin title.
         company = ai_order_smart_detect_company(
             admin_title
         )
 
-        # Add company tag only when it is not already present.
         if company:
 
             normalize = globals().get(
@@ -6975,9 +6867,12 @@ def ai_order_build_caption(
             )
 
             if callable(normalize):
+
                 normalized_title = normalize(admin_title)
                 normalized_company = normalize(company)
+
             else:
+
                 normalized_title = re.sub(
                     r"[^a-z0-9]+",
                     " ",
@@ -6991,17 +6886,11 @@ def ai_order_build_caption(
                 ).strip()
 
             if normalized_company not in normalized_title:
+
                 admin_title = (
                     f"{admin_title} ({company})"
                 )
 
-        ai_order_debug(
-            "STEP 32 — BUILDING SMART DELIVERY CAPTION",
-            f"Title: {admin_title}\n"
-            f"Original file name: {original_file_name}"
-        )
-
-        # Use the SAME smart caption builder as old delivery.
         caption = smart_build_delivery_caption(
             admin_title=admin_title,
             original_file_name=original_file_name,
@@ -7009,8 +6898,8 @@ def ai_order_build_caption(
             total_items=total_items
         )
 
-        # Make the movie title line uppercase.
         if caption:
+
             first_line, separator, remaining = (
                 caption.partition("\n")
             )
@@ -7023,18 +6912,9 @@ def ai_order_build_caption(
                 )
             )
 
-        ai_order_debug(
-            "STEP 33 — DELIVERY CAPTION BUILT SUCCESSFULLY",
-            caption
-        )
-
         return caption
 
     except Exception:
-
-        ai_order_debug_exception(
-            "ERROR — SMART DELIVERY CAPTION FAILED"
-        )
 
         logging.exception(
             "AI SMART CAPTION FAILED item=%s",
@@ -7052,7 +6932,6 @@ def ai_order_build_caption(
 
 
 #Asister webhook End
-
 
 
 
